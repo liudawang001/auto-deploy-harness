@@ -58,6 +58,14 @@
   - stores request/response evidence under `evidence/`
   - only passes when the response body proves the current trace was handled
   - does not treat HTTP 200 alone as success
+- Extended HTTP trace verification:
+  - supports GET query trace
+  - supports POST JSON trace templates
+  - generates a Gradio-style default `/api/predict` POST verification hint
+- Wired `ClaudeCodeExecutor` into `ProjectAnalyzer` as an optional advisor.
+  - disabled by default
+  - enabled with `AUTO_HARNESS_USE_AGENT_ANALYZER=1`
+  - stores advice as metadata without bypassing deterministic analyzer output
 - Added execution command policy checks for `env_deploy` and `runner`.
   - Commands are rejected before execution if their executable name is not in `allowed_commands`.
   - This is required before enabling broader `--execute` use.
@@ -76,7 +84,7 @@ The system can create a task, scan a repository directory, produce install/run p
 
 1. Expand unit tests for provider parsing, command safety, CLI behavior, and report generation.
 2. Add a fixture demo project under `tests/fixtures`.
-3. Extend HTTP verification beyond GET-only trace checks, including POST JSON and Gradio-specific API calls.
+3. Extend Gradio verification with real API discovery and file/download artifact checks.
 4. Add JSON schema validation for Agent/LLM outputs.
 5. Run a private Xunfei smoke test with local environment variables and verify the exact response format.
 6. Expand command policy with argument-level checks and dangerous pattern detection before enabling broad `--execute` usage.
@@ -90,7 +98,7 @@ The system can create a task, scan a repository directory, produce install/run p
 ### Known Limitations
 
 - Real dependency installation and service startup are disabled by default.
-- `VerifyModule` supports a first GET-based HTTP trace request, but does not yet support POST JSON, Gradio API discovery, browser/UI actions, or CLI trace execution.
+- `VerifyModule` supports GET query trace and POST JSON trace templates, but does not yet support Gradio API discovery, browser/UI actions, file download validation, or CLI trace execution.
 - `RunnerModule` does not yet persist process handles for later cleanup.
 - `XunfeiSparkProvider` currently assumes an Anthropic-compatible HTTP messages interface; add another transport if a selected Spark API variant requires WebSocket signing.
 - The test suite is still minimal and only covers the core dry-run path.

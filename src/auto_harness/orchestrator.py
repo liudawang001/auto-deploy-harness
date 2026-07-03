@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Dict
 
 from auto_harness.config import HarnessConfig
+from auto_harness.agents.claude_code import ClaudeCodeExecutor
 from auto_harness.models.base import read_json, to_plain, write_json
 from auto_harness.models.task import ProjectSpec, RuntimePolicy, TaskSpec
 from auto_harness.modules import EnvDeployModule, ProjectAnalyzer, ReportGenerator, RunnerModule, VerifyModule
@@ -82,7 +83,11 @@ class TaskRunner:
         repo_dir = run_dir / "workspace" / "repo"
         results: Dict[str, Dict] = {}
 
-        analyzer = ProjectAnalyzer()
+        analyzer = ProjectAnalyzer(
+            agent_executor=ClaudeCodeExecutor() if self.config.use_agent_analyzer else None,
+            use_agent=self.config.use_agent_analyzer,
+            agent_timeout_seconds=self.config.agent_timeout_seconds,
+        )
         analyze_result = analyzer.analyze(repo_dir)
         results["analyze"] = to_plain(analyze_result)
         self._save_stage(task_id, "analyze", analyze_result)

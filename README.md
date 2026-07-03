@@ -19,7 +19,8 @@ This repository currently includes:
 - Safe `env_deploy`, `runner`, `verify`, and report modules.
 - Mock LLM provider and Xunfei Anthropic-compatible provider.
 - Claude Code executor wrapper.
-- HTTP trace evidence in `verify`: responses must prove the current trace was handled; HTTP 200 alone is not enough.
+- HTTP trace evidence in `verify`: GET and POST JSON responses must prove the current trace was handled; HTTP 200 alone is not enough.
+- Optional Claude Code analyzer advisor via `AUTO_HARNESS_USE_AGENT_ANALYZER=1`.
 - Progress report in `docs/progress.md`.
 
 ## Quick Start
@@ -67,6 +68,18 @@ Provider smoke test:
 ```bash
 PYTHONPATH=src python3 -m auto_harness.cli llm-test --provider xunfei --prompt "Return JSON only: {\"status\":\"ok\"}"
 ```
+
+## Optional Claude Code Analyzer Advisor
+
+The deterministic analyzer runs by default. To let Claude Code provide optional JSON advice during analysis:
+
+```bash
+export AUTO_HARNESS_USE_AGENT_ANALYZER=1
+export CLAUDE_CODE_CMD="claude --print --output-format json"
+PYTHONPATH=src python3 -m auto_harness.cli deploy --repo ./demo --name demo --dry-run
+```
+
+Agent advice is stored under `analyze_result.json` as optional metadata and does not bypass the deterministic pipeline.
 
 ## Safety Defaults
 

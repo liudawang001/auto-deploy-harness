@@ -1,11 +1,18 @@
 import json
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 
+from auto_harness.agents.base import AgentExecutor, AgentRequest
 from auto_harness.models.result import StageResult
+from auto_harness.providers.json_utils import parse_json_object
 
 
 class ProjectAnalyzer:
+    def __init__(self, agent_executor: Optional[AgentExecutor] = None, use_agent: bool = False, agent_timeout_seconds: int = 900) -> None:
+        self.agent_executor = agent_executor
+        self.use_agent = use_agent
+        self.agent_timeout_seconds = agent_timeout_seconds
+
     def analyze(self, repo_dir: Path) -> StageResult:
         files = self._collect_files(repo_dir)
         frameworks = self._detect_frameworks(repo_dir, files)
@@ -18,6 +25,9 @@ class ProjectAnalyzer:
             "run_candidates": run_candidates,
             "verify_hint": self._verify_hint(frameworks),
         }
+        agent_advice = self._agent_advice(repo_dir, data)
+        if agent_advice:
+            data["agent_advice"] = agent_advice
         return StageResult(
             stage="analyze",
             status="passed",
@@ -81,8 +91,47 @@ class ProjectAnalyzer:
 
     def _verify_hint(self, frameworks: List[str]) -> Dict:
         if "gradio" in frameworks:
-            return {"service_type": "webui", "expected_output": "web_result"}
+            return {
+                "service_type": "webui",
+                "expected_output": "web_result",
+                "request": {
+                    "method": "POST",
+                    "path": "/api/predict",
+                    "json": {"data": ["{{trace_id}}"]},
+                },
+            }
         if "fastapi" in frameworks or "flask" in frameworks:
-            return {"service_type": "api", "expected_output": "json_or_text"}
+            return {
+                "service_type": "api",
+                "expected_output": "json_or_text",
+                "request": {"method": "GET"},
+            }
         return {"service_type": "unknown", "expected_output": "unknown"}
 
+    def _agent_advice(self, repo_dir: Path, analysis: Dict) -> Optional[Dict]:
+        if not self.use_agent or not self.agent_executor:
+            return None
+        prompt = (
+            "You are an AI deployment analyzer. Return JSON only. "
+            "Review the deterministic project analysis and suggest safer install/run/verify improvements. "
+            "Do not propose source code edits.\n\n"
+            + json.dumps(analysis, ensure_ascii=False, indent=2)
+        )
+        result = self.agent_executor.run(
+            AgentRequest(
+                stage="analyze",
+                prompt=prompt,
+                workdir=repo_dir,
+                timeout_seconds=self.agent_timeout_seconds,
+            )
+        )
+        if result.status != "passed":
+            return {"status": "failed", "error": result.error}
+        try:
+            parsed = parse_json_object(result.text)
+        except Exception as exc:  # noqa: BLE001 - advice is optional
+            return {"status": "invalid_json", "error": str(exc), "raw_tail": result.text[-1000:]}
+        if isinstance(parsed, dict):
+            parsed.setdefault("status", "ok")
+            return parsed
+        return {"status": "invalid_shape", "raw": parsed}

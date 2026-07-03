@@ -1,8 +1,10 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
 
 from auto_harness.models.task import ProjectSpec, RuntimePolicy, TaskSpec
+from auto_harness.agents.base import AgentResult
 from auto_harness.modules.analyzer import ProjectAnalyzer
 from auto_harness.modules.env_deploy import EnvDeployModule
 from auto_harness.modules.verify import VerifyModule
@@ -24,6 +26,19 @@ class FakeHttpResponse:
 
     def read(self):
         return self.body.encode("utf-8")
+
+
+class FakeAgentExecutor:
+    def __init__(self, text='{"risk":"low"}'):
+        self.text = text
+        self.requests = []
+
+    def run(self, request):
+        self.requests.append(request)
+        return AgentResult(status="passed", text=self.text)
+
+    def resume(self, session_id, request):
+        return self.run(request)
 
 
 class CoreTests(unittest.TestCase):
@@ -52,6 +67,17 @@ class CoreTests(unittest.TestCase):
             self.assertIn("gradio", result.data["frameworks"])
             self.assertTrue(result.data["install_plan"])
             self.assertTrue(result.data["run_candidates"])
+            self.assertEqual(result.data["verify_hint"]["request"]["method"], "POST")
+
+    def test_analyzer_can_call_optional_agent_advisor(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "README.md").write_text("demo", encoding="utf-8")
+            executor = FakeAgentExecutor()
+            result = ProjectAnalyzer(agent_executor=executor, use_agent=True).analyze(repo)
+            self.assertIn("agent_advice", result.data)
+            self.assertEqual(result.data["agent_advice"]["risk"], "low")
+            self.assertEqual(len(executor.requests), 1)
 
     def test_verify_does_not_pass_without_artifact_evidence(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -84,6 +110,38 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(result.status, "passed")
             self.assertEqual(result.data["status"], "pass")
             self.assertIn("_auto_harness_trace=", captured["url"])
+
+    def test_verify_post_json_trace(self):
+        captured = {}
+
+        def fake_urlopen(req, timeout):
+            captured["url"] = req.full_url
+            captured["method"] = req.get_method()
+            captured["body"] = req.data.decode("utf-8")
+            trace = json.loads(captured["body"])["prompt"].replace("verify ", "")
+            return FakeHttpResponse("accepted verify %s" % trace)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / "workspace" / "repo").mkdir(parents=True)
+            result = VerifyModule(urlopen=fake_urlopen).verify(
+                run_dir,
+                analysis={
+                    "verify_hint": {
+                        "endpoint": "http://127.0.0.1:8000",
+                        "request": {
+                            "method": "POST",
+                            "path": "/api/check",
+                            "json": {"prompt": "verify {{trace_id}}"},
+                        },
+                    }
+                },
+                runner_result={"pid": 1234, "expected_port": 8000, "service_ready": True},
+            )
+            self.assertEqual(result.status, "passed")
+            self.assertEqual(captured["method"], "POST")
+            self.assertEqual(captured["url"], "http://127.0.0.1:8000/api/check")
+            self.assertIn("verify_", captured["body"])
 
     def test_mock_provider(self):
         result = MockLLMProvider().complete([Message(role="user", content="hello")])

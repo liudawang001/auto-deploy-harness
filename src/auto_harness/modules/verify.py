@@ -67,25 +67,27 @@ class VerifyModule:
         }
 
     def _execute_http_trace(self, trace_id: str, service: Dict, analysis: Dict, evidence_dir: Path) -> Optional[Dict]:
-        endpoint = self._select_endpoint(service, analysis)
-        if not endpoint:
+        request_plan = self._build_request_plan(trace_id, service, analysis)
+        if not request_plan:
             return None
-        parsed = urllib.parse.urlparse(endpoint)
-        query = urllib.parse.parse_qs(parsed.query)
-        query["_auto_harness_trace"] = [trace_id]
-        traced_url = urllib.parse.urlunparse(
-            parsed._replace(query=urllib.parse.urlencode(query, doseq=True))
-        )
+        traced_url = request_plan["url"]
+        method = request_plan["method"]
+        body = request_plan.get("body")
+        headers = request_plan.get("headers", {})
         request_record = {
-            "method": "GET",
+            "method": method,
             "url": traced_url,
             "trace_id": trace_id,
+            "headers": headers,
+            "body": request_plan.get("body_json") if request_plan.get("body_json") is not None else None,
         }
         response_record = {}
         status = "uncertain"
         reason = "HTTP response did not contain trace id"
         try:
-            req = urllib.request.Request(traced_url, method="GET")
+            req = urllib.request.Request(traced_url, data=body, method=method)
+            for name, value in headers.items():
+                req.add_header(name, value)
             with self.urlopen(req, timeout=10) as resp:
                 body = resp.read().decode("utf-8", errors="replace")
                 response_record = {
@@ -111,6 +113,57 @@ class VerifyModule:
         evidence_path = evidence_dir / ("%s_http_trace.json" % trace_id)
         evidence_path.write_text(json.dumps(evidence, ensure_ascii=False, indent=2), encoding="utf-8")
         return {"path": str(evidence_path), "check": evidence["check"]}
+
+    def _build_request_plan(self, trace_id: str, service: Dict, analysis: Dict) -> Optional[Dict]:
+        verify_hint = analysis.get("verify_hint", {}) if isinstance(analysis, dict) else {}
+        request_hint = verify_hint.get("request", {}) if isinstance(verify_hint, dict) else {}
+        endpoint = self._select_endpoint(service, analysis)
+        if not endpoint:
+            return None
+
+        method = str(request_hint.get("method") or "GET").upper()
+        path = request_hint.get("path")
+        if path:
+            endpoint = urllib.parse.urljoin(endpoint.rstrip("/") + "/", path.lstrip("/"))
+
+        body_json = None
+        body = None
+        headers = {}
+        if method == "GET":
+            endpoint = self._append_trace_query(endpoint, trace_id)
+        elif method == "POST":
+            template = request_hint.get("json")
+            if template is None:
+                template = {"trace_id": "{{trace_id}}", "prompt": "auto harness trace {{trace_id}}"}
+            body_json = self._replace_trace(template, trace_id)
+            body = json.dumps(body_json).encode("utf-8")
+            headers["Content-Type"] = "application/json"
+        else:
+            return None
+        return {
+            "method": method,
+            "url": endpoint,
+            "body": body,
+            "body_json": body_json,
+            "headers": headers,
+        }
+
+    def _append_trace_query(self, endpoint: str, trace_id: str) -> str:
+        parsed = urllib.parse.urlparse(endpoint)
+        query = urllib.parse.parse_qs(parsed.query)
+        query["_auto_harness_trace"] = [trace_id]
+        return urllib.parse.urlunparse(
+            parsed._replace(query=urllib.parse.urlencode(query, doseq=True))
+        )
+
+    def _replace_trace(self, value, trace_id: str):
+        if isinstance(value, str):
+            return value.replace("{{trace_id}}", trace_id)
+        if isinstance(value, list):
+            return [self._replace_trace(item, trace_id) for item in value]
+        if isinstance(value, dict):
+            return {key: self._replace_trace(item, trace_id) for key, item in value.items()}
+        return value
 
     def _select_endpoint(self, service: Dict, analysis: Dict) -> Optional[str]:
         verify_hint = analysis.get("verify_hint", {}) if isinstance(analysis, dict) else {}

@@ -15,6 +15,8 @@ class HarnessConfig:
     allow_service_start: bool = False
     verify_workspace_name: str = "verify_workspace"
     allowed_commands: List[str] = None
+    use_agent_analyzer: bool = False
+    agent_timeout_seconds: int = 900
 
     def __post_init__(self) -> None:
         if self.allowed_commands is None:
@@ -24,13 +26,17 @@ class HarnessConfig:
     def load(cls, path: str = None) -> "HarnessConfig":
         config_path = Path(path or os.environ.get("AUTO_HARNESS_CONFIG", "configs/default.json"))
         if not config_path.exists():
-            return cls()
+            return cls(
+                use_agent_analyzer=os.environ.get("AUTO_HARNESS_USE_AGENT_ANALYZER") == "1"
+            )
         with config_path.open("r", encoding="utf-8") as f:
             data = json.load(f)
         known: Dict[str, Any] = {}
         for key in cls.__dataclass_fields__:
             if key in data:
                 known[key] = data[key]
+        if os.environ.get("AUTO_HARNESS_USE_AGENT_ANALYZER"):
+            known["use_agent_analyzer"] = os.environ.get("AUTO_HARNESS_USE_AGENT_ANALYZER") == "1"
         return cls(**known)
 
     @property
