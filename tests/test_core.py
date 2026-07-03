@@ -5,10 +5,13 @@ from pathlib import Path
 
 from auto_harness.models.task import ProjectSpec, RuntimePolicy, TaskSpec
 from auto_harness.agents.base import AgentResult
+from auto_harness.memory import MemoryStore
 from auto_harness.modules.analyzer import ProjectAnalyzer
 from auto_harness.modules.env_deploy import EnvDeployModule
 from auto_harness.modules.verify import VerifyModule
+from auto_harness.models.result import StageResult
 from auto_harness.providers import Message, MockLLMProvider
+from auto_harness.skills import SkillRegistry
 from auto_harness.state import StateStore
 from auto_harness.utils.time import utc_now_iso
 
@@ -157,6 +160,49 @@ class CoreTests(unittest.TestCase):
             )
             self.assertEqual(result.status, "failed")
             self.assertIn("disallowed command", result.error)
+
+    def test_skill_registry_selects_verify_skill(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            skill_dir = Path(tmp) / "skills" / "verify-evidence"
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text(
+                "---\n"
+                "name: verify-evidence\n"
+                "description: Verify Gradio API trace evidence during verify stage.\n"
+                "---\n"
+                "# Verify\n"
+                "Use POST /api/predict for gradio trace verification.\n",
+                encoding="utf-8",
+            )
+            selected = SkillRegistry(Path(tmp) / "skills").select_for_stage(
+                "verify",
+                {"frameworks": ["gradio"], "verify_hint": {"service_type": "webui"}},
+            )
+            self.assertEqual(selected[0].name, "verify-evidence")
+            self.assertIn("api/predict", selected[0].content)
+            self.assertEqual(len(selected[0].sha256), 64)
+
+    def test_memory_store_records_and_queries_issue(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = MemoryStore(Path(tmp) / "memory")
+            analysis = {"frameworks": ["gradio"]}
+            entry = store.remember_issue(
+                "task1",
+                "verify",
+                StageResult(
+                    "verify",
+                    "uncertain",
+                    "verify completed with uncertain",
+                    {"diagnosis": {"category": "trace_not_observed", "root_cause": "response did not contain trace"}},
+                ),
+                analysis,
+            )
+            self.assertIsNotNone(entry)
+            hits = store.query("verify", analysis)
+            self.assertEqual(len(hits), 1)
+            self.assertEqual(hits[0]["category"], "trace_not_observed")
+            store.remember_issue("task1", "verify", StageResult("verify", "uncertain", "verify completed with uncertain"), analysis)
+            self.assertEqual(len(store.query("verify", analysis)), 2)
 
 
 if __name__ == "__main__":

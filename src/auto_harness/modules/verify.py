@@ -12,8 +12,9 @@ from auto_harness.utils.time import compact_timestamp
 
 
 class VerifyModule:
-    def __init__(self, urlopen=None) -> None:
+    def __init__(self, urlopen=None, stage_context: Optional[Dict] = None) -> None:
         self.urlopen = urlopen or urllib.request.urlopen
+        self.stage_context = stage_context or {}
 
     def verify(self, run_dir: Path, analysis: Dict, runner_result: Dict) -> StageResult:
         trace_id = "verify_%s_%s" % (compact_timestamp(), short_hash(str(run_dir), 6))
@@ -43,13 +44,16 @@ class VerifyModule:
             evidence=[http_evidence["path"]] if http_evidence else [],
             next_action="report",
         )
+        result_data = result.__dict__
+        if self.stage_context:
+            result_data["control_context"] = self.stage_context
         evidence_path = evidence_dir / ("%s_verify.json" % trace_id)
-        evidence_path.write_text(json.dumps(result.__dict__, ensure_ascii=False, indent=2), encoding="utf-8")
+        evidence_path.write_text(json.dumps(result_data, ensure_ascii=False, indent=2), encoding="utf-8")
         return StageResult(
             "verify",
             "passed" if status == "pass" else "uncertain",
             "verify completed with %s" % status,
-            data=result.__dict__,
+            data=result_data,
             evidence=[str(evidence_path)] + ([http_evidence["path"]] if http_evidence else []),
         )
 

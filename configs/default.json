@@ -7,6 +7,10 @@
   "allow_service_start": false,
   "use_agent_analyzer": false,
   "agent_timeout_seconds": 900,
+  "skills_dir": "skills",
+  "memory_dir": "memory",
+  "max_skill_chars": 6000,
+  "max_memory_items": 5,
   "verify_workspace_name": "verify_workspace",
   "allowed_commands": ["python", "python3", "pip", "curl", "git", "streamlit"],
   "verify": {

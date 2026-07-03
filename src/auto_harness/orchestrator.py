@@ -8,7 +8,9 @@ from auto_harness.config import HarnessConfig
 from auto_harness.agents.claude_code import ClaudeCodeExecutor
 from auto_harness.models.base import read_json, to_plain, write_json
 from auto_harness.models.task import ProjectSpec, RuntimePolicy, TaskSpec
+from auto_harness.memory import MemoryStore
 from auto_harness.modules import EnvDeployModule, ProjectAnalyzer, ReportGenerator, RunnerModule, VerifyModule
+from auto_harness.skills import SkillRegistry
 from auto_harness.state import StateStore
 from auto_harness.utils.files import safe_name, short_hash
 from auto_harness.utils.time import compact_timestamp, utc_now_iso
@@ -18,6 +20,8 @@ class TaskRunner:
     def __init__(self, config: HarnessConfig) -> None:
         self.config = config
         self.store = StateStore(config.runs_path)
+        self.skills = SkillRegistry(config.skills_path, max_chars=config.max_skill_chars)
+        self.memory = MemoryStore(config.memory_path)
 
     def create_spec(
         self,
@@ -83,36 +87,47 @@ class TaskRunner:
         repo_dir = run_dir / "workspace" / "repo"
         results: Dict[str, Dict] = {}
 
+        analyze_context = self._stage_context("analyze", {})
         analyzer = ProjectAnalyzer(
             agent_executor=ClaudeCodeExecutor() if self.config.use_agent_analyzer else None,
             use_agent=self.config.use_agent_analyzer,
             agent_timeout_seconds=self.config.agent_timeout_seconds,
+            stage_context=analyze_context,
         )
         analyze_result = analyzer.analyze(repo_dir)
         results["analyze"] = to_plain(analyze_result)
         self._save_stage(task_id, "analyze", analyze_result)
+        self._remember(task_id, "analyze", analyze_result, analyze_result.data)
 
+        env_context = self._stage_context("env_deploy", analyze_result.data)
         env_result = EnvDeployModule().deploy(
             repo_dir,
             analyze_result.data,
             execute=not dry_run and task.runtime.allow_dependency_install,
             allowed_commands=self.config.allowed_commands,
         )
+        self._attach_context(env_result, env_context)
         results["env_deploy"] = to_plain(env_result)
         self._save_stage(task_id, "env_deploy", env_result)
+        self._remember(task_id, "env_deploy", env_result, analyze_result.data)
 
+        runner_context = self._stage_context("runner", analyze_result.data)
         runner_result = RunnerModule().run(
             repo_dir,
             analyze_result.data,
             execute=not dry_run and task.runtime.allow_service_start,
             allowed_commands=self.config.allowed_commands,
         )
+        self._attach_context(runner_result, runner_context)
         results["runner"] = to_plain(runner_result)
         self._save_stage(task_id, "runner", runner_result)
+        self._remember(task_id, "runner", runner_result, analyze_result.data)
 
-        verify_result = VerifyModule().verify(run_dir, analyze_result.data, runner_result.data)
+        verify_context = self._stage_context("verify", analyze_result.data)
+        verify_result = VerifyModule(stage_context=verify_context).verify(run_dir, analyze_result.data, runner_result.data)
         results["verify"] = to_plain(verify_result)
         self._save_stage(task_id, "verify", verify_result)
+        self._remember(task_id, "verify", verify_result, analyze_result.data)
 
         task_data = read_json(run_dir / "task.json")
         report_result = ReportGenerator().generate(run_dir, task_data, results)
@@ -133,3 +148,20 @@ class TaskRunner:
         path = self.store.save_result(task_id, stage, result)
         stage_status = "passed" if result.status in ("passed", "pass") else result.status
         self.store.update_stage(task_id, stage, stage_status, result_path=str(path), error=result.error)
+
+    def _stage_context(self, stage: str, analysis: Dict) -> Dict:
+        skills = [skill.to_context() for skill in self.skills.select_for_stage(stage, analysis, limit=3)]
+        memories = self.memory.query(stage, analysis, limit=self.config.max_memory_items)
+        return {
+            "selected_skills": skills,
+            "memory_hits": memories,
+        }
+
+    def _attach_context(self, result, context: Dict) -> None:
+        if context:
+            result.data.setdefault("control_context", context)
+
+    def _remember(self, task_id: str, stage: str, result, analysis: Dict) -> None:
+        entry = self.memory.remember_issue(task_id, stage, result, analysis)
+        if entry:
+            self.store.events(task_id).append(stage, "memory_recorded", {"memory_id": entry["id"], "signature": entry["signature"]})

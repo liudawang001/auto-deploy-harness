@@ -69,16 +69,30 @@
 - Added execution command policy checks for `env_deploy` and `runner`.
   - Commands are rejected before execution if their executable name is not in `allowed_commands`.
   - This is required before enabling broader `--execute` use.
+- Added repo-local skill loading:
+  - skills live under `skills/*/SKILL.md`
+  - `SkillRegistry` selects stage-relevant skills by stage, framework, and service hints
+  - selected skills are written into stage `control_context` with path and SHA-256 hash
+- Added structured issue memory:
+  - `MemoryStore` writes failed/uncertain stage issues to `memory/deployment_issues.jsonl`
+  - memory is deduplicated by signature
+  - later stages query similar historical issues by stage/framework
+  - runtime memory JSONL is ignored by git to avoid committing logs or environment-specific details
+- Added `docs/skill-memory-design.md` explaining the skill-driven, memory-augmented Agent design.
 
 ### Current Behavior
 
 The system can create a task, scan a repository directory, produce install/run plans, perform dry-run env/runner stages, run evidence-oriented `verify`, and generate a Markdown report.
+
+Each stage now also records the selected skill documents and relevant memory hits. Failed or uncertain stages automatically produce structured memory entries for future deployments.
 
 ### Important Design Notes
 
 - `verify` currently returns `uncertain` unless it has actual artifact evidence. This is intentional: false pass is more dangerous than uncertain.
 - Xunfei integration is abstracted. The current provider supports an Anthropic-compatible HTTP messages interface via environment variables. Real secrets are intentionally not stored in repository files.
 - Claude Code is optional and configured through `CLAUDE_CODE_CMD`. The current pipeline does not depend on it to run the dry-run MVP.
+- Skills are advisory control documents. They cannot override Python execution policy, command allowlists, or source-edit restrictions.
+- Memory is machine-readable JSONL rather than Markdown so future deployments can retrieve, score, and deduplicate similar failures.
 
 ### Next Steps
 
@@ -94,6 +108,8 @@ The system can create a task, scan a repository directory, produce install/run p
    - historical output file interference.
    - missing dependency.
    - service exits after startup.
+9. Add repair-loop execution that uses selected skills and memory hits to propose or apply bounded fixes.
+10. Add explicit memory promotion workflow for turning repeated issue memories into stable `SKILL.md` rules.
 
 ### Known Limitations
 
@@ -102,3 +118,4 @@ The system can create a task, scan a repository directory, produce install/run p
 - `RunnerModule` does not yet persist process handles for later cleanup.
 - `XunfeiSparkProvider` currently assumes an Anthropic-compatible HTTP messages interface; add another transport if a selected Spark API variant requires WebSocket signing.
 - The test suite is still minimal and only covers the core dry-run path.
+- Memory entries are recorded automatically, but there is not yet a human review/promotion command to convert repeated memories into skill updates.

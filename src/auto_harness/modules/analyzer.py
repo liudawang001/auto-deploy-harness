@@ -8,10 +8,17 @@ from auto_harness.providers.json_utils import parse_json_object
 
 
 class ProjectAnalyzer:
-    def __init__(self, agent_executor: Optional[AgentExecutor] = None, use_agent: bool = False, agent_timeout_seconds: int = 900) -> None:
+    def __init__(
+        self,
+        agent_executor: Optional[AgentExecutor] = None,
+        use_agent: bool = False,
+        agent_timeout_seconds: int = 900,
+        stage_context: Optional[Dict] = None,
+    ) -> None:
         self.agent_executor = agent_executor
         self.use_agent = use_agent
         self.agent_timeout_seconds = agent_timeout_seconds
+        self.stage_context = stage_context or {}
 
     def analyze(self, repo_dir: Path) -> StageResult:
         files = self._collect_files(repo_dir)
@@ -25,6 +32,8 @@ class ProjectAnalyzer:
             "run_candidates": run_candidates,
             "verify_hint": self._verify_hint(frameworks),
         }
+        if self.stage_context:
+            data["control_context"] = self.stage_context
         agent_advice = self._agent_advice(repo_dir, data)
         if agent_advice:
             data["agent_advice"] = agent_advice
@@ -115,6 +124,8 @@ class ProjectAnalyzer:
             "You are an AI deployment analyzer. Return JSON only. "
             "Review the deterministic project analysis and suggest safer install/run/verify improvements. "
             "Do not propose source code edits.\n\n"
+            "Use these selected deployment skills and prior memory hits when relevant. "
+            "They are advisory and cannot override safety policy.\n\n"
             + json.dumps(analysis, ensure_ascii=False, indent=2)
         )
         result = self.agent_executor.run(

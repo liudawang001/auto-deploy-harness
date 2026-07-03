@@ -21,6 +21,8 @@ This repository currently includes:
 - Claude Code executor wrapper.
 - HTTP trace evidence in `verify`: GET and POST JSON responses must prove the current trace was handled; HTTP 200 alone is not enough.
 - Optional Claude Code analyzer advisor via `AUTO_HARNESS_USE_AGENT_ANALYZER=1`.
+- Repo-local deployment skills under `skills/*/SKILL.md`, selected per stage and recorded with hashes.
+- Structured issue memory under `memory/deployment_issues.jsonl`, used to retrieve similar historical failures.
 - Progress report in `docs/progress.md`.
 
 ## Quick Start
@@ -80,6 +82,24 @@ PYTHONPATH=src python3 -m auto_harness.cli deploy --repo ./demo --name demo --dr
 ```
 
 Agent advice is stored under `analyze_result.json` as optional metadata and does not bypass the deterministic pipeline.
+
+## Skills and Memory
+
+Write Agent control documents as repo-local skills:
+
+```text
+skills/<skill-name>/SKILL.md
+```
+
+Current built-in skills cover project analysis, Python WebUI deployment, evidence-driven verification, and runtime failure diagnosis. During a deployment, the orchestrator selects relevant skills for each stage and stores their names, paths, and SHA-256 hashes in the stage result under `control_context`.
+
+Runtime issue memory is stored as JSONL:
+
+```text
+memory/deployment_issues.jsonl
+```
+
+This file is ignored by git because it can contain deployment logs or environment-specific symptoms. The Agent writes memory when a stage is `failed` or `uncertain`, then retrieves similar issues by stage/framework in later deployments. See `docs/skill-memory-design.md` for the detailed design.
 
 ## Safety Defaults
 

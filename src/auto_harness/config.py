@@ -17,6 +17,10 @@ class HarnessConfig:
     allowed_commands: List[str] = None
     use_agent_analyzer: bool = False
     agent_timeout_seconds: int = 900
+    skills_dir: str = "skills"
+    memory_dir: str = "memory"
+    max_skill_chars: int = 6000
+    max_memory_items: int = 5
 
     def __post_init__(self) -> None:
         if self.allowed_commands is None:
@@ -42,3 +46,11 @@ class HarnessConfig:
     @property
     def runs_path(self) -> Path:
         return Path(self.runs_dir)
+
+    @property
+    def skills_path(self) -> Path:
+        return Path(self.skills_dir)
+
+    @property
+    def memory_path(self) -> Path:
+        return Path(self.memory_dir)
