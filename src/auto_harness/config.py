@@ -19,6 +19,7 @@ class HarnessConfig:
     agent_timeout_seconds: int = 900
     skills_dir: str = "skills"
     memory_dir: str = "memory"
+    model_cache_dir: str = "model_cache"
     max_skill_chars: int = 6000
     max_memory_items: int = 5
 
@@ -54,3 +55,7 @@ class HarnessConfig:
     @property
     def memory_path(self) -> Path:
         return Path(self.memory_dir)
+
+    @property
+    def model_cache_path(self) -> Path:
+        return Path(self.model_cache_dir)

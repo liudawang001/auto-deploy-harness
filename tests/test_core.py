@@ -3,16 +3,21 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from auto_harness.config import HarnessConfig
 from auto_harness.models.task import ProjectSpec, RuntimePolicy, TaskSpec
 from auto_harness.agents.base import AgentResult
 from auto_harness.memory import MemoryStore
+from auto_harness.assets import ModelCache, ModelAssetDetector
 from auto_harness.modules.analyzer import ProjectAnalyzer
 from auto_harness.modules.env_deploy import EnvDeployModule
+from auto_harness.modules.model_prepare import ModelPrepareModule
+from auto_harness.modules.resource_plan import ResourcePlanner
 from auto_harness.modules.verify import VerifyModule
 from auto_harness.models.result import StageResult
 from auto_harness.providers import Message, MockLLMProvider
 from auto_harness.skills import SkillRegistry
 from auto_harness.state import StateStore
+from auto_harness.orchestrator import TaskRunner
 from auto_harness.utils.time import utc_now_iso
 
 
@@ -59,6 +64,8 @@ class CoreTests(unittest.TestCase):
             state = store.load_state("task1")
             self.assertEqual(state.stages["analyze"].status, "passed")
             self.assertEqual(state.last_safe_stage, "analyze")
+            self.assertIn("resource_plan", state.stages)
+            self.assertIn("model_prepare", state.stages)
 
     def test_analyzer_detects_gradio_requirements(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -203,6 +210,80 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(hits[0]["category"], "trace_not_observed")
             store.remember_issue("task1", "verify", StageResult("verify", "uncertain", "verify completed with uncertain"), analysis)
             self.assertEqual(len(store.query("verify", analysis)), 2)
+
+    def test_model_asset_detector_finds_huggingface_repo(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "README.md").write_text(
+                "Download from https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct. Size 2 GB.",
+                encoding="utf-8",
+            )
+            (repo / "app.py").write_text(
+                'model = AutoModel.from_pretrained("Qwen/Qwen2.5-0.5B-Instruct")\n',
+                encoding="utf-8",
+            )
+            assets = ModelAssetDetector().detect(repo)
+            self.assertEqual(len(assets), 1)
+            self.assertEqual(assets[0].source, "huggingface")
+            self.assertEqual(assets[0].repo_id, "Qwen/Qwen2.5-0.5B-Instruct")
+            self.assertGreater(assets[0].expected_size_bytes, 0)
+
+    def test_resource_planner_includes_model_assets_and_risk(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "README.md").write_text(
+                "Use CUDA GPU with https://huggingface.co/org/demo-model",
+                encoding="utf-8",
+            )
+            result = ResourcePlanner().plan(repo, {"frameworks": ["torch", "transformers"]})
+            self.assertEqual(result.status, "passed")
+            self.assertTrue(result.data["gpu_required"])
+            self.assertEqual(result.data["risk_level"], "high")
+            self.assertEqual(result.data["model_assets"][0]["repo_id"], "org/demo-model")
+            self.assertIn("HF_TOKEN", result.data["external_tokens"])
+
+    def test_model_prepare_writes_manifest_and_cache_paths(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            run_dir.mkdir()
+            resource_plan = {
+                "model_assets": [
+                    {
+                        "asset_id": "huggingface:org/demo-model",
+                        "source": "huggingface",
+                        "repo_id": "org/demo-model",
+                        "revision": "main",
+                        "origin": "README.md",
+                        "status": "planned",
+                    }
+                ]
+            }
+            result = ModelPrepareModule(ModelCache(Path(tmp) / "model_cache")).prepare(run_dir, resource_plan)
+            self.assertEqual(result.status, "passed")
+            self.assertTrue(Path(result.data["manifest_path"]).exists())
+            self.assertEqual(result.data["assets"][0]["source"], "huggingface")
+            self.assertIn("model_cache", result.data["assets"][0]["cache_path"])
+
+    def test_task_runner_dry_run_includes_resource_and_model_prepare(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            (repo / "requirements.txt").write_text("gradio\ntransformers\n", encoding="utf-8")
+            (repo / "README.md").write_text("Model: https://huggingface.co/org/demo-model", encoding="utf-8")
+            (repo / "app.py").write_text("import gradio as gr\n", encoding="utf-8")
+            config = HarnessConfig(
+                runs_dir=str(root / "runs"),
+                memory_dir=str(root / "memory"),
+                model_cache_dir=str(root / "model_cache"),
+            )
+            task_id = TaskRunner(config).deploy(str(repo), "demo", dry_run=True)
+            pipeline_path = root / "runs" / task_id / "reports" / "pipeline_results.json"
+            data = json.loads(pipeline_path.read_text(encoding="utf-8"))
+            self.assertIn("resource_plan", data)
+            self.assertIn("model_prepare", data)
+            self.assertEqual(data["resource_plan"]["data"]["model_assets"][0]["repo_id"], "org/demo-model")
+            self.assertTrue(Path(data["model_prepare"]["data"]["manifest_path"]).exists())
 
 
 if __name__ == "__main__":

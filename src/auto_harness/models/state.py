@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import Dict, Optional
+from typing import Dict, Optional, Any
 
 
 @dataclass
@@ -8,6 +8,7 @@ class StageState:
     updated_at: str = ""
     result_path: Optional[str] = None
     error: Optional[str] = None
+    progress: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -20,4 +21,3 @@ class TaskState:
     agent_session_id: Optional[str] = None
     last_safe_stage: Optional[str] = None
     report_path: Optional[str] = None
-

@@ -87,7 +87,9 @@ class SkillRegistry:
         haystack = haystack.lower()
         stage_aliases = {
             "analyze": ["analyze", "analysis", "classify", "project"],
+            "resource_plan": ["resource", "plan", "gpu", "cuda", "disk", "model asset"],
             "env_deploy": ["env", "deploy", "install", "dependency"],
+            "model_prepare": ["model", "asset", "download", "cache", "huggingface", "modelscope"],
             "runner": ["runner", "run", "startup", "service"],
             "verify": ["verify", "evidence", "trace", "gradio api"],
         }.get(stage, [stage])

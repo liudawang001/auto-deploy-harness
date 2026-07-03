@@ -9,6 +9,7 @@
   "agent_timeout_seconds": 900,
   "skills_dir": "skills",
   "memory_dir": "memory",
+  "model_cache_dir": "model_cache",
   "max_skill_chars": 6000,
   "max_memory_items": 5,
   "verify_workspace_name": "verify_workspace",

@@ -6,10 +6,19 @@ from typing import Dict
 
 from auto_harness.config import HarnessConfig
 from auto_harness.agents.claude_code import ClaudeCodeExecutor
+from auto_harness.assets import ModelCache
 from auto_harness.models.base import read_json, to_plain, write_json
 from auto_harness.models.task import ProjectSpec, RuntimePolicy, TaskSpec
 from auto_harness.memory import MemoryStore
-from auto_harness.modules import EnvDeployModule, ProjectAnalyzer, ReportGenerator, RunnerModule, VerifyModule
+from auto_harness.modules import (
+    EnvDeployModule,
+    ModelPrepareModule,
+    ProjectAnalyzer,
+    ReportGenerator,
+    ResourcePlanner,
+    RunnerModule,
+    VerifyModule,
+)
 from auto_harness.skills import SkillRegistry
 from auto_harness.state import StateStore
 from auto_harness.utils.files import safe_name, short_hash
@@ -22,6 +31,7 @@ class TaskRunner:
         self.store = StateStore(config.runs_path)
         self.skills = SkillRegistry(config.skills_path, max_chars=config.max_skill_chars)
         self.memory = MemoryStore(config.memory_path)
+        self.model_cache = ModelCache(config.model_cache_path)
 
     def create_spec(
         self,
@@ -99,6 +109,13 @@ class TaskRunner:
         self._save_stage(task_id, "analyze", analyze_result)
         self._remember(task_id, "analyze", analyze_result, analyze_result.data)
 
+        resource_context = self._stage_context("resource_plan", analyze_result.data)
+        resource_result = ResourcePlanner().plan(repo_dir, analyze_result.data)
+        self._attach_context(resource_result, resource_context)
+        results["resource_plan"] = to_plain(resource_result)
+        self._save_stage(task_id, "resource_plan", resource_result)
+        self._remember(task_id, "resource_plan", resource_result, analyze_result.data)
+
         env_context = self._stage_context("env_deploy", analyze_result.data)
         env_result = EnvDeployModule().deploy(
             repo_dir,
@@ -110,6 +127,17 @@ class TaskRunner:
         results["env_deploy"] = to_plain(env_result)
         self._save_stage(task_id, "env_deploy", env_result)
         self._remember(task_id, "env_deploy", env_result, analyze_result.data)
+
+        model_context = self._stage_context("model_prepare", resource_result.data)
+        model_result = ModelPrepareModule(self.model_cache).prepare(
+            run_dir,
+            resource_result.data,
+            execute=not dry_run,
+        )
+        self._attach_context(model_result, model_context)
+        results["model_prepare"] = to_plain(model_result)
+        self._save_stage(task_id, "model_prepare", model_result)
+        self._remember(task_id, "model_prepare", model_result, analyze_result.data)
 
         runner_context = self._stage_context("runner", analyze_result.data)
         runner_result = RunnerModule().run(

@@ -808,10 +808,10 @@ src/auto_harness/
 
 ### 第 1 周
 
-1. 添加 `resource_plan` 和 `model_prepare` stage skeleton。
-2. 添加 `AssetManifest`、`ModelAsset`、`ModelCache` 数据结构。
-3. 实现本地缓存目录和 manifest 持久化。
-4. 支持从 README/requirements/code 中识别 Hugging Face repo id。
+1. 添加 `resource_plan` 和 `model_prepare` stage skeleton。已完成。
+2. 添加 `AssetManifest`、`ModelAsset`、`ModelCache` 数据结构。已完成。
+3. 实现本地缓存目录和 manifest 持久化。已完成。
+4. 支持从 README/requirements/code 中识别 Hugging Face repo id。已完成第一版，覆盖 README、Python 代码和常见配置文件。
 5. 实现 dry-run model_prepare，输出待下载资产和预估大小。
 6. 新增 fake large model fixture。
 

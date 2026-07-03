@@ -29,7 +29,9 @@ class StateStore:
             task_id=spec.task_id,
             stages={
                 "analyze": StageState(),
+                "resource_plan": StageState(),
                 "env_deploy": StageState(),
+                "model_prepare": StageState(),
                 "runner": StageState(),
                 "verify": StageState(),
                 "report": StageState(),
@@ -106,4 +108,3 @@ class StateStore:
     def task_summary(self, task_id: str) -> Dict[str, Any]:
         state = self.load_state(task_id)
         return to_plain(state)
-

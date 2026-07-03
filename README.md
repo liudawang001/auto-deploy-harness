@@ -23,6 +23,8 @@ AI-Auto-Harness 是一个面向 AI 开源 demo 项目的自动部署与验证 Ag
 - 可选 Claude Code analyzer advisor：通过 `AUTO_HARNESS_USE_AGENT_ANALYZER=1` 启用。
 - 仓库内置 skill：位于 `skills/*/SKILL.md`，按阶段选择并记录 hash。
 - 结构化问题记忆：位于 `memory/deployment_issues.jsonl`，用于检索历史相似失败。
+- `resource_plan` 阶段：识别模型资产、GPU/CUDA 信号、磁盘风险和外部 token 需求。
+- `model_prepare` 阶段：生成模型资产 manifest、缓存 key 和 `model_cache` 路径；当前默认只规划，不执行真实下载。
 - 开发进度报告：`docs/progress.md`。
 
 ## 快速开始
@@ -100,6 +102,28 @@ memory/deployment_issues.jsonl
 ```
 
 该文件被 git 忽略，因为它可能包含部署日志或环境相关症状。Agent 会在阶段 `failed` 或 `uncertain` 时写入 memory，并在后续部署中按 stage/framework 检索相似问题。详细设计见 `docs/skill-memory-design.md`。
+
+## 模型资产规划
+
+系统会在 `resource_plan` 阶段扫描 README、Python 代码和配置文件，识别 Hugging Face / ModelScope 模型引用，例如：
+
+```python
+AutoModel.from_pretrained("org/model")
+```
+
+随后 `model_prepare` 会生成：
+
+```text
+runs/<task-id>/reports/model_assets_manifest.json
+```
+
+其中包含模型来源、repo id、revision、缓存 key、缓存路径、预估大小和当前状态。默认缓存目录为：
+
+```text
+model_cache/
+```
+
+当前版本不会自动联网下载模型；它先建立可恢复下载所需的 manifest/cache 基础结构。真实 Hugging Face / ModelScope 下载器会在后续 P0 任务中接入。
 
 ## 优化路线图
 
