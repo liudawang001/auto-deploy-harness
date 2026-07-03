@@ -1,0 +1,15 @@
+{
+  "runs_dir": "runs",
+  "default_timeout_seconds": 900,
+  "max_stage_attempts": 2,
+  "allow_source_edit": false,
+  "allow_dependency_install": false,
+  "allow_service_start": false,
+  "verify_workspace_name": "verify_workspace",
+  "allowed_commands": ["python", "python3", "pip", "curl", "git", "streamlit"],
+  "verify": {
+    "require_trace_id": true,
+    "max_wait_seconds": 300,
+    "allow_uncertain": true
+  }
+}

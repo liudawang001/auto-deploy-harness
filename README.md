@@ -1,0 +1,75 @@
+# AI-Auto-Harness
+
+AI-Auto-Harness is a Python-controlled Agent pipeline for deploying and verifying AI open-source demo projects.
+
+The project is intentionally built around deterministic orchestration plus bounded Agent execution:
+
+- Python owns workflow state, retries, timeouts, filesystem boundaries, and evidence checks.
+- Claude Code headless or another executor handles uncertain stage work such as project reading and log diagnosis.
+- LLM providers, including Xunfei Spark, are abstracted behind a provider interface.
+- `verify` is evidence-driven and must not treat a live port or HTTP 200 as final success.
+
+## Current MVP
+
+This repository currently includes:
+
+- CLI: `init`, `deploy`, `resume`, `status`, `report`, `llm-test`.
+- Task state store: `task.json`, `state.json`, `events.jsonl`.
+- Deterministic project analyzer.
+- Safe `env_deploy`, `runner`, `verify`, and report modules.
+- Mock LLM provider and Xunfei Anthropic-compatible provider.
+- Claude Code executor wrapper.
+- HTTP trace evidence in `verify`: responses must prove the current trace was handled; HTTP 200 alone is not enough.
+- Progress report in `docs/progress.md`.
+
+## Quick Start
+
+```bash
+python3 -m auto_harness.cli init
+python3 -m auto_harness.cli deploy --repo https://github.com/example/demo --name demo --dry-run
+python3 -m auto_harness.cli status --task-id <task-id>
+python3 -m auto_harness.cli report --task-id <task-id>
+```
+
+For local source execution:
+
+```bash
+PYTHONPATH=src python3 -m auto_harness.cli init
+```
+
+To execute installation/startup rather than dry-run planning, be explicit:
+
+```bash
+PYTHONPATH=src python3 -m auto_harness.cli deploy --repo ./demo --name demo --execute --allow-install --allow-start
+```
+
+You can also pass a local project path as `--repo`; it will be copied into the run workspace.
+
+## Xunfei Configuration
+
+Set secrets through environment variables only:
+
+```bash
+export XUNFEI_APP_ID="..."
+export XUNFEI_API_KEY="..."
+export XUNFEI_API_SECRET="..."
+export XUNFEI_MODEL="..."
+export XUNFEI_API_BASE="..."
+# or export XUNFEI_API_URL="..."
+```
+
+Do not commit a real `.env` file. Keep secrets in your local shell, secret manager, or CI secret settings.
+
+The Xunfei provider defaults to an Anthropic-compatible messages payload. If Claude Code cannot directly use Xunfei, use the local LLM provider path and keep Claude Code as an optional executor.
+
+Provider smoke test:
+
+```bash
+PYTHONPATH=src python3 -m auto_harness.cli llm-test --provider xunfei --prompt "Return JSON only: {\"status\":\"ok\"}"
+```
+
+## Safety Defaults
+
+By default, `deploy` runs as a dry run and does not install dependencies or start long-running services unless explicit execution flags are passed.
+
+Execution mode is additionally guarded by command policy. `env_deploy` and `runner` reject commands whose executable name is not listed in `allowed_commands` in `configs/default.json`.

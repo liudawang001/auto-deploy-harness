@@ -1,0 +1,38 @@
+import json
+import os
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Dict, List
+
+
+@dataclass
+class HarnessConfig:
+    runs_dir: str = "runs"
+    default_timeout_seconds: int = 900
+    max_stage_attempts: int = 2
+    allow_source_edit: bool = False
+    allow_dependency_install: bool = False
+    allow_service_start: bool = False
+    verify_workspace_name: str = "verify_workspace"
+    allowed_commands: List[str] = None
+
+    def __post_init__(self) -> None:
+        if self.allowed_commands is None:
+            self.allowed_commands = ["python", "python3", "pip", "curl", "git", "streamlit"]
+
+    @classmethod
+    def load(cls, path: str = None) -> "HarnessConfig":
+        config_path = Path(path or os.environ.get("AUTO_HARNESS_CONFIG", "configs/default.json"))
+        if not config_path.exists():
+            return cls()
+        with config_path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        known: Dict[str, Any] = {}
+        for key in cls.__dataclass_fields__:
+            if key in data:
+                known[key] = data[key]
+        return cls(**known)
+
+    @property
+    def runs_path(self) -> Path:
+        return Path(self.runs_dir)
