@@ -1,28 +1,28 @@
-# Skill and Memory Design
+# Skill 与 Memory 设计
 
-## Why this Agent needs skill documents
+## 为什么这个 Agent 需要技能文档
 
-AI-Auto-Harness is not a chat-only Agent. It is an automatic deployment system that must make repeatable decisions under safety constraints. Hardcoding all deployment knowledge in Python would make the system rigid, while putting all knowledge in a single prompt would make behavior hard to audit.
+AI-Auto-Harness 不是一个单纯聊天式 Agent，而是一个自动部署系统。它需要在安全约束下做可复现、可审计的决策。
 
-The project therefore separates control knowledge into three layers:
+如果把所有部署知识都硬编码到 Python 里，系统会很僵硬；如果把所有知识都塞进一个大 prompt，行为又很难审计和复现。因此本项目把控制知识拆成三层：
 
-- Python pipeline: owns state, permissions, command execution, evidence, and persistence.
-- Skill Markdown: stage-specific deployment playbooks that an Agent can read before acting.
-- Memory JSONL: historical failure patterns learned from prior deployments.
+- Python pipeline：负责状态机、权限控制、命令执行、证据校验和持久化。
+- Skill Markdown：负责每个阶段的部署作战手册。
+- Memory JSONL：负责沉淀历史失败模式和修复经验。
 
-Skills answer: "How should this stage be handled?"
+Skill 回答的问题是：当前阶段应该怎么做？
 
-Memory answers: "Have we seen this kind of problem before, and what did we learn?"
+Memory 回答的问题是：类似问题以前是否出现过，当时学到了什么？
 
-## Where to write skills
+## Skill 应该写在哪里
 
-Write repository-owned skills under:
+本项目的内置技能文档统一写在：
 
 ```text
 skills/<skill-name>/SKILL.md
 ```
 
-Examples in this repo:
+当前仓库内置示例：
 
 ```text
 skills/analyze-ai-demo/SKILL.md
@@ -31,49 +31,55 @@ skills/verify-evidence/SKILL.md
 skills/diagnose-runtime-failure/SKILL.md
 ```
 
-This location is intentional:
+这样设计的原因：
 
-- It is versioned with the deployment Agent.
-- It can be reviewed like code.
-- It is independent from a developer's local Codex/Claude personal skills.
-- It can be loaded inside CI or a remote worker without relying on a user home directory.
+- skill 跟部署 Agent 的代码一起版本化。
+- 每次变更都可以 code review。
+- 不依赖开发者本机的个人 Codex/Claude skill 目录。
+- CI、远程 worker 或其他机器克隆仓库后，也能读取同一套控制文档。
 
-Do not put runtime deployment secrets in skills. Do not put one-off run logs in skills. Skills should be stable playbooks.
+不要把运行时密钥写进 skill。不要把一次性部署日志写进 skill。Skill 应该是稳定的作战规则，而不是运行记录。
 
-## How to write a skill
+## Skill 应该怎么写
 
-Each skill is a folder with a required `SKILL.md`:
+每个 skill 是一个文件夹，必须包含 `SKILL.md`：
 
 ```markdown
 ---
 name: verify-evidence
-description: Verify automatic AI deployment with hard evidence. Use during verify stages for web UI/API services...
+description: 对 AI 自动部署结果做证据化验证。用于 verify 阶段...
 ---
 
-# Verify Evidence
+# 证据化 Verify
 
-Goal: prove the deployed service handled this run's fresh trace, or explicitly return `uncertain`.
+目标：证明部署服务处理了当前 run 的新 trace；如果无法证明，必须返回 uncertain。
 
-## Verification policy
+## 验证策略
 
-1. Generate a unique trace id.
-2. Send a framework-specific request.
-3. Pass only when response/artifact/log proves current trace handling.
+1. 生成唯一 trace_id。
+2. 发送框架专用请求。
+3. 只有响应、产物或日志证明当前 trace 被处理，才能通过。
 ```
 
-The frontmatter should stay small. The `description` is important because the registry uses it for routing. The body should contain only durable operating rules, expected outputs, failure modes, and safety boundaries.
+Frontmatter 保持简洁。`name` 建议使用英文短标识，方便作为稳定 ID；`description` 可以写中文，但应保留关键英文技术词，例如 `Gradio`、`FastAPI`、`verify`、`trace_id`。
 
-## How the Agent reads skills
+正文可以使用中文。正文只写稳定规则、输出要求、失败模式和安全边界，不写临时想法。
 
-The loader is implemented in `src/auto_harness/skills/registry.py`.
+## Agent 如何读取 Skill
 
-For each stage, the orchestrator calls:
+加载逻辑在：
+
+```text
+src/auto_harness/skills/registry.py
+```
+
+每个阶段开始前，orchestrator 会调用：
 
 ```python
 skills.select_for_stage(stage, analysis, limit=3)
 ```
 
-The selected skills are stored in the stage result under:
+选中的技能会写入阶段结果：
 
 ```json
 {
@@ -91,17 +97,17 @@ The selected skills are stored in the stage result under:
 }
 ```
 
-The `sha256` is critical for auditability. If a future deployment behaves differently, the report can show which skill version was read.
+这里的 `sha256` 很重要。它保证后续排查时能知道某次部署到底读的是哪个版本的 skill。
 
-## Where to write memory
+## Memory 应该写在哪里
 
-Write cross-task issue memory under:
+跨任务的问题记忆统一写到：
 
 ```text
 memory/deployment_issues.jsonl
 ```
 
-This file is append-only and machine-readable. Each line records one reusable failure pattern:
+这是 append-only 的机器可读文件。每一行是一条可复用失败模式：
 
 ```json
 {
@@ -116,40 +122,56 @@ This file is append-only and machine-readable. Each line records one reusable fa
 }
 ```
 
-Markdown is not used as the source of truth for memory because retrieval, deduplication, and scoring are easier and safer with JSONL. Human-readable summaries can be generated into reports.
+Memory 不用 Markdown 作为源数据，是因为 JSONL 更适合检索、去重、打分和自动化处理。给人看的总结可以在 report 里生成。
 
-## How memory is used
+## Memory 如何参与下一次部署
 
-The memory store is implemented in `src/auto_harness/memory/store.py`.
-
-Before each stage, the orchestrator queries memory by stage and framework. After a stage returns `failed` or `uncertain`, the orchestrator writes a deduplicated memory entry. This prevents repeated failures from disappearing into logs.
-
-The important rule is that memory is advisory. It can influence diagnosis and repair, but it cannot override execution policy. For example, a memory entry may recommend editing a Gradio launch parameter, but the pipeline still must check `allow_source_edit`.
-
-## Verify module design focus
-
-The verify module should be the strongest part of this project because it prevents false positives.
-
-A weak deployment Agent checks:
+记忆模块在：
 
 ```text
-process exists + port open + HTTP 200 = success
+src/auto_harness/memory/store.py
 ```
 
-AI-Auto-Harness should check:
+每个阶段开始前，orchestrator 会按 stage 和 framework 检索相似问题。阶段返回 `failed` 或 `uncertain` 后，orchestrator 会写入去重后的 memory entry。
+
+重要原则：memory 只能作为建议，不能覆盖执行策略。
+
+例如，一条 memory 可以建议“修改 Gradio launch 参数”，但如果当前 `allow_source_edit=false`，pipeline 仍然不能自动改源码。
+
+## Verify 模块为什么要重点设计
+
+Verify 是这个项目最关键的工程价值点，因为它负责阻止“假成功”。
+
+弱部署 Agent 往往这样判断：
 
 ```text
-fresh trace generated + service invoked + response/artifact/log proves trace handling = success
+进程存在 + 端口打开 + HTTP 200 = 成功
 ```
 
-This is why the `verify-evidence` skill says HTTP 200 is only readiness evidence. The verify stage must produce an evidence file containing request, response, trace id, status, and reason. If the trace cannot be observed, the result should stay `uncertain`, and the issue should be written to memory for later improvement.
+AI-Auto-Harness 应该这样判断：
 
-## Interview framing
+```text
+生成新 trace + 调用服务 + 响应/产物/日志证明 trace 被处理 = 成功
+```
 
-For interviews, describe this as a "skill-driven, memory-augmented deployment Agent":
+所以 `verify-evidence` skill 明确规定：HTTP 200 只能说明服务可能活着，不能说明业务链路成功。
 
-- The orchestrator is deterministic and policy-bound.
-- Skills are versioned operational knowledge.
-- Memory is structured postmortem data, not vague chat history.
-- Verify is evidence-driven and intentionally refuses false success.
-- LLM/Claude/讯飞 can be plugged into uncertain stages, but the Python controller remains the source of truth for state, safety, and audit.
+Verify 阶段必须产生 evidence 文件，记录 request、response、trace_id、status 和 reason。如果无法观测到 trace，结果应该保持 `uncertain`，并把问题写入 memory，供后续类似项目复用。
+
+## 面试表达方式
+
+这个设计可以概括为：
+
+```text
+skill-driven, memory-augmented deployment Agent
+```
+
+也就是“技能文档驱动、问题记忆增强的自动部署 Agent”。
+
+面试中可以这样讲：
+
+- 编排器是确定性的，负责状态、权限、命令执行和证据。
+- Skill 是版本化的运维知识，把部署经验从代码中解耦出来。
+- Memory 是结构化 postmortem，不是模糊聊天历史。
+- Verify 是证据驱动的，宁可返回 uncertain，也不能产生 false positive。
+- Claude/讯飞可以接入不确定阶段，但 Python controller 始终掌握状态、安全边界和审计链路。

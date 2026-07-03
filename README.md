@@ -1,31 +1,31 @@
 # AI-Auto-Harness
 
-AI-Auto-Harness is a Python-controlled Agent pipeline for deploying and verifying AI open-source demo projects.
+AI-Auto-Harness 是一个面向 AI 开源 demo 项目的自动部署与验证 Agent。
 
-The project is intentionally built around deterministic orchestration plus bounded Agent execution:
+项目采用“确定性 Python 编排 + 受控 Agent 执行”的架构：
 
-- Python owns workflow state, retries, timeouts, filesystem boundaries, and evidence checks.
-- Claude Code headless or another executor handles uncertain stage work such as project reading and log diagnosis.
-- LLM providers, including Xunfei Spark, are abstracted behind a provider interface.
-- `verify` is evidence-driven and must not treat a live port or HTTP 200 as final success.
+- Python 负责工作流状态、重试、超时、文件边界和证据校验。
+- Claude Code headless 或其他 executor 负责项目阅读、日志诊断等不确定任务。
+- 讯飞 Spark 等 LLM provider 通过统一接口接入。
+- `verify` 是证据驱动的，不能把端口开放或 HTTP 200 直接当成部署成功。
 
-## Current MVP
+## 当前 MVP
 
-This repository currently includes:
+当前仓库已经包含：
 
-- CLI: `init`, `deploy`, `resume`, `status`, `report`, `llm-test`.
-- Task state store: `task.json`, `state.json`, `events.jsonl`.
-- Deterministic project analyzer.
-- Safe `env_deploy`, `runner`, `verify`, and report modules.
-- Mock LLM provider and Xunfei Anthropic-compatible provider.
-- Claude Code executor wrapper.
-- HTTP trace evidence in `verify`: GET and POST JSON responses must prove the current trace was handled; HTTP 200 alone is not enough.
-- Optional Claude Code analyzer advisor via `AUTO_HARNESS_USE_AGENT_ANALYZER=1`.
-- Repo-local deployment skills under `skills/*/SKILL.md`, selected per stage and recorded with hashes.
-- Structured issue memory under `memory/deployment_issues.jsonl`, used to retrieve similar historical failures.
-- Progress report in `docs/progress.md`.
+- CLI：`init`、`deploy`、`resume`、`status`、`report`、`llm-test`。
+- 任务状态存储：`task.json`、`state.json`、`events.jsonl`。
+- 确定性项目分析器。
+- 安全默认的 `env_deploy`、`runner`、`verify`、report 模块。
+- Mock LLM provider 和讯飞 Anthropic-compatible provider。
+- Claude Code executor wrapper。
+- HTTP trace evidence：`verify` 支持 GET 和 POST JSON；响应必须证明当前 trace 被处理，HTTP 200 本身不算成功。
+- 可选 Claude Code analyzer advisor：通过 `AUTO_HARNESS_USE_AGENT_ANALYZER=1` 启用。
+- 仓库内置 skill：位于 `skills/*/SKILL.md`，按阶段选择并记录 hash。
+- 结构化问题记忆：位于 `memory/deployment_issues.jsonl`，用于检索历史相似失败。
+- 开发进度报告：`docs/progress.md`。
 
-## Quick Start
+## 快速开始
 
 ```bash
 python3 -m auto_harness.cli init
@@ -34,23 +34,23 @@ python3 -m auto_harness.cli status --task-id <task-id>
 python3 -m auto_harness.cli report --task-id <task-id>
 ```
 
-For local source execution:
+本地源码运行：
 
 ```bash
 PYTHONPATH=src python3 -m auto_harness.cli init
 ```
 
-To execute installation/startup rather than dry-run planning, be explicit:
+如果要真正执行依赖安装和服务启动，需要显式打开执行开关：
 
 ```bash
 PYTHONPATH=src python3 -m auto_harness.cli deploy --repo ./demo --name demo --execute --allow-install --allow-start
 ```
 
-You can also pass a local project path as `--repo`; it will be copied into the run workspace.
+`--repo` 也可以传入本地项目路径，系统会复制到隔离的 run workspace。
 
-## Xunfei Configuration
+## 讯飞配置
 
-Set secrets through environment variables only:
+密钥只能通过环境变量注入：
 
 ```bash
 export XUNFEI_APP_ID="..."
@@ -58,22 +58,22 @@ export XUNFEI_API_KEY="..."
 export XUNFEI_API_SECRET="..."
 export XUNFEI_MODEL="..."
 export XUNFEI_API_BASE="..."
-# or export XUNFEI_API_URL="..."
+# 或者 export XUNFEI_API_URL="..."
 ```
 
-Do not commit a real `.env` file. Keep secrets in your local shell, secret manager, or CI secret settings.
+不要提交真实 `.env` 文件。密钥应放在本地 shell、secret manager 或 CI secret settings 中。
 
-The Xunfei provider defaults to an Anthropic-compatible messages payload. If Claude Code cannot directly use Xunfei, use the local LLM provider path and keep Claude Code as an optional executor.
+当前讯飞 provider 默认使用 Anthropic-compatible messages payload。如果 Claude Code 无法直接使用讯飞，可以走本项目的本地 LLM provider 路径，把 Claude Code 作为可选 executor。
 
-Provider smoke test:
+Provider smoke test：
 
 ```bash
 PYTHONPATH=src python3 -m auto_harness.cli llm-test --provider xunfei --prompt "Return JSON only: {\"status\":\"ok\"}"
 ```
 
-## Optional Claude Code Analyzer Advisor
+## 可选 Claude Code Analyzer Advisor
 
-The deterministic analyzer runs by default. To let Claude Code provide optional JSON advice during analysis:
+确定性 analyzer 默认开启。若要让 Claude Code 在 analyze 阶段提供可选 JSON 建议：
 
 ```bash
 export AUTO_HARNESS_USE_AGENT_ANALYZER=1
@@ -81,28 +81,28 @@ export CLAUDE_CODE_CMD="claude --print --output-format json"
 PYTHONPATH=src python3 -m auto_harness.cli deploy --repo ./demo --name demo --dry-run
 ```
 
-Agent advice is stored under `analyze_result.json` as optional metadata and does not bypass the deterministic pipeline.
+Agent advice 会写入 `analyze_result.json` 作为可选元数据，但不能绕过确定性 pipeline。
 
-## Skills and Memory
+## Skill 与 Memory
 
-Write Agent control documents as repo-local skills:
+Agent 控制文档写在仓库内：
 
 ```text
 skills/<skill-name>/SKILL.md
 ```
 
-Current built-in skills cover project analysis, Python WebUI deployment, evidence-driven verification, and runtime failure diagnosis. During a deployment, the orchestrator selects relevant skills for each stage and stores their names, paths, and SHA-256 hashes in the stage result under `control_context`.
+当前内置 skill 覆盖项目分析、Python WebUI 部署、证据化验证和运行失败诊断。部署过程中，orchestrator 会为每个阶段选择相关 skill，并把名称、路径和 SHA-256 写入阶段结果的 `control_context`。
 
-Runtime issue memory is stored as JSONL:
+运行时问题记忆写入：
 
 ```text
 memory/deployment_issues.jsonl
 ```
 
-This file is ignored by git because it can contain deployment logs or environment-specific symptoms. The Agent writes memory when a stage is `failed` or `uncertain`, then retrieves similar issues by stage/framework in later deployments. See `docs/skill-memory-design.md` for the detailed design.
+该文件被 git 忽略，因为它可能包含部署日志或环境相关症状。Agent 会在阶段 `failed` 或 `uncertain` 时写入 memory，并在后续部署中按 stage/framework 检索相似问题。详细设计见 `docs/skill-memory-design.md`。
 
-## Safety Defaults
+## 安全默认值
 
-By default, `deploy` runs as a dry run and does not install dependencies or start long-running services unless explicit execution flags are passed.
+默认情况下，`deploy` 是 dry-run，不会安装依赖，也不会启动长驻服务，除非显式传入执行参数。
 
-Execution mode is additionally guarded by command policy. `env_deploy` and `runner` reject commands whose executable name is not listed in `allowed_commands` in `configs/default.json`.
+执行模式还受命令白名单保护。`env_deploy` 和 `runner` 会拒绝 `configs/default.json` 的 `allowed_commands` 之外的命令。

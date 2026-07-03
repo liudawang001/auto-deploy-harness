@@ -1,34 +1,34 @@
 ---
 name: diagnose-runtime-failure
-description: Diagnose and repair recurring automatic deployment failures. Use when env_deploy, runner, or verify is failed/uncertain, when logs contain dependency errors, process exits, missing model files, port conflicts, API key issues, or verification gaps, and when writing reusable issue memory.
+description: 诊断并沉淀自动部署中的复发问题。用于 env_deploy、runner、verify 阶段失败或 uncertain 时，处理依赖错误、进程退出、模型文件缺失、端口冲突、API key 缺失、验证证据不足，并写入可复用 issue memory。
 ---
 
-# Diagnose Runtime Failure
+# 运行失败诊断
 
-Goal: turn a failed or uncertain stage into a reusable diagnosis without leaking secrets or inventing success.
+目标：把失败或不确定阶段转化为可复用的问题诊断，避免泄漏密钥，也不伪造成功。
 
-## Triage order
+## 排查顺序
 
-1. Identify the failing stage and latest evidence path.
-2. Read only bounded log tails and stored stage JSON.
-3. Classify root cause:
-   - dependency failure;
-   - command or entrypoint mismatch;
-   - service readiness failure;
-   - model asset or hardware requirement;
-   - missing environment variable;
-   - verification gap.
-4. Decide whether the fix is safe under current policy:
-   - dependency install allowed;
-   - service start allowed;
-   - source edit allowed;
-   - network/model download allowed.
-5. Write the issue memory with symptom, root cause, affected framework, evidence, and next action.
+1. 确认失败阶段和最新 evidence 路径。
+2. 只读取有界日志尾部和阶段 JSON 结果。
+3. 分类根因：
+   - 依赖安装失败；
+   - 启动命令或入口文件不匹配；
+   - 服务就绪失败；
+   - 模型资产或硬件需求缺失；
+   - 环境变量缺失；
+   - 验证链路证据不足。
+4. 判断修复是否被当前策略允许：
+   - 是否允许安装依赖；
+   - 是否允许启动服务；
+   - 是否允许修改源代码；
+   - 是否允许联网或下载模型。
+5. 写入 issue memory，包含 symptom、root cause、affected framework、evidence 和 next action。
 
-## Memory writing rules
+## 记忆写入规则
 
-Record reusable patterns, not one-off noise. Keep secret values out. Include variable names only when useful. Prefer actionable signatures such as `gradio api shape unknown` or `torch wheel incompatible with python version`.
+记录可复用模式，不记录一次性噪声。不要写入密钥值。环境变量只记录变量名。优先形成可检索签名，例如 `gradio api shape unknown` 或 `torch wheel incompatible with python version`。
 
-## Repair boundaries
+## 修复边界
 
-Do not silently modify source code when `allow_source_edit` is false. Do not retry indefinitely. Do not treat a workaround as verified until the verify stage produces strong evidence.
+当 `allow_source_edit` 为 false 时，不要静默修改源码。不要无限重试。任何 workaround 都必须重新经过 verify 阶段并产生强证据后，才能视为成功。

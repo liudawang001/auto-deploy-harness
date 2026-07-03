@@ -1,33 +1,33 @@
 ---
 name: deploy-python-webui
-description: Deploy Python AI web UI projects. Use during env_deploy and runner stages for Gradio, Streamlit, Flask, FastAPI, PyTorch, Transformers, and requirements-based repositories that need virtualenv setup, dependency installation, startup command selection, and port readiness checks.
+description: 部署 Python AI WebUI 项目。用于 env_deploy 和 runner 阶段，覆盖 Gradio、Streamlit、Flask、FastAPI、PyTorch、Transformers、requirements 项目的虚拟环境创建、依赖安装、启动命令选择和端口就绪检查。
 ---
 
-# Deploy Python WebUI
+# Python WebUI 部署
 
-Goal: build an isolated Python runtime and start the most likely service command with bounded permissions.
+目标：在隔离的运行目录中构建 Python 环境，并用受控权限启动最可能正确的服务命令。
 
-## Procedure
+## 执行流程
 
-1. Create `.venv` in the copied run workspace.
-2. Install from the strongest dependency source:
-   - `requirements.txt`: `.venv/bin/python -m pip install -r requirements.txt`
-   - `pyproject.toml`: `.venv/bin/python -m pip install .`
-   - `setup.py`: `.venv/bin/python -m pip install .`
-3. Select runner command by framework:
-   - Gradio: `.venv/bin/python app.py` or another entrypoint containing `.launch`.
-   - Streamlit: `.venv/bin/streamlit run app.py`.
-   - FastAPI: prefer `uvicorn module:app --host 127.0.0.1 --port 8000` when app object is clear.
-4. Capture stdout/stderr to the run log.
-5. Treat process exit before readiness as failure, even when the command printed a URL earlier.
+1. 在复制后的 run workspace 中创建 `.venv`。
+2. 按证据强度选择依赖安装方式：
+   - `requirements.txt`：`.venv/bin/python -m pip install -r requirements.txt`
+   - `pyproject.toml`：`.venv/bin/python -m pip install .`
+   - `setup.py`：`.venv/bin/python -m pip install .`
+3. 按框架选择启动命令：
+   - Gradio：优先运行包含 `.launch` 的入口文件，例如 `.venv/bin/python app.py`。
+   - Streamlit：使用 `.venv/bin/streamlit run app.py`。
+   - FastAPI：若能明确 `app` 对象，优先使用 `uvicorn module:app --host 127.0.0.1 --port 8000`。
+4. 将 stdout/stderr 写入 run log。
+5. 如果进程在就绪前退出，即使日志中曾打印 URL，也必须判定为失败。
 
-## Common failure handling
+## 常见失败处理
 
-- Missing module after install: record package name and dependency file, then propose adding a pinned dependency only when source edits are allowed.
-- Port occupied: try a configured alternate port only if the framework supports it without source edits.
-- GPU or model download failure: record environment requirement; do not fake success with a blank UI.
-- API key missing: record required variable names; never persist secret values.
+- 安装后缺失模块：记录缺失包名和依赖文件；只有在允许修改源代码时，才建议补充或 pin 依赖。
+- 端口被占用：只有框架支持无源码改动切换端口时，才尝试备用端口。
+- GPU 或模型下载失败：记录环境需求；不能用空白 UI 伪造成功。
+- API key 缺失：只记录变量名，不记录密钥值。
 
-## Evidence
+## 证据要求
 
-Deployment is not complete until the runner stage has a live process, a ready port when applicable, and a log path for later diagnosis.
+部署阶段不等于验证成功。runner 阶段至少需要活跃进程、端口就绪证据以及可供后续诊断的日志路径。
