@@ -80,6 +80,7 @@
   - runtime memory JSONL 被 git 忽略，避免提交日志或环境相关信息
 - 增加 `docs/skill-memory-design.md`，说明 skill-driven、memory-augmented Agent 设计。
 - 将 README、进度报告、skill 文档和 skill/memory 设计文档改为中文，保留必要英文技术关键词。
+- 增加 `docs/optimization-roadmap.md`，形成面向真实开源模型全自动部署的详细优化计划，覆盖模型下载、缓存、资源预估、环境求解、长任务状态、诊断修复、verify、安全和 benchmark。
 
 ### 当前行为
 
@@ -111,6 +112,7 @@
    - 服务启动后立刻退出。
 9. 增加 repair-loop，让 Agent 使用 selected skills 和 memory hits 提出或执行受控修复。
 10. 增加 memory promotion 工作流，把反复出现的问题记忆提升为稳定 `SKILL.md` 规则。
+11. 根据 `docs/optimization-roadmap.md` 先实现 P0：`resource_plan`、`model_prepare`、模型缓存、Gradio API discovery、log classifier 和 repair plan schema。
 
 ### 已知限制
 

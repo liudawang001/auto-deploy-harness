@@ -101,6 +101,16 @@ memory/deployment_issues.jsonl
 
 该文件被 git 忽略，因为它可能包含部署日志或环境相关症状。Agent 会在阶段 `failed` 或 `uncertain` 时写入 memory，并在后续部署中按 stage/framework 检索相似问题。详细设计见 `docs/skill-memory-design.md`。
 
+## 优化路线图
+
+面向真实开源模型自动部署的长期优化计划见：
+
+```text
+docs/optimization-roadmap.md
+```
+
+该文档覆盖模型下载与缓存、断点续传、资源预估、CUDA/PyTorch 环境求解、长任务状态机、自动诊断修复、增强 verify、安全沙箱和 benchmark 体系。
+
 ## 安全默认值
 
 默认情况下，`deploy` 是 dry-run，不会安装依赖，也不会启动长驻服务，除非显式传入执行参数。
