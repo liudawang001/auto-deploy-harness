@@ -34,6 +34,11 @@
       "id": "checksum_failure",
       "purpose": "验证模型文件 checksum 不一致时不会进入缓存成功态",
       "expected_signal": "download status becomes failed with sha256 mismatch"
+    },
+    {
+      "id": "browser_dom_trace",
+      "purpose": "验证浏览器 DOM 中出现当前 trace 时可以作为强证据",
+      "expected_signal": "browser_dom_probe status is pass"
     }
   ]
 }

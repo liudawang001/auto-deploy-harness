@@ -25,10 +25,10 @@ AI-Auto-Harness 是一个面向 AI 开源 demo 项目的自动部署与验证 Ag
 - 结构化问题记忆：位于 `memory/deployment_issues.jsonl`，用于检索历史相似失败。
 - `resource_plan` 阶段：识别模型资产、GPU/CUDA 信号、磁盘风险和外部 token 需求。
 - `model_prepare` 阶段：生成模型资产 manifest、缓存 key 和 `model_cache` 路径；执行模式下支持 Hugging Face / ModelScope 文件清单解析、断点续传、sha256 校验字段和缓存写入。
-- `verify` 增强：支持 Gradio `/config` discovery 和 Streamlit DOM/HTML 证据探测。
+- `verify` 增强：支持 Gradio `/config` discovery、Streamlit DOM/HTML 证据探测，以及可选 Playwright 浏览器 DOM probe。
 - 日志规则分类器：对缺依赖、CUDA OOM、磁盘不足、token 权限、wheel 构建失败等常见错误生成结构化诊断。
 - Repair plan：失败或 uncertain 阶段会生成结构化修复建议，经过 policy 校验后写入受控 repair artifacts；下一次 `resume` 会在 policy 允许时把安装建议和 verify hint 回灌到 pipeline 输入，但仍不会绕过 `--execute`、命令白名单或源码修改限制。
-- Benchmark fixtures：`tests/fixtures/benchmarks` 覆盖下载续传、缓存命中、Gradio `/config` discovery、Streamlit 错误页面、HTTP 200 false-positive 防护、repair policy 拒绝和 checksum 失败。
+- Benchmark fixtures：`tests/fixtures/benchmarks` 覆盖下载续传、缓存命中、Gradio `/config` discovery、浏览器 DOM trace、Streamlit 错误页面、HTTP 200 false-positive 防护、repair policy 拒绝和 checksum 失败。
 - 开发进度报告：`docs/progress.md`。
 
 ## 快速开始
@@ -131,6 +131,23 @@ model_cache/
 
 阶段进度会写入 `state.json` 的 `model_prepare.progress`，包括当前文件、已下载字节、总字节和状态。
 
+## Browser Verify
+
+`VerifyModule` 会对 Gradio、Streamlit 或 `verify_hint.service_type=webui` 的服务增加 `browser_dom_probe`。该 probe 会给页面 URL 注入当前 trace id，并检查浏览器渲染后的 DOM：
+
+- DOM 中包含当前 trace id 时，可作为强证据通过。
+- DOM 中包含 traceback、import error、runtime error 等错误标记时，判定为失败证据。
+- DOM 加载成功但没有 trace 时保持 `uncertain`，不会因为页面能打开就误判成功。
+
+浏览器 backend 使用可选 Python Playwright：
+
+```bash
+python3 -m pip install playwright
+python3 -m playwright install chromium
+```
+
+如果环境没有安装 Playwright，`browser_dom_probe` 会记录 `uncertain` 证据，不会阻塞已有 HTTP trace 或 artifact evidence。
+
 ## 优化路线图
 
 面向真实开源模型自动部署的长期优化计划见：
@@ -154,6 +171,7 @@ PYTHONPATH=src python3 -m auto_harness.cli benchmark --manifest tests/fixtures/b
 - 模型下载断点续传。
 - 缓存命中避免重复下载。
 - Gradio `/config` discovery 构造 `/api/predict` trace 请求。
+- 浏览器 DOM 中出现当前 trace 时可以作为强证据。
 - Streamlit HTTP 200 错误页面不能通过 verify。
 - HTTP 200 但无当前 trace 不能判定成功。
 - 权限不足时 repair action 被 policy 拒绝。

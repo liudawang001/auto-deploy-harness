@@ -27,6 +27,7 @@ from auto_harness.skills import SkillRegistry
 from auto_harness.state import StateStore
 from auto_harness.orchestrator import TaskRunner
 from auto_harness.repair import RepairApplier, RepairOverlay, RepairPlanner, RepairPolicy
+from auto_harness.verify import BrowserVerifier
 from auto_harness.utils.time import utc_now_iso
 
 
@@ -76,6 +77,23 @@ class FakeAgentExecutor:
 
     def resume(self, session_id, request):
         return self.run(request)
+
+
+class FakeBrowserBackend:
+    def __init__(self, html_template: str):
+        self.html_template = html_template
+        self.urls = []
+
+    def load(self, url: str, timeout_ms: int = 15000, screenshot_path: Path = None):
+        self.urls.append(url)
+        trace = url.split("_auto_harness_trace=", 1)[1] if "_auto_harness_trace=" in url else ""
+        return {
+            "status": "loaded",
+            "url": url,
+            "title": "fake browser",
+            "status_code": 200,
+            "html": self.html_template.replace("{{trace_id}}", trace),
+        }
 
 
 class CoreTests(unittest.TestCase):
@@ -514,6 +532,33 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(checks["streamlit_dom_probe"]["status"], "fail")
             self.assertEqual(result.status, "uncertain")
 
+    def test_verify_browser_dom_probe_can_pass_with_trace(self):
+        def fake_urlopen(req, timeout):
+            return FakeHttpResponse("http response without trace")
+
+        browser = BrowserVerifier(
+            browser_backend=FakeBrowserBackend('<html><body><div class="gradio-container">{{trace_id}}</div></body></html>')
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / "workspace" / "repo").mkdir(parents=True)
+            result = VerifyModule(urlopen=fake_urlopen, browser_verifier=browser).verify(
+                run_dir,
+                analysis={"frameworks": ["gradio"], "verify_hint": {"endpoint": "http://127.0.0.1:7860"}},
+                runner_result={"pid": 1234, "expected_port": 7860, "service_ready": True},
+            )
+            checks = {check["name"]: check for check in result.data["checks"]}
+            self.assertEqual(checks["browser_dom_probe"]["status"], "pass")
+            self.assertEqual(result.status, "passed")
+
+    def test_browser_dom_probe_fails_on_error_marker(self):
+        browser = BrowserVerifier(
+            browser_backend=FakeBrowserBackend("<html><body>Traceback (most recent call last)</body></html>")
+        )
+        check = browser.probe("http://127.0.0.1:7860", "trace123", frameworks=["gradio"])
+        self.assertEqual(check["status"], "fail")
+        self.assertEqual(check["name"], "browser_dom_probe")
+
     def test_model_prepare_progress_callback_receives_download_updates(self):
         with tempfile.TemporaryDirectory() as tmp:
             cache = ModelCache(Path(tmp) / "model_cache")
@@ -557,11 +602,12 @@ class CoreTests(unittest.TestCase):
         self.assertIn("gradio_config_discovery", ids)
         self.assertIn("repair_policy_reject", ids)
         self.assertIn("checksum_failure", ids)
+        self.assertIn("browser_dom_trace", ids)
 
     def test_benchmark_runner_executes_all_fixture_cases(self):
         report = BenchmarkRunner().run(Path("tests/fixtures/benchmarks/manifest.json"))
         self.assertEqual(report["status"], "passed")
-        self.assertEqual(len(report["cases"]), 7)
+        self.assertEqual(len(report["cases"]), 8)
         self.assertTrue(all(case["status"] == "passed" for case in report["cases"]))
 
     def test_benchmark_cli_writes_output(self):

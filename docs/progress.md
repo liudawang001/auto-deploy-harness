@@ -5,6 +5,12 @@
 ### 已完成
 
 - 继续执行 P0/P1 优化任务：
+  - 新增 `BrowserVerifier` 和可选 `PlaywrightBrowserBackend`，用于 Gradio/Streamlit/webui 的浏览器 DOM probe。
+  - `VerifyModule` 会对 webui 服务写入 `browser_dom_probe` evidence；DOM 包含当前 trace id 可作为强证据，DOM 出现 traceback/import/runtime error 会作为失败证据。
+  - Playwright 是可选依赖；未安装时只记录 `uncertain`，不会让 HTTP trace 或 artifact evidence 被误判失败。
+  - Benchmark cases 从 7 个扩展到 8 个，新增 `browser_dom_trace`。
+  - 单测扩展到 33 个，覆盖浏览器 DOM trace 通过和错误标记失败。
+- 继续执行 P0/P1 优化任务：
   - 新增 `RepairOverlay`，可读取 policy 允许后生成的 repair artifacts。
   - 下一次 `run_existing` / `resume` 会把 `repair_install_plan.json` 合并到 `env_deploy` 的 install plan，把 `repair_verify_hints.json` 合并到 `verify_hint`。
   - Overlay 只改变阶段输入，不直接执行 shell，不绕过 `--execute`、RuntimePolicy 或命令白名单；被拒绝的 repair artifact 不会生效。
@@ -32,10 +38,10 @@
 
 ### 下一步
 
-1. 增加 Playwright 或其他 browser backend，用于 Streamlit/Gradio 的真实交互验证。
-2. 增强下载器并发、etag 强一致校验和缓存清理策略。
-3. 增加 repair loop 的受控重试次数、rerun_from 安全回退和人工审批入口。
-4. 扩展 benchmark cases：服务启动后退出、历史 artifact 干扰、Gradio API shape 变化、token 缺失。
+1. 增强下载器并发、etag 强一致校验和缓存清理策略。
+2. 增加 repair loop 的受控重试次数、rerun_from 安全回退和人工审批入口。
+3. 扩展 benchmark cases：服务启动后退出、历史 artifact 干扰、Gradio API shape 变化、token 缺失。
+4. 增加真实 Playwright smoke test 文档和可选 CI job，在安装 Playwright 的环境中验证浏览器 backend。
 
 ## 2026-07-03
 

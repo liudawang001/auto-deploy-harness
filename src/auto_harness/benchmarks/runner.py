@@ -9,7 +9,7 @@ from auto_harness.models.base import write_json
 from auto_harness.modules.verify import VerifyModule
 from auto_harness.models.task import RuntimePolicy
 from auto_harness.repair import RepairPolicy
-from auto_harness.verify import StreamlitVerifier
+from auto_harness.verify import BrowserVerifier, StreamlitVerifier
 
 
 class _FakeResponse:
@@ -30,6 +30,18 @@ class _FakeResponse:
         chunk = self.body[self.offset:self.offset + size]
         self.offset += len(chunk)
         return chunk
+
+
+class _FakeBrowserBackend:
+    def load(self, url: str, timeout_ms: int = 15000, screenshot_path: Path = None) -> Dict:
+        trace = url.split("_auto_harness_trace=", 1)[1] if "_auto_harness_trace=" in url else ""
+        return {
+            "status": "loaded",
+            "url": url,
+            "title": "fake gradio",
+            "status_code": 200,
+            "html": '<html><body><div class="gradio-container">%s</div></body></html>' % trace,
+        }
 
 
 class BenchmarkRunner:
@@ -65,6 +77,8 @@ class BenchmarkRunner:
                 return self._case_repair_policy_reject(case)
             if case_id == "checksum_failure":
                 return self._case_checksum_failure(case)
+            if case_id == "browser_dom_trace":
+                return self._case_browser_dom_trace(case)
             return self._result(case, "skipped", "unknown benchmark case")
         except Exception as exc:  # noqa: BLE001 - benchmark report should continue
             return self._result(case, "failed", str(exc))
@@ -194,6 +208,25 @@ class BenchmarkRunner:
             result = HuggingFaceDownloader(urlopen=fake_urlopen, token="", chunk_size=1).download(asset)
         ok = result.status == "failed" and "sha256 mismatch" in (result.last_error or "")
         return self._result(case, "passed" if ok else "failed", "checksum mismatch failed the download")
+
+    def _case_browser_dom_trace(self, case: Dict) -> Dict:
+        def fake_urlopen(req, timeout):
+            return _FakeResponse("ok without trace")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / "workspace" / "repo").mkdir(parents=True)
+            result = VerifyModule(
+                urlopen=fake_urlopen,
+                browser_verifier=BrowserVerifier(browser_backend=_FakeBrowserBackend()),
+            ).verify(
+                run_dir,
+                analysis={"frameworks": ["gradio"], "verify_hint": {"endpoint": "http://127.0.0.1:7860"}},
+                runner_result={"pid": 1234, "expected_port": 7860, "service_ready": True},
+            )
+        checks = {check["name"]: check for check in result.data["checks"]}
+        ok = result.status == "passed" and checks["browser_dom_probe"]["status"] == "pass"
+        return self._result(case, "passed" if ok else "failed", "browser DOM trace evidence verified")
 
     def _result(self, case: Dict, status: str, reason: str) -> Dict:
         return {
