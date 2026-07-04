@@ -5,6 +5,13 @@
 ### 已完成
 
 - 继续执行 P0/P1 优化任务：
+  - `TaskRunner.run_existing` 支持 `start_stage`，可以复用目标阶段之前的历史 `pipeline_results.json` / `*_result.json`，只重跑目标阶段及其后续阶段。
+  - `resume` 会读取已允许的 `repair_apply_result.json` / `repair_plan.json`，按 `rerun_from_effective` 从 `analyze`、`resource_plan`、`env_deploy`、`model_prepare`、`runner` 或 `verify` 中的安全阶段继续。
+  - 如果前置 stage result 缺失或结构不完整，会写入 `resume_stage_fallback` 事件，并安全回退到 `analyze` 全量重跑，避免复用坏状态。
+  - Repair overlay 仍只影响阶段输入，不直接执行 shell；例如 `repair_verify_hints.json` 可以让 resume 只从 `verify` 重跑并应用新的 endpoint/request hint。
+  - Benchmark cases 从 17 个扩展到 18 个，新增 `repair_resume_stage_jump`。
+  - 单测扩展到 51 个，覆盖 verify 阶段跳转、缺失前置结果回退和 rejected repair 不触发阶段跳转。
+- 继续执行 P0/P1 优化任务：
   - 将下载并发、下载重试和缓存清理阈值暴露到 `HarnessConfig` 与 `configs/default.json`。
   - `TaskRunner` 会按配置创建 Hugging Face / ModelScope 下载器，`model_prepare` 不再只能使用硬编码下载参数。
   - `deploy` / `resume` 新增 `--model-download-workers`、`--download-retries`、`--download-retry-backoff`，支持单次任务临时覆盖下载策略。
@@ -68,9 +75,9 @@
 ### 下一步
 
 1. 增加真实 Playwright smoke test 文档和可选 CI job，在安装 Playwright 的环境中验证浏览器 backend。
-2. 增加 repair resume 的阶段级跳转执行，按 `rerun_from_effective` 从安全阶段重跑，而不是总是全量 pipeline。
-3. 增加 token 缺失时的可操作提示，把所需变量名写入 report，但不记录密钥值。
-4. 为缓存清理增加更细粒度策略，例如按模型源、repo id 或 keep-list 排除关键模型。
+2. 增加 token 缺失时的可操作提示，把所需变量名写入 report，但不记录密钥值。
+3. 为缓存清理增加更细粒度策略，例如按模型源、repo id 或 keep-list 排除关键模型。
+4. 增加 repair resume 的执行审计摘要，在 report 中展示本次 resume 复用了哪些 stage、重跑了哪些 stage。
 
 ## 2026-07-03
 

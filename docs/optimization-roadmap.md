@@ -349,7 +349,7 @@ action 类型：
 - Python controller 校验 action 是否允许。
 - `allow_source_edit=false` 时禁止源码 patch。
 - 每个 repair 必须有 rollback。
-- repair 后必须从 last safe stage 重新运行。
+- repair 后必须从 policy/loop 生成的 `rerun_from_effective` 安全阶段重新运行；如果前置阶段结果缺失或损坏，则回退到 `analyze`。
 - repair 成功后将模式写入 memory。
 
 验收标准：
@@ -823,7 +823,7 @@ src/auto_harness/
 3. 将 state 扩展为可记录 download progress。已完成第一版，stage progress 写入 `state.json`。
 4. 增强 Gradio `/config` API discovery。已完成第一版，支持 dependency `api_name` / `fn_index`。
 5. 增加 log classifier 第一批规则。已完成第一版，覆盖常见依赖、CUDA、磁盘、权限和版本冲突错误。
-6. 设计 repair plan schema，并在失败时生成建议但暂不自动 apply。已完成第一版；当前已增加 policy 校验和 artifact 级受控 apply，但仍不会直接执行 shell 或修改源码。
+6. 设计 repair plan schema，并在失败时生成建议但暂不自动 apply。已完成第一版；当前已增加 policy 校验、artifact 级受控 apply 和按 `rerun_from_effective` 的阶段级 resume，但仍不会直接执行 shell 或修改源码。
 
 第 2 周结束时应达到：
 

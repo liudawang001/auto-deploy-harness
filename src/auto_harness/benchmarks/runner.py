@@ -5,12 +5,14 @@ from typing import Dict, List
 
 from auto_harness.assets import HuggingFaceDownloader, ModelCache
 from auto_harness.assets.manifest import ModelAsset
+from auto_harness.config import HarnessConfig
 from auto_harness.diagnostics import LogClassifier
 from auto_harness.models.base import write_json
 from auto_harness.modules.runner import RunnerModule
 from auto_harness.modules.verify import VerifyModule
 from auto_harness.models.task import RuntimePolicy
 from auto_harness.repair import RepairLoopController, RepairPolicy
+from auto_harness.orchestrator import TaskRunner
 from auto_harness.verify import BrowserVerifier, StreamlitVerifier
 
 
@@ -99,6 +101,8 @@ class BenchmarkRunner:
                 return self._case_gradio_api_shape_variation(case)
             if case_id == "token_missing_diagnosis":
                 return self._case_token_missing_diagnosis(case)
+            if case_id == "repair_resume_stage_jump":
+                return self._case_repair_resume_stage_jump(case)
             return self._result(case, "skipped", "unknown benchmark case")
         except Exception as exc:  # noqa: BLE001 - benchmark report should continue
             return self._result(case, "failed", str(exc))
@@ -399,6 +403,46 @@ class BenchmarkRunner:
         diagnosis = LogClassifier().classify("401 Unauthorized: Repository Not Found. Please set HF_TOKEN.")
         ok = diagnosis["category"] == "auth_required" and diagnosis["confidence"] >= 0.9
         return self._result(case, "passed" if ok else "failed", "token missing diagnosis verified")
+
+    def _case_repair_resume_stage_jump(self, case: Dict) -> Dict:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            (repo / "app.py").write_text("import gradio as gr\n", encoding="utf-8")
+            runner = TaskRunner(HarnessConfig(
+                runs_dir=str(root / "runs"),
+                memory_dir=str(root / "memory"),
+                model_cache_dir=str(root / "model_cache"),
+            ))
+            task_id = runner.deploy(str(repo), "demo", dry_run=True)
+            run_dir = root / "runs" / task_id
+            before = self._stage_update_count(run_dir)
+            repair_dir = run_dir / "repairs"
+            repair_dir.mkdir(exist_ok=True)
+            write_json(repair_dir / "repair_apply_result.json", {
+                "status": "applied",
+                "policy": {"allowed": True, "loop": {"rerun_from_effective": "verify"}},
+            })
+            write_json(repair_dir / "repair_verify_hints.json", {
+                "verify_hints": [{"endpoint": "http://127.0.0.1:9"}],
+            })
+            runner.resume(task_id, dry_run=True)
+            after = self._stage_update_count(run_dir)
+            ok = (
+                after.get("verify", 0) > before.get("verify", 0)
+                and after.get("report", 0) > before.get("report", 0)
+                and all(after.get(stage, 0) == before.get(stage, 0) for stage in ("analyze", "resource_plan", "env_deploy", "model_prepare", "runner"))
+            )
+        return self._result(case, "passed" if ok else "failed", "repair resume stage jump verified")
+
+    def _stage_update_count(self, run_dir: Path) -> Dict[str, int]:
+        counts: Dict[str, int] = {}
+        for line in (run_dir / "events.jsonl").read_text(encoding="utf-8").splitlines():
+            event = json.loads(line)
+            if event.get("type") == "stage_update":
+                counts[event["stage"]] = counts.get(event["stage"], 0) + 1
+        return counts
 
     def _result(self, case: Dict, status: str, reason: str) -> Dict:
         return {

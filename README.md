@@ -27,8 +27,8 @@ AI-Auto-Harness 是一个面向 AI 开源 demo 项目的自动部署与验证 Ag
 - `model_prepare` 阶段：生成模型资产 manifest、缓存 key 和 `model_cache` 路径；执行模式下支持 Hugging Face / ModelScope 文件清单解析、断点续传、并发下载、sha256/etag 校验元数据和缓存写入。
 - `verify` 增强：支持 Gradio `/config` discovery、Streamlit DOM/HTML 证据探测，以及可选 Playwright 浏览器 DOM probe。
 - 日志规则分类器：对缺依赖、CUDA OOM、磁盘不足、token 权限、wheel 构建失败等常见错误生成结构化诊断。
-- Repair loop：失败或 uncertain 阶段会生成结构化修复建议，经过 policy 和 loop gate 校验后写入受控 repair artifacts；同一问题有最大尝试次数，不安全的 `rerun_from` 会回退到安全阶段，需要人工确认的 action 可通过 `repair-approve` 批准。
-- Benchmark fixtures：`tests/fixtures/benchmarks` 覆盖下载续传、缓存命中、并发下载、etag 缓存失效、缓存清理、服务启动后退出、历史 artifact 干扰、Gradio API shape 变化、token 缺失、Gradio `/config` discovery、浏览器 DOM trace、Streamlit 错误页面、HTTP 200 false-positive 防护、repair policy 拒绝、repair loop 限流、人工审批和 checksum 失败。
+- Repair loop：失败或 uncertain 阶段会生成结构化修复建议，经过 policy 和 loop gate 校验后写入受控 repair artifacts；同一问题有最大尝试次数，不安全的 `rerun_from` 会回退到安全阶段，`resume` 会按 `rerun_from_effective` 从安全阶段重跑，需要人工确认的 action 可通过 `repair-approve` 批准。
+- Benchmark fixtures：`tests/fixtures/benchmarks` 覆盖下载续传、缓存命中、并发下载、etag 缓存失效、缓存清理、服务启动后退出、历史 artifact 干扰、Gradio API shape 变化、token 缺失、Gradio `/config` discovery、浏览器 DOM trace、Streamlit 错误页面、HTTP 200 false-positive 防护、repair policy 拒绝、repair loop 限流、repair resume 阶段跳转、人工审批和 checksum 失败。
 - 开发进度报告：`docs/progress.md`。
 
 ## 快速开始
@@ -220,6 +220,7 @@ PYTHONPATH=src python3 -m auto_harness.cli benchmark --manifest tests/fixtures/b
 - token 缺失或 401 日志会被诊断为 `auth_required`。
 - 权限不足时 repair action 被 policy 拒绝。
 - 同一问题的 repair loop 超过次数后会拒绝继续自动修复。
+- `resume` 会按 `rerun_from_effective` 从安全阶段重跑，避免每次全量 pipeline。
 - 需要人工确认的 repair action 只有审批后才能通过。
 - 模型文件 checksum 不一致时下载失败，不写入成功缓存态。
 
@@ -237,6 +238,7 @@ runs/<task-id>/repairs/
 - 将 `repair_verify_hints.json` 合并到 `verify_hint`，用于修正 endpoint、请求路径或 POST JSON 模板。
 - 如果 repair 被 policy、attempt limit 或人工审批要求拒绝，overlay 不会生效，只保留审计记录。
 - 如果 plan 中的 `rerun_from` 不在安全阶段集合中，loop 会记录 `rerun_from_requested`，并生成 `rerun_from_effective` 作为安全回退阶段。
+- `resume` 会读取已允许的 `repair_apply_result.json`，从 `rerun_from_effective` 开始重跑，并复用该阶段之前的 `reports/*_result.json` / `pipeline_results.json`。如果前置结果缺失或损坏，会记录 `resume_stage_fallback` 事件并回退到 `analyze`。
 
 人工审批入口：
 

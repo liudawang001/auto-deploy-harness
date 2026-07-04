@@ -27,6 +27,9 @@ from auto_harness.utils.time import compact_timestamp, utc_now_iso
 
 
 class TaskRunner:
+    PIPELINE_STAGES = ("analyze", "resource_plan", "env_deploy", "model_prepare", "runner", "verify", "report")
+    RERUN_STAGES = ("analyze", "resource_plan", "env_deploy", "model_prepare", "runner", "verify")
+
     def __init__(self, config: HarnessConfig) -> None:
         self.config = config
         self.store = StateStore(config.runs_path)
@@ -110,72 +113,91 @@ class TaskRunner:
             self.store.events(spec.task_id).append("clone", "copy_local_repo", {"source": str(source)})
         return self.run_existing(spec.task_id, dry_run=dry_run)
 
-    def run_existing(self, task_id: str, dry_run: bool = True) -> str:
+    def run_existing(self, task_id: str, dry_run: bool = True, start_stage: str = "analyze") -> str:
         task = self.store.load_task(task_id)
         run_dir = self.store.run_dir(task_id)
         repo_dir = run_dir / "workspace" / "repo"
-        results: Dict[str, Dict] = {}
+        start_stage = self._normalize_start_stage(task_id, start_stage)
+        start_index = self.PIPELINE_STAGES.index(start_stage)
+        results: Dict[str, Dict] = {} if start_stage == "analyze" else self._load_previous_results(run_dir)
 
-        analyze_context = self._stage_context("analyze", {})
-        analyzer = ProjectAnalyzer(
-            agent_executor=ClaudeCodeExecutor() if self.config.use_agent_analyzer else None,
-            use_agent=self.config.use_agent_analyzer,
-            agent_timeout_seconds=self.config.agent_timeout_seconds,
-            stage_context=analyze_context,
-        )
-        analyze_result = analyzer.analyze(repo_dir)
-        results["analyze"] = to_plain(analyze_result)
-        self._save_stage(task_id, "analyze", analyze_result)
-        self._remember(task_id, "analyze", analyze_result, analyze_result.data)
+        def should_run(stage: str) -> bool:
+            return self.PIPELINE_STAGES.index(stage) >= start_index
+
+        if should_run("analyze"):
+            analyze_context = self._stage_context("analyze", {})
+            analyzer = ProjectAnalyzer(
+                agent_executor=ClaudeCodeExecutor() if self.config.use_agent_analyzer else None,
+                use_agent=self.config.use_agent_analyzer,
+                agent_timeout_seconds=self.config.agent_timeout_seconds,
+                stage_context=analyze_context,
+            )
+            analyze_result = analyzer.analyze(repo_dir)
+            results["analyze"] = to_plain(analyze_result)
+            self._save_stage(task_id, "analyze", analyze_result)
+            self._remember(task_id, "analyze", analyze_result, analyze_result.data)
+            analyze_data = analyze_result.data
+        else:
+            analyze_data = results["analyze"]["data"]
         repair_overlay = self.repair_overlay.load(run_dir)
-        effective_analysis = self.repair_overlay.merge_analysis(analyze_result.data, repair_overlay)
+        effective_analysis = self.repair_overlay.merge_analysis(analyze_data, repair_overlay)
 
-        resource_context = self._stage_context("resource_plan", effective_analysis)
-        resource_result = ResourcePlanner().plan(repo_dir, effective_analysis)
-        self._attach_context(resource_result, resource_context)
-        results["resource_plan"] = to_plain(resource_result)
-        self._save_stage(task_id, "resource_plan", resource_result)
-        self._remember(task_id, "resource_plan", resource_result, effective_analysis)
+        if should_run("resource_plan"):
+            resource_context = self._stage_context("resource_plan", effective_analysis)
+            resource_result = ResourcePlanner().plan(repo_dir, effective_analysis)
+            self._attach_context(resource_result, resource_context)
+            results["resource_plan"] = to_plain(resource_result)
+            self._save_stage(task_id, "resource_plan", resource_result)
+            self._remember(task_id, "resource_plan", resource_result, effective_analysis)
+            resource_data = resource_result.data
+        else:
+            resource_data = results["resource_plan"]["data"]
 
-        env_context = self._stage_context("env_deploy", effective_analysis)
-        env_result = EnvDeployModule().deploy(
-            repo_dir,
-            effective_analysis,
-            execute=not dry_run and task.runtime.allow_dependency_install,
-            allowed_commands=self.config.allowed_commands,
-        )
-        self._attach_context(env_result, env_context)
-        self._attach_repair_overlay(env_result, repair_overlay)
-        results["env_deploy"] = to_plain(env_result)
-        self._save_stage(task_id, "env_deploy", env_result)
-        self._remember(task_id, "env_deploy", env_result, effective_analysis)
+        if should_run("env_deploy"):
+            env_context = self._stage_context("env_deploy", effective_analysis)
+            env_result = EnvDeployModule().deploy(
+                repo_dir,
+                effective_analysis,
+                execute=not dry_run and task.runtime.allow_dependency_install,
+                allowed_commands=self.config.allowed_commands,
+            )
+            self._attach_context(env_result, env_context)
+            self._attach_repair_overlay(env_result, repair_overlay)
+            results["env_deploy"] = to_plain(env_result)
+            self._save_stage(task_id, "env_deploy", env_result)
+            self._remember(task_id, "env_deploy", env_result, effective_analysis)
 
-        model_context = self._stage_context("model_prepare", resource_result.data)
-        model_result = self.model_prepare.prepare(
-            run_dir,
-            resource_result.data,
-            execute=not dry_run,
-            progress_callback=lambda progress: self.store.update_stage(task_id, "model_prepare", "waiting_download", progress=progress),
-        )
-        self._attach_context(model_result, model_context)
-        results["model_prepare"] = to_plain(model_result)
-        self._save_stage(task_id, "model_prepare", model_result)
-        self._remember(task_id, "model_prepare", model_result, effective_analysis)
+        if should_run("model_prepare"):
+            model_context = self._stage_context("model_prepare", resource_data)
+            model_result = self.model_prepare.prepare(
+                run_dir,
+                resource_data,
+                execute=not dry_run,
+                progress_callback=lambda progress: self.store.update_stage(task_id, "model_prepare", "waiting_download", progress=progress),
+            )
+            self._attach_context(model_result, model_context)
+            results["model_prepare"] = to_plain(model_result)
+            self._save_stage(task_id, "model_prepare", model_result)
+            self._remember(task_id, "model_prepare", model_result, effective_analysis)
 
-        runner_context = self._stage_context("runner", effective_analysis)
-        runner_result = RunnerModule().run(
-            repo_dir,
-            effective_analysis,
-            execute=not dry_run and task.runtime.allow_service_start,
-            allowed_commands=self.config.allowed_commands,
-        )
-        self._attach_context(runner_result, runner_context)
-        results["runner"] = to_plain(runner_result)
-        self._save_stage(task_id, "runner", runner_result)
-        self._remember(task_id, "runner", runner_result, effective_analysis)
+        if should_run("runner"):
+            runner_context = self._stage_context("runner", effective_analysis)
+            runner_result = RunnerModule().run(
+                repo_dir,
+                effective_analysis,
+                execute=not dry_run and task.runtime.allow_service_start,
+                allowed_commands=self.config.allowed_commands,
+            )
+            self._attach_context(runner_result, runner_context)
+            results["runner"] = to_plain(runner_result)
+            self._save_stage(task_id, "runner", runner_result)
+            self._remember(task_id, "runner", runner_result, effective_analysis)
+            runner_data = runner_result.data
+        else:
+            runner_data = results["runner"]["data"]
 
         verify_context = self._stage_context("verify", effective_analysis)
-        verify_result = VerifyModule(stage_context=verify_context).verify(run_dir, effective_analysis, runner_result.data)
+        verify_result = VerifyModule(stage_context=verify_context).verify(run_dir, effective_analysis, runner_data)
         self._attach_repair_overlay(verify_result, repair_overlay)
         results["verify"] = to_plain(verify_result)
         self._save_stage(task_id, "verify", verify_result)
@@ -193,8 +215,10 @@ class TaskRunner:
         return task_id
 
     def resume(self, task_id: str, dry_run: bool = True) -> str:
-        self.store.events(task_id).append("task", "resume_requested", {"dry_run": dry_run})
-        return self.run_existing(task_id, dry_run=dry_run)
+        run_dir = self.store.run_dir(task_id)
+        start_stage = self._repair_resume_stage(run_dir)
+        self.store.events(task_id).append("task", "resume_requested", {"dry_run": dry_run, "start_stage": start_stage})
+        return self.run_existing(task_id, dry_run=dry_run, start_stage=start_stage)
 
     def approve_repair(self, task_id: str, note: str = "") -> Dict:
         run_dir = self.store.run_dir(task_id)
@@ -228,6 +252,64 @@ class TaskRunner:
                 "verify_hint_count": len(overlay.get("verify_hints") or []),
                 "source_dir": overlay.get("source_dir"),
             })
+
+    def _normalize_start_stage(self, task_id: str, start_stage: str) -> str:
+        requested = start_stage if start_stage in self.RERUN_STAGES else "analyze"
+        if requested == "analyze":
+            return "analyze"
+        run_dir = self.store.run_dir(task_id)
+        previous = self._load_previous_results(run_dir)
+        missing = [
+            stage for stage in self.PIPELINE_STAGES[:self.PIPELINE_STAGES.index(requested)]
+            if not isinstance(previous.get(stage), dict) or "data" not in previous[stage]
+        ]
+        if missing:
+            self.store.events(task_id).append(
+                "task",
+                "resume_stage_fallback",
+                {
+                    "requested_start_stage": start_stage,
+                    "effective_start_stage": "analyze",
+                    "missing_previous_results": missing,
+                },
+            )
+            return "analyze"
+        return requested
+
+    def _repair_resume_stage(self, run_dir: Path) -> str:
+        apply_result = self._read_optional(run_dir / "repairs" / "repair_apply_result.json")
+        if isinstance(apply_result, dict):
+            if apply_result.get("status") != "applied":
+                return "analyze"
+            policy = apply_result.get("policy") if isinstance(apply_result.get("policy"), dict) else {}
+            loop = policy.get("loop") if isinstance(policy.get("loop"), dict) else {}
+            stage = loop.get("rerun_from_effective")
+            if stage in self.RERUN_STAGES:
+                return stage
+            return "analyze"
+        plan = self._read_optional(run_dir / "repairs" / "repair_plan.json")
+        if isinstance(plan, dict) and plan.get("rerun_from_effective") in self.RERUN_STAGES:
+            return plan["rerun_from_effective"]
+        return "analyze"
+
+    def _load_previous_results(self, run_dir: Path) -> Dict[str, Dict]:
+        pipeline = self._read_optional(run_dir / "reports" / "pipeline_results.json")
+        if isinstance(pipeline, dict):
+            return {stage: result for stage, result in pipeline.items() if isinstance(result, dict)}
+        results = {}
+        for stage in self.PIPELINE_STAGES:
+            result = self._read_optional(run_dir / "reports" / ("%s_result.json" % stage))
+            if isinstance(result, dict):
+                results[stage] = result
+        return results
+
+    def _read_optional(self, path: Path):
+        if not path.exists():
+            return None
+        try:
+            return read_json(path)
+        except (OSError, ValueError):
+            return None
 
     def _remember(self, task_id: str, stage: str, result, analysis: Dict) -> None:
         entry = self.memory.remember_issue(task_id, stage, result, analysis)

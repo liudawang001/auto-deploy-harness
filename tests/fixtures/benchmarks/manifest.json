@@ -84,6 +84,11 @@
       "id": "token_missing_diagnosis",
       "purpose": "验证 token 缺失或 401 日志会被诊断为 auth_required",
       "expected_signal": "log classifier category is auth_required"
+    },
+    {
+      "id": "repair_resume_stage_jump",
+      "purpose": "验证 resume 会按 repair 的 rerun_from_effective 从安全阶段重跑",
+      "expected_signal": "only verify and report are rerun when rerun_from_effective is verify"
     }
   ]
 }

@@ -882,11 +882,12 @@ class CoreTests(unittest.TestCase):
         self.assertIn("stale_artifact_ignored", ids)
         self.assertIn("gradio_api_shape_variation", ids)
         self.assertIn("token_missing_diagnosis", ids)
+        self.assertIn("repair_resume_stage_jump", ids)
 
     def test_benchmark_runner_executes_all_fixture_cases(self):
         report = BenchmarkRunner().run(Path("tests/fixtures/benchmarks/manifest.json"))
         self.assertEqual(report["status"], "passed")
-        self.assertEqual(len(report["cases"]), 17)
+        self.assertEqual(len(report["cases"]), 18)
         self.assertTrue(all(case["status"] == "passed" for case in report["cases"]))
 
     def test_benchmark_cli_writes_output(self):
@@ -954,6 +955,122 @@ class CoreTests(unittest.TestCase):
             self.assertIn("model_prepare", data)
             self.assertEqual(data["resource_plan"]["data"]["model_assets"][0]["repo_id"], "org/demo-model")
             self.assertTrue(Path(data["model_prepare"]["data"]["manifest_path"]).exists())
+
+    def test_resume_uses_repair_rerun_from_effective_stage(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            (repo / "app.py").write_text("import gradio as gr\n", encoding="utf-8")
+            config = HarnessConfig(
+                runs_dir=str(root / "runs"),
+                memory_dir=str(root / "memory"),
+                model_cache_dir=str(root / "model_cache"),
+            )
+            runner = TaskRunner(config)
+            task_id = runner.deploy(str(repo), "demo", dry_run=True)
+            run_dir = root / "runs" / task_id
+
+            def stage_updates():
+                events = []
+                for line in (run_dir / "events.jsonl").read_text(encoding="utf-8").splitlines():
+                    event = json.loads(line)
+                    if event["type"] == "stage_update":
+                        events.append((event["stage"], event["data"]["status"]))
+                return events
+
+            before = stage_updates()
+            repair_dir = run_dir / "repairs"
+            repair_dir.mkdir(exist_ok=True)
+            (repair_dir / "repair_apply_result.json").write_text(json.dumps({
+                "status": "applied",
+                "policy": {
+                    "allowed": True,
+                    "loop": {
+                        "rerun_from_effective": "verify",
+                        "rerun_from_requested": "verify",
+                    },
+                },
+            }), encoding="utf-8")
+            (repair_dir / "repair_verify_hints.json").write_text(json.dumps({
+                "verify_hints": [
+                    {
+                        "endpoint": "http://127.0.0.1:9",
+                        "request": {"method": "GET", "path": "/health"},
+                    }
+                ]
+            }), encoding="utf-8")
+
+            runner.resume(task_id, dry_run=True)
+            after = stage_updates()
+            new_events = after[len(before):]
+            self.assertNotIn(("analyze", "passed"), new_events)
+            self.assertNotIn(("resource_plan", "passed"), new_events)
+            self.assertNotIn(("env_deploy", "passed"), new_events)
+            self.assertNotIn(("model_prepare", "passed"), new_events)
+            self.assertNotIn(("runner", "passed"), new_events)
+            self.assertTrue(any(stage == "verify" for stage, _ in new_events))
+            self.assertTrue(any(stage == "report" for stage, _ in new_events))
+            pipeline = json.loads((run_dir / "reports" / "pipeline_results.json").read_text(encoding="utf-8"))
+            self.assertEqual(pipeline["verify"]["data"]["repair_overlay"]["verify_hint_count"], 1)
+
+    def test_resume_falls_back_when_previous_stage_results_are_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            (repo / "app.py").write_text("print('hello')\n", encoding="utf-8")
+            config = HarnessConfig(
+                runs_dir=str(root / "runs"),
+                memory_dir=str(root / "memory"),
+                model_cache_dir=str(root / "model_cache"),
+            )
+            runner = TaskRunner(config)
+            task_id = runner.deploy(str(repo), "demo", dry_run=True)
+            run_dir = root / "runs" / task_id
+            (run_dir / "reports" / "pipeline_results.json").unlink()
+            (run_dir / "reports" / "resource_plan_result.json").unlink()
+            repair_dir = run_dir / "repairs"
+            repair_dir.mkdir(exist_ok=True)
+            (repair_dir / "repair_apply_result.json").write_text(json.dumps({
+                "status": "applied",
+                "policy": {"allowed": True, "loop": {"rerun_from_effective": "verify"}},
+            }), encoding="utf-8")
+
+            runner.resume(task_id, dry_run=True)
+            events = [json.loads(line) for line in (run_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+            fallback = [event for event in events if event["type"] == "resume_stage_fallback"]
+            self.assertTrue(fallback)
+            self.assertIn("resource_plan", fallback[-1]["data"]["missing_previous_results"])
+
+    def test_resume_ignores_rejected_repair_stage_jump(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            (repo / "app.py").write_text("print('hello')\n", encoding="utf-8")
+            config = HarnessConfig(
+                runs_dir=str(root / "runs"),
+                memory_dir=str(root / "memory"),
+                model_cache_dir=str(root / "model_cache"),
+            )
+            runner = TaskRunner(config)
+            task_id = runner.deploy(str(repo), "demo", dry_run=True)
+            run_dir = root / "runs" / task_id
+            repair_dir = run_dir / "repairs"
+            repair_dir.mkdir(exist_ok=True)
+            (repair_dir / "repair_plan.json").write_text(json.dumps({
+                "rerun_from_effective": "verify",
+            }), encoding="utf-8")
+            (repair_dir / "repair_apply_result.json").write_text(json.dumps({
+                "status": "rejected",
+                "policy": {"allowed": False},
+            }), encoding="utf-8")
+
+            runner.resume(task_id, dry_run=True)
+            events = [json.loads(line) for line in (run_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+            resume_events = [event for event in events if event["type"] == "resume_requested"]
+            self.assertEqual(resume_events[-1]["data"]["start_stage"], "analyze")
 
 
 if __name__ == "__main__":
