@@ -34,6 +34,13 @@
   - 新增 `.github/workflows/playwright-smoke.yml`，提供手动触发的 GitHub Actions workflow，避免普通 push/PR 默认下载 Chromium。
   - README 的 Browser Verify 小节补充 smoke test 文档和 workflow 入口。
   - 该 smoke test 使用极小 HTTP server 将 `_auto_harness_trace` 渲染到 DOM，再调用 `BrowserVerifier` 验证 `browser_dom_probe=pass`。
+- 下一阶段优化任务：
+  - `ModelPrepareModule` 新增 Git LFS 受控执行层，在 `execute=True` 时根据 `resource_plan.git_lfs.prepare_commands` 执行 `git lfs install` 和 `git lfs pull`。
+  - Git LFS 执行仍受 `allowed_commands` 白名单约束；未允许 `git` 时直接返回 `command_rejected` diagnosis，不会绕过策略执行命令。
+  - `TaskRunner` 会把 `repo_dir`、`allowed_commands` 和默认 timeout 传入 `model_prepare`，让真实 `deploy --execute` 路径也遵循同一策略。
+  - `model_prepare.progress` 会在 Git LFS 执行期间刷新为 `git_lfs_running` / `git_lfs_ready`，命令结果写入 `model_prepare.git_lfs.commands`。
+  - Benchmark cases 从 24 个扩展到 25 个，新增 `git_lfs_prepare_execute`。
+  - 定向单测与 benchmark 已通过，覆盖允许执行和白名单拒绝两条路径。
 
 ### 五阶段总结与总进度
 
@@ -45,13 +52,13 @@
 4. Git LFS 检测：识别 LFS pointer 和 `.gitattributes`，缺 `git-lfs` 时进入诊断态，并给出准备命令。
 5. Playwright smoke 治理：补齐真实浏览器 backend 的本地 smoke 文档和手动 CI workflow。
 
-按 `docs/optimization-roadmap.md` 的“全自动开源模型部署 Agent”目标估算，当前总项目进度约为 **70%**。
+按 `docs/optimization-roadmap.md` 的“全自动开源模型部署 Agent”目标估算，当前总项目进度约为 **72%**。
 
 估算依据：
 
 - 已完成约 85% 的 P0/P1 核心控制链路：下载缓存、断点续传、verify 防误判、repair plan/policy/resume、benchmark 回归体系已经成型。
 - 已完成约 65% 的真实开源模型部署能力：Hugging Face / ModelScope 下载、Git LFS 检测、Gradio/Streamlit/browser verify 已具备第一版，但真实端到端部署矩阵仍需扩大。
-- 尚未完成的关键 30% 主要是：受控执行 Git LFS 拉取、环境求解 `env_solve`、CUDA/PyTorch 兼容策略、Docker/sandbox 隔离、真实大模型长耗时 E2E 验证、memory promotion 到 skill 的人工审核流程。
+- 尚未完成的关键 28% 主要是：环境求解 `env_solve`、CUDA/PyTorch 兼容策略、Docker/sandbox 隔离、真实大模型长耗时 E2E 验证、memory promotion 到 skill 的人工审核流程。
 - 继续执行 P0/P1 优化任务：
   - `ModelCache.reserve` 会为缓存目录写入 `.auto_harness_asset.json`，记录 source、repo id、revision、origin、asset id 和 cache key。
   - `ModelCache.entries()` 会读取缓存元数据，返回 repo id、revision、origin，便于后续审计和精细清理。
@@ -137,11 +144,11 @@
 
 ### 下一步
 
-1. 为 Git LFS 增加受控执行层：在 `--execute` 且命令策略允许时执行 `git lfs pull`，并记录下载进度。
-2. 增加 `env_solve` 第一版：识别 Python、Torch、CUDA、numpy/pydantic/gradio 兼容风险，生成更稳定的安装方案。
-3. 扩展真实 E2E fixture：至少覆盖一个小型 Gradio 模型、一个 Streamlit demo、一个 Git LFS 权重仓库。
-4. 增加 memory promotion 工作流：把高频失败记忆提升为可审核的 skill 更新建议。
-5. 引入更强 sandbox / Docker backend，隔离真实依赖安装和服务启动。
+1. 增加 `env_solve` 第一版：识别 Python、Torch、CUDA、numpy/pydantic/gradio 兼容风险，生成更稳定的安装方案。
+2. 扩展真实 E2E fixture：至少覆盖一个小型 Gradio 模型、一个 Streamlit demo、一个 Git LFS 权重仓库。
+3. 增加 memory promotion 工作流：把高频失败记忆提升为可审核的 skill 更新建议。
+4. 引入更强 sandbox / Docker backend，隔离真实依赖安装和服务启动。
+5. 增加 Git LFS 真实拉取的长耗时进度解析，例如解析 `git lfs pull` 输出中的文件级下载进度。
 
 ## 2026-07-03
 

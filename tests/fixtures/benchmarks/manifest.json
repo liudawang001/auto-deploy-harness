@@ -91,6 +91,11 @@
       "expected_signal": "resource_plan is uncertain with git_lfs_missing diagnosis and lfs pull preparation"
     },
     {
+      "id": "git_lfs_prepare_execute",
+      "purpose": "验证执行模式下 Git LFS 准备命令必须通过命令白名单并写入 model_prepare 结果",
+      "expected_signal": "git lfs install and pull are executed only when git is allowed"
+    },
+    {
       "id": "gradio_api_shape_variation",
       "purpose": "验证 Gradio /config 中 api_name 带斜杠且前置 dependency 不可用时仍能选中正确 API",
       "expected_signal": "request is sent to /api/predict with selected fn_index"

@@ -179,6 +179,9 @@ class TaskRunner:
                 resource_data,
                 execute=not dry_run,
                 progress_callback=lambda progress: self.store.update_stage(task_id, "model_prepare", "waiting_download", progress=progress),
+                repo_dir=repo_dir,
+                allowed_commands=self.config.allowed_commands,
+                timeout_seconds=self.config.default_timeout_seconds,
             )
             self._attach_context(model_result, model_context)
             results["model_prepare"] = to_plain(model_result)

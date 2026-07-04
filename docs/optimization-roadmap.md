@@ -78,7 +78,7 @@ LLM 不能直接绕过 Python policy 执行命令或修改源码。
 - 本地路径复制。
 - Hugging Face Space 仓库。
 - ModelScope 仓库。
-- Git LFS 项目检测。已完成第一版，支持 `.gitattributes` / pointer 识别、size 估算、缺工具诊断和 `git lfs install/pull` 准备命令。
+- Git LFS 项目检测。已完成第一版，支持 `.gitattributes` / pointer 识别、size 估算、缺工具诊断、`git lfs install/pull` 准备命令，以及 `model_prepare` 阶段的白名单受控执行。
 - submodule 检测。
 
 输出：
@@ -719,7 +719,7 @@ tests/fixtures/
 1. CUDA/PyTorch compatibility solver。
 2. 磁盘/显存预估。
 3. ModelScope 下载支持。
-4. Git LFS 支持。已完成检测和准备命令第一版；后续再接受控执行与真实 LFS 拉取。
+4. Git LFS 支持。已完成检测、准备命令和白名单受控执行第一版；后续补真实 LFS 大文件 E2E 与下载进度解析。
 5. Docker backend。
 6. 长耗时 verify。
 7. vLLM/OpenAI-compatible server 识别与 verify。

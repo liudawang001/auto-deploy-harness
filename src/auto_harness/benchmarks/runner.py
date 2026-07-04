@@ -8,6 +8,7 @@ from auto_harness.assets.manifest import ModelAsset
 from auto_harness.config import HarnessConfig
 from auto_harness.diagnostics import LogClassifier
 from auto_harness.models.base import read_json, write_json
+from auto_harness.modules.model_prepare import ModelPrepareModule
 from auto_harness.modules.reporter import ReportGenerator
 from auto_harness.modules.resource_plan import ResourcePlanner
 from auto_harness.modules.runner import RunnerModule
@@ -16,6 +17,7 @@ from auto_harness.models.task import RuntimePolicy
 from auto_harness.repair import RepairLoopController, RepairPolicy
 from auto_harness.orchestrator import TaskRunner
 from auto_harness.verify import BrowserVerifier, StreamlitVerifier
+from auto_harness.utils.shell import CommandResult
 
 
 class _FakeResponse:
@@ -105,6 +107,8 @@ class BenchmarkRunner:
                 return self._case_artifact_download_validation(case)
             if case_id == "git_lfs_detection":
                 return self._case_git_lfs_detection(case)
+            if case_id == "git_lfs_prepare_execute":
+                return self._case_git_lfs_prepare_execute(case)
             if case_id == "gradio_api_shape_variation":
                 return self._case_gradio_api_shape_variation(case)
             if case_id == "gradio_queue_call_followup":
@@ -453,6 +457,41 @@ class BenchmarkRunner:
             and lfs.get("prepare_commands") == [["git", "lfs", "install"], ["git", "lfs", "pull"]]
         )
         return self._result(case, "passed" if ok else "failed", "Git LFS detection verified")
+
+    def _case_git_lfs_prepare_execute(self, case: Dict) -> Dict:
+        calls = []
+
+        def fake_runner(cmd, cwd, timeout_seconds=900):
+            calls.append(cmd)
+            return CommandResult(cmd, str(cwd), 0, "ok", "", False)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            repo = run_dir / "workspace" / "repo"
+            repo.mkdir(parents=True)
+            (run_dir / "reports").mkdir(parents=True)
+            result = ModelPrepareModule(ModelCache(Path(tmp) / "cache"), command_runner=fake_runner).prepare(
+                run_dir,
+                {
+                    "model_assets": [],
+                    "git_lfs": {
+                        "required": True,
+                        "available": True,
+                        "pointer_count": 1,
+                        "total_pointer_size_bytes": 2048,
+                        "prepare_commands": [["git", "lfs", "install"], ["git", "lfs", "pull"]],
+                    },
+                },
+                execute=True,
+                repo_dir=repo,
+                allowed_commands=["git"],
+            )
+        ok = (
+            result.status == "passed"
+            and result.data.get("git_lfs", {}).get("status") == "ready"
+            and calls == [["git", "lfs", "install"], ["git", "lfs", "pull"]]
+        )
+        return self._result(case, "passed" if ok else "failed", "Git LFS controlled execution verified")
 
     def _case_gradio_api_shape_variation(self, case: Dict) -> Dict:
         captured = {}

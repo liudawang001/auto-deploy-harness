@@ -32,6 +32,7 @@ from auto_harness.state import StateStore
 from auto_harness.orchestrator import TaskRunner
 from auto_harness.repair import RepairApplier, RepairLoopController, RepairOverlay, RepairPlanner, RepairPolicy
 from auto_harness.verify import BrowserVerifier
+from auto_harness.utils.shell import CommandResult
 from auto_harness.utils.time import utc_now_iso
 
 
@@ -493,6 +494,66 @@ class CoreTests(unittest.TestCase):
             self.assertTrue(Path(result.data["manifest_path"]).exists())
             self.assertEqual(result.data["assets"][0]["source"], "huggingface")
             self.assertIn("model_cache", result.data["assets"][0]["cache_path"])
+
+    def test_model_prepare_executes_git_lfs_when_allowed(self):
+        calls = []
+
+        def fake_runner(cmd, cwd, timeout_seconds=900):
+            calls.append((cmd, str(cwd), timeout_seconds))
+            return CommandResult(cmd, str(cwd), 0, "ok", "", False)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            repo = run_dir / "workspace" / "repo"
+            repo.mkdir(parents=True)
+            (run_dir / "reports").mkdir(parents=True)
+            module = ModelPrepareModule(ModelCache(Path(tmp) / "cache"), command_runner=fake_runner)
+            result = module.prepare(
+                run_dir,
+                {
+                    "model_assets": [],
+                    "git_lfs": {
+                        "required": True,
+                        "available": True,
+                        "pointer_count": 1,
+                        "total_pointer_size_bytes": 123,
+                        "prepare_commands": [["git", "lfs", "install"], ["git", "lfs", "pull"]],
+                    },
+                },
+                execute=True,
+                repo_dir=repo,
+                allowed_commands=["git"],
+                timeout_seconds=7,
+            )
+            self.assertEqual(result.status, "passed")
+            self.assertEqual(result.summary, "git lfs model assets prepared")
+            self.assertEqual([call[0] for call in calls], [["git", "lfs", "install"], ["git", "lfs", "pull"]])
+            self.assertEqual(calls[0][2], 7)
+            self.assertEqual(result.data["git_lfs"]["status"], "ready")
+
+    def test_model_prepare_rejects_git_lfs_when_command_not_allowed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            repo = run_dir / "workspace" / "repo"
+            repo.mkdir(parents=True)
+            (run_dir / "reports").mkdir(parents=True)
+            result = ModelPrepareModule(ModelCache(Path(tmp) / "cache")).prepare(
+                run_dir,
+                {
+                    "model_assets": [],
+                    "git_lfs": {
+                        "required": True,
+                        "available": True,
+                        "prepare_commands": [["git", "lfs", "pull"]],
+                    },
+                },
+                execute=True,
+                repo_dir=repo,
+                allowed_commands=["python3"],
+            )
+            self.assertEqual(result.status, "failed")
+            self.assertEqual(result.data["git_lfs"]["diagnosis"]["category"], "command_rejected")
+            self.assertIn("disallowed command", result.error)
 
     def test_huggingface_downloader_resumes_partial_file(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1122,6 +1183,7 @@ class CoreTests(unittest.TestCase):
         self.assertIn("stale_artifact_ignored", ids)
         self.assertIn("artifact_download_validation", ids)
         self.assertIn("git_lfs_detection", ids)
+        self.assertIn("git_lfs_prepare_execute", ids)
         self.assertIn("gradio_api_shape_variation", ids)
         self.assertIn("gradio_queue_call_followup", ids)
         self.assertIn("token_missing_diagnosis", ids)
@@ -1132,7 +1194,7 @@ class CoreTests(unittest.TestCase):
     def test_benchmark_runner_executes_all_fixture_cases(self):
         report = BenchmarkRunner().run(Path("tests/fixtures/benchmarks/manifest.json"))
         self.assertEqual(report["status"], "passed")
-        self.assertEqual(len(report["cases"]), 24)
+        self.assertEqual(len(report["cases"]), 25)
         self.assertTrue(all(case["status"] == "passed" for case in report["cases"]))
 
     def test_benchmark_cli_writes_output(self):
