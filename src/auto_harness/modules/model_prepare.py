@@ -1,18 +1,32 @@
 from pathlib import Path
 from typing import Dict
 
-from auto_harness.assets import HuggingFaceDownloader, ModelCache
+from typing import Callable, Optional
+
+from auto_harness.assets import HuggingFaceDownloader, ModelCache, ModelScopeDownloader
 from auto_harness.assets.manifest import AssetManifest, ModelAsset
 from auto_harness.models.base import write_json
 from auto_harness.models.result import StageResult
 
 
 class ModelPrepareModule:
-    def __init__(self, cache: ModelCache, huggingface_downloader: HuggingFaceDownloader = None) -> None:
+    def __init__(
+        self,
+        cache: ModelCache,
+        huggingface_downloader: HuggingFaceDownloader = None,
+        modelscope_downloader: ModelScopeDownloader = None,
+    ) -> None:
         self.cache = cache
         self.huggingface_downloader = huggingface_downloader or HuggingFaceDownloader()
+        self.modelscope_downloader = modelscope_downloader or ModelScopeDownloader()
 
-    def prepare(self, run_dir: Path, resource_plan: Dict, execute: bool = False) -> StageResult:
+    def prepare(
+        self,
+        run_dir: Path,
+        resource_plan: Dict,
+        execute: bool = False,
+        progress_callback: Optional[Callable[[Dict], None]] = None,
+    ) -> StageResult:
         raw_assets = resource_plan.get("model_assets") or []
         assets = []
         progress = {
@@ -24,6 +38,8 @@ class ModelPrepareModule:
 
         def update_progress(update: Dict) -> None:
             progress.update({key: value for key, value in update.items() if value is not None})
+            if progress_callback:
+                progress_callback(dict(progress))
 
         for raw in raw_assets:
             asset = ModelAsset(**{key: value for key, value in raw.items() if key in ModelAsset.__dataclass_fields__})
@@ -32,11 +48,16 @@ class ModelPrepareModule:
                 if asset.source == "huggingface":
                     update_progress({"status": "downloading", "asset_id": asset.asset_id})
                     asset = self.huggingface_downloader.download(asset, update_progress)
+                elif asset.source == "modelscope":
+                    update_progress({"status": "downloading", "asset_id": asset.asset_id})
+                    asset = self.modelscope_downloader.download(asset, update_progress)
                 else:
                     asset.status = "unsupported"
                     asset.last_error = "model source is not supported for download yet"
             assets.append(asset)
             progress["downloaded_bytes"] = sum(asset.downloaded_bytes for asset in assets)
+            if progress_callback:
+                progress_callback(dict(progress))
 
         manifest = AssetManifest(
             assets=assets,

@@ -822,7 +822,7 @@ src/auto_harness/
 3. 将 state 扩展为可记录 download progress。已完成第一版，stage progress 写入 `state.json`。
 4. 增强 Gradio `/config` API discovery。已完成第一版，支持 dependency `api_name` / `fn_index`。
 5. 增加 log classifier 第一批规则。已完成第一版，覆盖常见依赖、CUDA、磁盘、权限和版本冲突错误。
-6. 设计 repair plan schema，并在失败时生成建议但暂不自动 apply。
+6. 设计 repair plan schema，并在失败时生成建议但暂不自动 apply。已完成第一版。
 
 第 2 周结束时应达到：
 

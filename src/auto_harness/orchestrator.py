@@ -20,6 +20,7 @@ from auto_harness.modules import (
     VerifyModule,
 )
 from auto_harness.skills import SkillRegistry
+from auto_harness.repair import RepairPlanner
 from auto_harness.state import StateStore
 from auto_harness.utils.files import safe_name, short_hash
 from auto_harness.utils.time import compact_timestamp, utc_now_iso
@@ -32,6 +33,7 @@ class TaskRunner:
         self.skills = SkillRegistry(config.skills_path, max_chars=config.max_skill_chars)
         self.memory = MemoryStore(config.memory_path)
         self.model_cache = ModelCache(config.model_cache_path)
+        self.repair_planner = RepairPlanner()
 
     def create_spec(
         self,
@@ -133,6 +135,7 @@ class TaskRunner:
             run_dir,
             resource_result.data,
             execute=not dry_run,
+            progress_callback=lambda progress: self.store.update_stage(task_id, "model_prepare", "waiting_download", progress=progress),
         )
         self._attach_context(model_result, model_context)
         results["model_prepare"] = to_plain(model_result)
@@ -193,4 +196,5 @@ class TaskRunner:
     def _remember(self, task_id: str, stage: str, result, analysis: Dict) -> None:
         entry = self.memory.remember_issue(task_id, stage, result, analysis)
         if entry:
-            self.store.events(task_id).append(stage, "memory_recorded", {"memory_id": entry["id"], "signature": entry["signature"]})
+            repair_plan = self.repair_planner.propose(stage, result, analysis)
+            self.store.events(task_id).append(stage, "memory_recorded", {"memory_id": entry["id"], "signature": entry["signature"], "repair_plan": repair_plan})

@@ -25,6 +25,7 @@ description: 诊断并沉淀自动部署中的复发问题。用于 env_deploy�
    - 是否允许修改源代码；
    - 是否允许联网或下载模型。
 6. 写入 issue memory，包含 symptom、root cause、affected framework、evidence 和 next action。
+7. 生成结构化 repair plan，但只作为 proposed plan；自动 apply 必须经过 policy 校验和权限开关。
 
 ## 记忆写入规则
 
@@ -33,3 +34,5 @@ description: 诊断并沉淀自动部署中的复发问题。用于 env_deploy�
 ## 修复边界
 
 当 `allow_source_edit` 为 false 时，不要静默修改源码。不要无限重试。任何 workaround 都必须重新经过 verify 阶段并产生强证据后，才能视为成功。
+
+当前 repair plan 已支持生成建议，但尚未实现自动 apply。不要把 repair plan 的存在视为修复已经执行。

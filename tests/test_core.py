@@ -1,10 +1,12 @@
 import json
+import hashlib
 import tempfile
 import unittest
 from pathlib import Path
 
 from auto_harness.config import HarnessConfig
 from auto_harness.assets.huggingface import HuggingFaceDownloader
+from auto_harness.assets.modelscope import ModelScopeDownloader
 from auto_harness.diagnostics import LogClassifier
 from auto_harness.models.task import ProjectSpec, RuntimePolicy, TaskSpec
 from auto_harness.agents.base import AgentResult
@@ -20,6 +22,7 @@ from auto_harness.providers import Message, MockLLMProvider
 from auto_harness.skills import SkillRegistry
 from auto_harness.state import StateStore
 from auto_harness.orchestrator import TaskRunner
+from auto_harness.repair import RepairPlanner
 from auto_harness.utils.time import utc_now_iso
 
 
@@ -339,6 +342,58 @@ class CoreTests(unittest.TestCase):
             self.assertEqual((target_dir / "model.safetensors").read_bytes(), b"abcdef")
             self.assertEqual(calls[1].headers.get("Range"), "bytes=3-")
 
+    def test_huggingface_downloader_records_etag_and_sha256(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = ModelCache(Path(tmp) / "model_cache")
+            asset = cache.reserve(ModelAssetDetector().detect(self._repo_with_hf_model(Path(tmp) / "repo"))[0])
+            digest = hashlib.sha256(b"abc").hexdigest()
+
+            def fake_urlopen(req, timeout):
+                if "/api/models/" in req.full_url:
+                    return FakeStreamingResponse(json.dumps([
+                        {"type": "file", "path": "config.json", "size": 3, "sha256": digest, "oid": "etag123"}
+                    ]).encode("utf-8"))
+                return FakeStreamingResponse(b"abc", status=200)
+
+            result = HuggingFaceDownloader(urlopen=fake_urlopen, token="", chunk_size=2).download(asset)
+            self.assertEqual(result.status, "downloaded")
+            self.assertEqual(result.files[0]["etag"], "etag123")
+            self.assertTrue(result.files[0]["verified"])
+
+    def test_modelscope_downloader_downloads_with_resume(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = ModelCache(Path(tmp) / "model_cache")
+            repo = Path(tmp) / "repo"
+            repo.mkdir()
+            (repo / "README.md").write_text("https://modelscope.cn/models/org/demo-model", encoding="utf-8")
+            asset = cache.reserve(ModelAssetDetector().detect(repo)[0])
+            target_dir = Path(asset.cache_path)
+            partial = target_dir / "weights.bin.part"
+            partial.parent.mkdir(parents=True)
+            partial.write_bytes(b"12")
+            calls = []
+
+            def fake_urlopen(req, timeout):
+                calls.append(req)
+                if "/repo/files" in req.full_url:
+                    return FakeStreamingResponse(json.dumps({
+                        "Data": [
+                            {"Path": "weights.bin", "Size": 4}
+                        ]
+                    }).encode("utf-8"))
+                return FakeStreamingResponse(b"34", status=206)
+
+            result = ModelScopeDownloader(
+                urlopen=fake_urlopen,
+                token="",
+                api_base="https://mock.modelscope/api/v1/models",
+                download_base="https://mock.modelscope/models",
+                chunk_size=1,
+            ).download(asset)
+            self.assertEqual(result.status, "downloaded")
+            self.assertEqual((target_dir / "weights.bin").read_bytes(), b"1234")
+            self.assertEqual(calls[1].headers.get("Range"), "bytes=2-")
+
     def _repo_with_hf_model(self, repo: Path) -> Path:
         repo.mkdir()
         (repo / "README.md").write_text("https://huggingface.co/org/demo-model", encoding="utf-8")
@@ -348,6 +403,74 @@ class CoreTests(unittest.TestCase):
         result = LogClassifier().classify("ModuleNotFoundError: No module named 'gradio'")
         self.assertEqual(result["category"], "dependency_missing")
         self.assertGreater(result["confidence"], 0.8)
+
+    def test_repair_planner_proposes_dependency_action(self):
+        plan = RepairPlanner().propose(
+            "env_deploy",
+            StageResult(
+                "env_deploy",
+                "failed",
+                "dependency installation failed",
+                {"diagnosis": {"category": "dependency_missing", "signal": "gradio", "confidence": 0.9}},
+            ),
+            {"frameworks": ["gradio"]},
+        )
+        self.assertEqual(plan["rerun_from"], "env_deploy")
+        self.assertEqual(plan["actions"][0]["type"], "install_package")
+        self.assertEqual(plan["actions"][0]["payload"]["package"], "gradio")
+
+    def test_verify_streamlit_dom_probe_can_pass_with_trace(self):
+        def fake_urlopen(req, timeout):
+            if "_auto_harness_trace=" in req.full_url:
+                trace = req.full_url.split("_auto_harness_trace=")[1]
+                return FakeHttpResponse('<html><script>streamlit</script><div>%s</div></html>' % trace)
+            return FakeHttpResponse("ok")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / "workspace" / "repo").mkdir(parents=True)
+            result = VerifyModule(urlopen=fake_urlopen).verify(
+                run_dir,
+                analysis={"frameworks": ["streamlit"], "verify_hint": {"endpoint": "http://127.0.0.1:8501"}},
+                runner_result={"pid": 1234, "expected_port": 8501, "service_ready": True},
+            )
+            self.assertEqual(result.status, "passed")
+            self.assertTrue(any(check["name"] == "streamlit_dom_probe" for check in result.data["checks"]))
+
+    def test_model_prepare_progress_callback_receives_download_updates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = ModelCache(Path(tmp) / "model_cache")
+            run_dir = Path(tmp) / "run"
+            run_dir.mkdir()
+            updates = []
+
+            def fake_urlopen(req, timeout):
+                if "/api/models/" in req.full_url:
+                    return FakeStreamingResponse(json.dumps([
+                        {"type": "file", "path": "config.json", "size": 3}
+                    ]).encode("utf-8"))
+                return FakeStreamingResponse(b"abc", status=200)
+
+            result = ModelPrepareModule(
+                cache,
+                huggingface_downloader=HuggingFaceDownloader(urlopen=fake_urlopen, token="", chunk_size=1),
+            ).prepare(
+                run_dir,
+                {
+                    "model_assets": [
+                        {
+                            "asset_id": "huggingface:org/demo-model",
+                            "source": "huggingface",
+                            "repo_id": "org/demo-model",
+                        }
+                    ]
+                },
+                execute=True,
+                progress_callback=lambda progress: updates.append(progress),
+            )
+            self.assertEqual(result.status, "passed")
+            self.assertTrue(any(update.get("status") == "downloading" for update in updates))
+            self.assertEqual(result.data["progress"]["downloaded_bytes"], 3)
 
     def test_task_runner_dry_run_includes_resource_and_model_prepare(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -1,5 +1,6 @@
 from auto_harness.assets.detector import ModelAssetDetector
 from auto_harness.assets.cache import ModelCache
 from auto_harness.assets.huggingface import HuggingFaceDownloader
+from auto_harness.assets.modelscope import ModelScopeDownloader
 
-__all__ = ["ModelAssetDetector", "ModelCache", "HuggingFaceDownloader"]
+__all__ = ["ModelAssetDetector", "ModelCache", "HuggingFaceDownloader", "ModelScopeDownloader"]

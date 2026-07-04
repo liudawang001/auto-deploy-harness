@@ -13,7 +13,7 @@ description: 对 AI 自动部署结果做证据化验证。用于 verify 阶段�
 2. 优先使用框架 API，而不是只检查页面是否能打开：
    - Gradio：优先读取 `/config`，根据 dependency 的 `api_name` / `fn_index` 构造请求；无法 discovery 时再回退 POST `/api/predict`，请求体可用 `{"data":["{{trace_id}}"]}`。
    - FastAPI/Flask：调用能 echo 或处理 trace 输入的 GET/POST endpoint。
-   - Streamlit：单纯 HTTP readiness 证据较弱；若无 API，需要 DOM、日志或文件产物证据。
+   - Streamlit：当前支持 DOM/HTML probe 第一版，能识别 Streamlit 页面标记、错误标记和 trace；后续可升级为 Playwright 真浏览器交互。
 3. 端口开放或 HTTP 200 只能证明服务可能活着，不能证明业务链路成功。
 4. 只有出现至少一种强证据时才能通过：
    - 响应体包含当前 `trace_id`；
@@ -32,3 +32,5 @@ description: 对 AI 自动部署结果做证据化验证。用于 verify 阶段�
 ## 修复方向
 
 当 verify 为 `uncertain` 时，下一步应检查服务 API 形态和 runner 日志，然后更新 `verify_hint` 或新增框架专用 verify skill。不要为了让 pipeline 变绿而降低验证标准。
+
+当前 Streamlit DOM probe 不是完整浏览器自动化。它可以作为 readiness/DOM evidence，但复杂表单输入、按钮点击、文件上传仍需要后续 browser backend。

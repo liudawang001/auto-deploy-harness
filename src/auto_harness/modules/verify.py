@@ -9,12 +9,14 @@ from auto_harness.models.verify import VerifyResult
 from auto_harness.utils.files import diff_snapshot, snapshot_files, short_hash
 from auto_harness.utils.ports import is_port_open
 from auto_harness.utils.time import compact_timestamp
+from auto_harness.verify import StreamlitVerifier
 
 
 class VerifyModule:
     def __init__(self, urlopen=None, stage_context: Optional[Dict] = None) -> None:
         self.urlopen = urlopen or urllib.request.urlopen
         self.stage_context = stage_context or {}
+        self.streamlit_verifier = StreamlitVerifier(urlopen=self.urlopen)
 
     def verify(self, run_dir: Path, analysis: Dict, runner_result: Dict) -> StageResult:
         trace_id = "verify_%s_%s" % (compact_timestamp(), short_hash(str(run_dir), 6))
@@ -29,6 +31,9 @@ class VerifyModule:
         checks = self._artifact_checks(changed)
         if http_evidence:
             checks.append(http_evidence["check"])
+        streamlit_evidence = self._execute_streamlit_probe(trace_id, service, analysis, evidence_dir)
+        if streamlit_evidence:
+            checks.append(streamlit_evidence["check"])
         status = "pass" if self._can_pass(service, checks) else "uncertain"
         diagnosis = {
             "category": "none" if status == "pass" else "unknown",
@@ -41,7 +46,7 @@ class VerifyModule:
             service=service,
             checks=checks,
             diagnosis=diagnosis,
-            evidence=[http_evidence["path"]] if http_evidence else [],
+            evidence=([http_evidence["path"]] if http_evidence else []) + ([streamlit_evidence["path"]] if streamlit_evidence else []),
             next_action="report",
         )
         result_data = result.__dict__
@@ -54,7 +59,7 @@ class VerifyModule:
             "passed" if status == "pass" else "uncertain",
             "verify completed with %s" % status,
             data=result_data,
-            evidence=[str(evidence_path)] + ([http_evidence["path"]] if http_evidence else []),
+            evidence=[str(evidence_path)] + ([http_evidence["path"]] if http_evidence else []) + ([streamlit_evidence["path"]] if streamlit_evidence else []),
         )
 
     def _service_discovery(self, runner_result: Dict) -> Dict:
@@ -118,6 +123,19 @@ class VerifyModule:
         evidence_path = evidence_dir / ("%s_http_trace.json" % trace_id)
         evidence_path.write_text(json.dumps(evidence, ensure_ascii=False, indent=2), encoding="utf-8")
         return {"path": str(evidence_path), "check": evidence["check"]}
+
+    def _execute_streamlit_probe(self, trace_id: str, service: Dict, analysis: Dict, evidence_dir: Path) -> Optional[Dict]:
+        frameworks = set(analysis.get("frameworks") or []) if isinstance(analysis, dict) else set()
+        if "streamlit" not in frameworks:
+            return None
+        endpoint = self._select_endpoint(service, analysis)
+        if not endpoint:
+            return None
+        check = self.streamlit_verifier.probe(endpoint, trace_id)
+        evidence = {"check": check}
+        evidence_path = evidence_dir / ("%s_streamlit_probe.json" % trace_id)
+        evidence_path.write_text(json.dumps(evidence, ensure_ascii=False, indent=2), encoding="utf-8")
+        return {"path": str(evidence_path), "check": check}
 
     def _build_request_plan(self, trace_id: str, service: Dict, analysis: Dict) -> Optional[Dict]:
         verify_hint = analysis.get("verify_hint", {}) if isinstance(analysis, dict) else {}

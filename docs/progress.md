@@ -1,5 +1,25 @@
 # AI-Auto-Harness 开发进度
 
+## 2026-07-04
+
+### 已完成
+
+- 继续执行 P0 优化任务：
+  - 新增 `ModelScopeDownloader`，支持可配置 ModelScope API base / download base、文件清单解析、`.part` 和 Range 续传。
+  - 抽取 `ResumableDownloadMixin`，复用断点续传、缓存命中和 sha256 校验逻辑。
+  - Hugging Face 文件记录增加 `etag` / `sha256` / `verified` 字段；当清单提供 sha256 时会校验完整性。
+  - `model_prepare` 支持外部 progress callback，orchestrator 会在下载过程中持续刷新 `state.json` 的 `model_prepare.progress`。
+  - 新增 `RepairPlanner` 和 repair plan schema，失败或 uncertain 阶段会在事件日志中记录结构化修复建议；当前只 propose，不自动 apply。
+  - 新增 Streamlit DOM/HTML verify 第一版，能识别 Streamlit 页面标记、错误标记和 trace evidence。
+  - 单测扩展到 24 个，覆盖 ModelScope 续传、HF sha256/etag、repair plan、Streamlit verify 和 model_prepare progress callback。
+
+### 下一步
+
+1. 为 repair plan 增加 policy 校验和受控 apply。
+2. 增加 benchmark fixtures，覆盖模型下载中断、缓存命中、Streamlit 页面错误、verify false-positive 防护。
+3. 增强 Hugging Face / ModelScope 文件选择策略，避免下载无关 `.md` 或仓库脚本。
+4. 增加 Playwright 或其他 browser backend，用于 Streamlit/Gradio 的真实交互验证。
+
 ## 2026-07-03
 
 ### 已完成
@@ -98,6 +118,14 @@
   - 新增 `LogClassifier`，覆盖缺依赖、CUDA OOM、磁盘不足、token 权限、Git LFS、wheel 构建、numpy/pydantic/protobuf 冲突和端口占用。
   - `env_deploy` 和 `runner` 失败时会附带结构化 diagnosis。
   - 单测扩展到 19 个，覆盖 HF 续传、Gradio config discovery、log classifier 和 progress 写入。
+- 继续执行 P0 优化任务：
+  - 新增 `ModelScopeDownloader`，支持可配置 ModelScope API base / download base、文件清单解析、`.part` 和 Range 续传。
+  - 抽取 `ResumableDownloadMixin`，复用断点续传、缓存命中和 sha256 校验逻辑。
+  - Hugging Face 文件记录增加 `etag` / `sha256` / `verified` 字段；当清单提供 sha256 时会校验完整性。
+  - `model_prepare` 支持外部 progress callback，orchestrator 会在下载过程中持续刷新 `state.json` 的 `model_prepare.progress`。
+  - 新增 `RepairPlanner` 和 repair plan schema，失败或 uncertain 阶段会在事件日志中记录结构化修复建议；当前只 propose，不自动 apply。
+  - 新增 Streamlit DOM/HTML verify 第一版，能识别 Streamlit 页面标记、错误标记和 trace evidence。
+  - 单测扩展到 24 个，覆盖 ModelScope 续传、HF sha256/etag、repair plan、Streamlit verify 和 model_prepare progress callback。
 
 ### 当前行为
 
@@ -112,7 +140,7 @@
 - Claude Code 通过 `CLAUDE_CODE_CMD` 配置，是可选能力。当前 dry-run MVP 不依赖 Claude Code。
 - Skill 是建议性控制文档，不能覆盖 Python 执行策略、命令白名单或源码修改限制。
 - Memory 使用机器可读 JSONL，而不是 Markdown，这样后续部署可以检索、打分和去重。
-- `model_prepare` 已具备 Hugging Face 下载执行能力，但真实联网下载仍应在私有环境中配合 token、磁盘和网络策略验证。ModelScope 下载器尚未接入。
+- `model_prepare` 已具备 Hugging Face / ModelScope 下载执行能力，但真实联网下载仍应在私有环境中配合 token、磁盘和网络策略验证。
 
 ### 下一步
 
@@ -130,15 +158,16 @@
    - 服务启动后立刻退出。
 9. 增加 repair-loop，让 Agent 使用 selected skills 和 memory hits 提出或执行受控修复。
 10. 增加 memory promotion 工作流，把反复出现的问题记忆提升为稳定 `SKILL.md` 规则。
-11. 继续执行 P0：接入 ModelScope 下载器、增强 Hugging Face 文件选择策略、长耗时下载状态刷新、repair plan schema 和更多 Gradio/Streamlit verify。
+11. 继续执行 P0：增强 Hugging Face/ModelScope 文件选择策略、并发下载、etag 强一致校验、repair apply policy、Playwright 真浏览器 verify 和更多 benchmark fixtures。
 
 ### 已知限制
 
 - 真实依赖安装和服务启动默认关闭。
-- `VerifyModule` 已支持 GET query trace 和 POST JSON trace template，但还不支持 Gradio API discovery、浏览器/UI 操作、文件下载验证或 CLI trace 执行。
+- `VerifyModule` 已支持 GET query trace、POST JSON trace template、Gradio `/config` discovery 和 Streamlit DOM/HTML probe，但还不支持 Playwright 真浏览器交互、文件下载验证或 CLI trace 执行。
 - `RunnerModule` 尚未持久化进程句柄，后续需要支持清理。
 - `XunfeiSparkProvider` 当前假设 Anthropic-compatible HTTP messages 接口；如果选定的 Spark API 变体需要 WebSocket 签名，需要新增 transport。
 - 测试套件仍较小，目前主要覆盖 dry-run 核心路径。
 - Memory 会自动记录，但还没有 human review/promotion 命令来把重复 memory 转成 skill 更新。
-- `model_prepare` 已接入 Hugging Face 下载器；ModelScope 下载器尚未接入。
-- Hugging Face 下载器目前使用 stdlib HTTP 实现，尚未支持并发下载、etag 校验和完整 checksum 校验。
+- `model_prepare` 已接入 Hugging Face 和 ModelScope 下载器。
+- 下载器目前使用 stdlib HTTP 实现，尚未支持并发下载和 etag 强一致校验；sha256 仅在远端清单提供该字段时校验。
+- Repair plan 当前只生成建议，不会自动 apply。

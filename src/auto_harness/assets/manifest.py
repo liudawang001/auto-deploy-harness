@@ -16,6 +16,7 @@ class ModelAsset:
     resume_supported: bool = True
     files: List[Dict] = field(default_factory=list)
     downloaded_bytes: int = 0
+    verified: bool = False
     last_error: Optional[str] = None
 
 
