@@ -90,6 +90,8 @@ class BenchmarkRunner:
                 return self._case_etag_cache_invalidation(case)
             if case_id == "cache_cleanup_plan":
                 return self._case_cache_cleanup_plan(case)
+            if case_id == "cache_cleanup_scoped_keep":
+                return self._case_cache_cleanup_scoped_keep(case)
             if case_id == "repair_loop_attempt_limit":
                 return self._case_repair_loop_attempt_limit(case)
             if case_id == "operator_repair_approval":
@@ -116,7 +118,7 @@ class BenchmarkRunner:
             asset = cache.reserve(ModelAsset(asset_id="huggingface:org/demo", source="huggingface", repo_id="org/demo"))
             target_dir = Path(asset.cache_path)
             partial = target_dir / "model.safetensors.part"
-            partial.parent.mkdir(parents=True)
+            partial.parent.mkdir(parents=True, exist_ok=True)
             partial.write_bytes(b"12")
             calls = []
 
@@ -135,7 +137,7 @@ class BenchmarkRunner:
             cache = ModelCache(Path(tmp) / "model_cache")
             asset = cache.reserve(ModelAsset(asset_id="huggingface:org/demo", source="huggingface", repo_id="org/demo"))
             target = Path(asset.cache_path) / "config.json"
-            target.parent.mkdir(parents=True)
+            target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(b"abc")
 
             def fake_urlopen(req, timeout):
@@ -279,7 +281,7 @@ class BenchmarkRunner:
             cache = ModelCache(Path(tmp) / "model_cache")
             asset = cache.reserve(ModelAsset(asset_id="huggingface:org/demo", source="huggingface", repo_id="org/demo"))
             target = Path(asset.cache_path) / "config.json"
-            target.parent.mkdir(parents=True)
+            target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(b"old")
             (target.parent / "config.json.auto_harness_meta.json").write_text(
                 json.dumps({"size_bytes": 3, "etag": "old-etag"}),
@@ -313,6 +315,27 @@ class BenchmarkRunner:
             applied = cache.cleanup(max_total_bytes=5, dry_run=False)
             ok = plan["candidate_count"] == 1 and len(applied["deleted"]) == 1 and not old_dir.exists() and new_dir.exists()
             return self._result(case, "passed" if ok else "failed", "cache cleanup dry-run and delete verified")
+
+    def _case_cache_cleanup_scoped_keep(self, case: Dict) -> Dict:
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = ModelCache(Path(tmp) / "model_cache")
+            keep = cache.reserve(ModelAsset(asset_id="hf:keep", source="huggingface", repo_id="org/keep"))
+            delete = cache.reserve(ModelAsset(asset_id="hf:delete", source="huggingface", repo_id="org/delete"))
+            other_source = cache.reserve(ModelAsset(asset_id="ms:delete", source="modelscope", repo_id="org/delete"))
+            Path(keep.cache_path, "model.bin").write_bytes(b"keep")
+            Path(delete.cache_path, "model.bin").write_bytes(b"delete")
+            Path(other_source.cache_path, "model.bin").write_bytes(b"modelscope")
+            plan = cache.cleanup(max_total_bytes=0, source="huggingface", keep_repo_ids=["org/keep"], dry_run=True)
+            applied = cache.cleanup(max_total_bytes=0, source="huggingface", keep_repo_ids=["org/keep"], dry_run=False)
+            ok = (
+                plan["candidate_count"] == 1
+                and plan["candidates"][0]["repo_id"] == "org/delete"
+                and len(applied["deleted"]) == 1
+                and Path(keep.cache_path).exists()
+                and not Path(delete.cache_path).exists()
+                and Path(other_source.cache_path).exists()
+            )
+            return self._result(case, "passed" if ok else "failed", "scoped cache cleanup with keep-list verified")
 
     def _case_repair_loop_attempt_limit(self, case: Dict) -> Dict:
         with tempfile.TemporaryDirectory() as tmp:

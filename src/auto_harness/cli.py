@@ -56,6 +56,10 @@ def build_parser() -> argparse.ArgumentParser:
     cache.add_argument("--cleanup", action="store_true", default=False)
     cache.add_argument("--max-total-bytes", type=int, default=None)
     cache.add_argument("--older-than-days", type=float, default=None)
+    cache.add_argument("--source", default=None)
+    cache.add_argument("--repo-id", default=None)
+    cache.add_argument("--keep-cache-key", action="append", default=None)
+    cache.add_argument("--keep-repo-id", action="append", default=None)
     cache.add_argument("--apply", action="store_true", default=False)
 
     return parser
@@ -136,10 +140,18 @@ def main(argv=None) -> int:
             older_than_days = args.older_than_days
             if older_than_days is None:
                 older_than_days = config.model_cache_cleanup_older_than_days
+            source = args.source if args.source is not None else config.model_cache_cleanup_source
+            repo_id = args.repo_id if args.repo_id is not None else config.model_cache_cleanup_repo_id
+            keep_cache_keys = args.keep_cache_key if args.keep_cache_key is not None else config.model_cache_cleanup_keep_cache_keys
+            keep_repo_ids = args.keep_repo_id if args.keep_repo_id is not None else config.model_cache_cleanup_keep_repo_ids
             result = runner.model_cache.cleanup(
                 max_total_bytes=max_total_bytes,
                 older_than_days=older_than_days,
                 dry_run=not args.apply,
+                source=source,
+                repo_id=repo_id,
+                keep_cache_keys=keep_cache_keys,
+                keep_repo_ids=keep_repo_ids,
             )
         else:
             result = {

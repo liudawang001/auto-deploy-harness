@@ -29,7 +29,7 @@ AI-Auto-Harness 是一个面向 AI 开源 demo 项目的自动部署与验证 Ag
 - 日志规则分类器：对缺依赖、CUDA OOM、磁盘不足、token 权限、wheel 构建失败等常见错误生成结构化诊断；token 权限问题只提取所需环境变量名，不记录密钥值。
 - Report 会汇总 `resource_plan`、diagnosis 和 repair plan 中的 token 变量名，提示 operator/secret manager 注入，报告中不保存任何 token value。
 - Repair loop：失败或 uncertain 阶段会生成结构化修复建议，经过 policy 和 loop gate 校验后写入受控 repair artifacts；同一问题有最大尝试次数，不安全的 `rerun_from` 会回退到安全阶段，`resume` 会按 `rerun_from_effective` 从安全阶段重跑，需要人工确认的 action 可通过 `repair-approve` 批准。
-- Benchmark fixtures：`tests/fixtures/benchmarks` 覆盖下载续传、缓存命中、并发下载、etag 缓存失效、缓存清理、服务启动后退出、历史 artifact 干扰、Gradio API shape 变化、token 缺失、token report 提示、Gradio `/config` discovery、浏览器 DOM trace、Streamlit 错误页面、HTTP 200 false-positive 防护、repair policy 拒绝、repair loop 限流、repair resume 阶段跳转、人工审批和 checksum 失败。
+- Benchmark fixtures：`tests/fixtures/benchmarks` 覆盖下载续传、缓存命中、并发下载、etag 缓存失效、缓存清理、按来源/repo/keep-list 清理、服务启动后退出、历史 artifact 干扰、Gradio API shape 变化、token 缺失、token report 提示、Gradio `/config` discovery、浏览器 DOM trace、Streamlit 错误页面、HTTP 200 false-positive 防护、repair policy 拒绝、repair loop 限流、repair resume 阶段跳转、人工审批和 checksum 失败。
 - 开发进度报告：`docs/progress.md`。
 
 ## 快速开始
@@ -145,7 +145,10 @@ ModelScopeDownloader(max_workers=4)
   "model_download_retry_count": 2,
   "model_download_retry_backoff_seconds": 1.0,
   "model_cache_cleanup_max_total_bytes": 500000000000,
-  "model_cache_cleanup_older_than_days": 30
+  "model_cache_cleanup_older_than_days": 30,
+  "model_cache_cleanup_source": "huggingface",
+  "model_cache_cleanup_repo_id": null,
+  "model_cache_cleanup_keep_repo_ids": ["org/critical-model"]
 }
 ```
 
@@ -164,7 +167,10 @@ CLI 缓存清理同样默认 dry-run：
 PYTHONPATH=src python3 -m auto_harness.cli cache --cleanup
 PYTHONPATH=src python3 -m auto_harness.cli cache --cleanup --max-total-bytes 500000000000
 PYTHONPATH=src python3 -m auto_harness.cli cache --cleanup --max-total-bytes 500000000000 --apply
+PYTHONPATH=src python3 -m auto_harness.cli cache --cleanup --source huggingface --repo-id org/demo --keep-repo-id org/critical-model
 ```
+
+每个缓存目录会写入 `.auto_harness_asset.json`，记录 source、repo id、revision、origin 和 cache key。清理计划支持 `--source`、`--repo-id`、`--keep-cache-key`、`--keep-repo-id`，用于只清理某个模型源或某个 repo，并保护关键模型。
 
 阶段进度会写入 `state.json` 的 `model_prepare.progress`，包括当前文件、已下载字节、总字节和状态。
 
@@ -211,6 +217,7 @@ PYTHONPATH=src python3 -m auto_harness.cli benchmark --manifest tests/fixtures/b
 - 临时下载错误会按有限次数重试，不会无限 retry。
 - 远端 etag 变化时本地缓存失效并重新下载。
 - 模型缓存 dry-run 清理和受控删除。
+- 模型缓存可以按 source / repo id 限定清理范围，并用 keep-list 保护关键模型。
 - Gradio `/config` discovery 构造 `/api/predict` trace 请求。
 - Gradio `/config` shape 变化时仍能选中正确 backend API。
 - 浏览器 DOM 中出现当前 trace 时可以作为强证据。

@@ -128,6 +128,10 @@ class CoreTests(unittest.TestCase):
                 "model_download_retry_backoff_seconds": 0.25,
                 "model_cache_cleanup_max_total_bytes": 1024,
                 "model_cache_cleanup_older_than_days": 7,
+                "model_cache_cleanup_source": "huggingface",
+                "model_cache_cleanup_repo_id": "org/demo",
+                "model_cache_cleanup_keep_cache_keys": ["keep-key"],
+                "model_cache_cleanup_keep_repo_ids": ["org/keep"],
             }), encoding="utf-8")
             config = HarnessConfig.load(str(path))
             self.assertEqual(config.model_download_max_workers, 4)
@@ -135,6 +139,10 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(config.model_download_retry_backoff_seconds, 0.25)
             self.assertEqual(config.model_cache_cleanup_max_total_bytes, 1024)
             self.assertEqual(config.model_cache_cleanup_older_than_days, 7)
+            self.assertEqual(config.model_cache_cleanup_source, "huggingface")
+            self.assertEqual(config.model_cache_cleanup_repo_id, "org/demo")
+            self.assertEqual(config.model_cache_cleanup_keep_cache_keys, ["keep-key"])
+            self.assertEqual(config.model_cache_cleanup_keep_repo_ids, ["org/keep"])
 
     def test_cli_download_overrides_update_config(self):
         args = build_parser().parse_args([
@@ -429,7 +437,7 @@ class CoreTests(unittest.TestCase):
             asset = cache.reserve(ModelAssetDetector().detect(self._repo_with_hf_model(Path(tmp) / "repo"))[0])
             target_dir = Path(asset.cache_path)
             partial = target_dir / "model.safetensors.part"
-            partial.parent.mkdir(parents=True)
+            partial.parent.mkdir(parents=True, exist_ok=True)
             partial.write_bytes(b"abc")
             calls = []
 
@@ -469,7 +477,7 @@ class CoreTests(unittest.TestCase):
             cache = ModelCache(Path(tmp) / "model_cache")
             asset = cache.reserve(ModelAssetDetector().detect(self._repo_with_hf_model(Path(tmp) / "repo"))[0])
             target = Path(asset.cache_path) / "config.json"
-            target.parent.mkdir(parents=True)
+            target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(b"old")
             (target.parent / "config.json.auto_harness_meta.json").write_text(
                 json.dumps({"size_bytes": 3, "etag": "old-etag"}),
@@ -558,7 +566,7 @@ class CoreTests(unittest.TestCase):
             asset = cache.reserve(ModelAssetDetector().detect(repo)[0])
             target_dir = Path(asset.cache_path)
             partial = target_dir / "weights.bin.part"
-            partial.parent.mkdir(parents=True)
+            partial.parent.mkdir(parents=True, exist_ok=True)
             partial.write_bytes(b"12")
             calls = []
 
@@ -599,6 +607,62 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(len(applied["deleted"]), 1)
             self.assertFalse(old_dir.exists())
             self.assertTrue(new_dir.exists())
+
+    def test_model_cache_cleanup_filters_by_source_repo_and_keep_list(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = ModelCache(Path(tmp) / "model_cache")
+            keep = cache.reserve(ModelAsset(asset_id="hf:keep", source="huggingface", repo_id="org/keep"))
+            delete = cache.reserve(ModelAsset(asset_id="hf:delete", source="huggingface", repo_id="org/delete"))
+            other_source = cache.reserve(ModelAsset(asset_id="ms:delete", source="modelscope", repo_id="org/delete"))
+            Path(keep.cache_path, "model.bin").write_bytes(b"keep")
+            Path(delete.cache_path, "model.bin").write_bytes(b"delete")
+            Path(other_source.cache_path, "model.bin").write_bytes(b"modelscope")
+
+            entries = cache.entries()
+            self.assertIn("repo_id", entries[0])
+            plan = cache.cleanup(
+                max_total_bytes=0,
+                source="huggingface",
+                keep_repo_ids=["org/keep"],
+                dry_run=True,
+            )
+            self.assertEqual(plan["scoped_count"], 2)
+            self.assertEqual(plan["candidate_count"], 1)
+            self.assertEqual(plan["candidates"][0]["repo_id"], "org/delete")
+            applied = cache.cleanup(
+                max_total_bytes=0,
+                source="huggingface",
+                keep_repo_ids=["org/keep"],
+                dry_run=False,
+            )
+            self.assertEqual(len(applied["deleted"]), 1)
+            self.assertTrue(Path(keep.cache_path).exists())
+            self.assertFalse(Path(delete.cache_path).exists())
+            self.assertTrue(Path(other_source.cache_path).exists())
+
+    def test_model_cache_cleanup_filters_specific_repo_id(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = ModelCache(Path(tmp) / "model_cache")
+            target = cache.reserve(ModelAsset(asset_id="hf:target", source="huggingface", repo_id="org/target"))
+            other = cache.reserve(ModelAsset(asset_id="hf:other", source="huggingface", repo_id="org/other"))
+            Path(target.cache_path, "model.bin").write_bytes(b"target")
+            Path(other.cache_path, "model.bin").write_bytes(b"other")
+
+            plan = cache.cleanup(max_total_bytes=0, repo_id="org/target", dry_run=True)
+            self.assertEqual(plan["scoped_count"], 1)
+            self.assertEqual(plan["candidate_count"], 1)
+            self.assertEqual(plan["candidates"][0]["repo_id"], "org/target")
+
+    def test_model_cache_cleanup_matches_legacy_cache_key_without_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = ModelCache(Path(tmp) / "model_cache")
+            legacy = cache.root / "huggingface" / "org-legacy_abc123"
+            legacy.mkdir(parents=True)
+            (legacy / "model.bin").write_bytes(b"legacy")
+            plan = cache.cleanup(max_total_bytes=0, repo_id="org/legacy", dry_run=True)
+            self.assertEqual(plan["scoped_count"], 1)
+            self.assertEqual(plan["candidate_count"], 1)
+            self.assertEqual(plan["candidates"][0]["cache_key"], "org-legacy_abc123")
 
     def _repo_with_hf_model(self, repo: Path) -> Path:
         repo.mkdir()
@@ -944,6 +1008,7 @@ class CoreTests(unittest.TestCase):
         self.assertIn("parallel_model_download", ids)
         self.assertIn("etag_cache_invalidation", ids)
         self.assertIn("cache_cleanup_plan", ids)
+        self.assertIn("cache_cleanup_scoped_keep", ids)
         self.assertIn("repair_loop_attempt_limit", ids)
         self.assertIn("operator_repair_approval", ids)
         self.assertIn("service_exits_after_start", ids)
@@ -956,7 +1021,7 @@ class CoreTests(unittest.TestCase):
     def test_benchmark_runner_executes_all_fixture_cases(self):
         report = BenchmarkRunner().run(Path("tests/fixtures/benchmarks/manifest.json"))
         self.assertEqual(report["status"], "passed")
-        self.assertEqual(len(report["cases"]), 19)
+        self.assertEqual(len(report["cases"]), 20)
         self.assertTrue(all(case["status"] == "passed" for case in report["cases"]))
 
     def test_benchmark_cli_writes_output(self):
@@ -1003,6 +1068,47 @@ class CoreTests(unittest.TestCase):
             self.assertTrue(result["dry_run"])
             self.assertEqual(result["candidate_count"], 1)
             self.assertTrue((cache_entry / "weights.bin").exists())
+
+    def test_cache_cli_cleanup_accepts_source_repo_and_keep_filters(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cache = ModelCache(root / "model_cache")
+            keep = cache.reserve(ModelAsset(asset_id="hf:keep", source="huggingface", repo_id="org/keep"))
+            delete = cache.reserve(ModelAsset(asset_id="hf:delete", source="huggingface", repo_id="org/delete"))
+            Path(keep.cache_path, "model.bin").write_bytes(b"keep")
+            Path(delete.cache_path, "model.bin").write_bytes(b"delete")
+            config_path = root / "config.json"
+            config_path.write_text(json.dumps({
+                "runs_dir": str(root / "runs"),
+                "memory_dir": str(root / "memory"),
+                "model_cache_dir": str(root / "model_cache"),
+            }), encoding="utf-8")
+            old_config = os.environ.get("AUTO_HARNESS_CONFIG")
+            os.environ["AUTO_HARNESS_CONFIG"] = str(config_path)
+            try:
+                output = io.StringIO()
+                with redirect_stdout(output):
+                    code = cli_main([
+                        "cache",
+                        "--cleanup",
+                        "--source",
+                        "huggingface",
+                        "--max-total-bytes",
+                        "0",
+                        "--keep-repo-id",
+                        "org/keep",
+                    ])
+            finally:
+                if old_config is None:
+                    os.environ.pop("AUTO_HARNESS_CONFIG", None)
+                else:
+                    os.environ["AUTO_HARNESS_CONFIG"] = old_config
+            self.assertEqual(code, 0)
+            result = json.loads(output.getvalue())
+            self.assertEqual(result["filters"]["source"], "huggingface")
+            self.assertEqual(result["filters"]["keep_repo_ids"], ["org/keep"])
+            self.assertEqual(result["candidate_count"], 1)
+            self.assertEqual(result["candidates"][0]["repo_id"], "org/delete")
 
     def test_task_runner_dry_run_includes_resource_and_model_prepare(self):
         with tempfile.TemporaryDirectory() as tmp:

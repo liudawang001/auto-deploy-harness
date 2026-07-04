@@ -56,6 +56,11 @@
       "expected_signal": "old cache entry is selected and deleted only when dry_run is false"
     },
     {
+      "id": "cache_cleanup_scoped_keep",
+      "purpose": "验证模型缓存清理可以按来源过滤，并通过 keep-list 保护关键模型",
+      "expected_signal": "only matching non-kept cache entry is selected and deleted"
+    },
+    {
       "id": "repair_loop_attempt_limit",
       "purpose": "验证 repair loop 会限制同一问题的自动修复尝试次数，并对不安全 rerun_from 做回退",
       "expected_signal": "second repair gate is rejected and rerun_from falls back to safe stage"

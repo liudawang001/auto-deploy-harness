@@ -5,6 +5,14 @@
 ### 已完成
 
 - 继续执行 P0/P1 优化任务：
+  - `ModelCache.reserve` 会为缓存目录写入 `.auto_harness_asset.json`，记录 source、repo id、revision、origin、asset id 和 cache key。
+  - `ModelCache.entries()` 会读取缓存元数据，返回 repo id、revision、origin，便于后续审计和精细清理。
+  - `ModelCache.cleanup()` 新增 `source`、`repo_id`、`keep_cache_keys`、`keep_repo_ids` 参数，支持按模型源 / repo 限定清理范围，并保护关键模型。
+  - `cache --cleanup` CLI 新增 `--source`、`--repo-id`、`--keep-cache-key`、`--keep-repo-id`，仍默认 dry-run，只有 `--apply` 才删除。
+  - 配置文件新增缓存清理过滤和 keep-list 默认值。
+  - Benchmark cases 从 19 个扩展到 20 个，新增 `cache_cleanup_scoped_keep`。
+  - 单测扩展到 57 个，覆盖缓存 metadata、source/repo filter、keep-list、旧缓存 fallback 和 CLI 参数。
+- 继续执行 P0/P1 优化任务：
   - `LogClassifier` 在 `auth_required` 诊断中提取 `HF_TOKEN`、`MODELSCOPE_TOKEN` 等所需环境变量名，并显式标记 `values_recorded=false`。
   - `RepairPlanner` 的 `set_env_var_name_only` action 会优先使用诊断提取到的变量名，不写入任何密钥值。
   - `ReportGenerator` 会汇总 repair artifact、repair plan、阶段 diagnosis 和 `resource_plan.external_tokens` 中的变量名，生成 `Required Environment Variables` 小节。
@@ -82,9 +90,9 @@
 ### 下一步
 
 1. 增加真实 Playwright smoke test 文档和可选 CI job，在安装 Playwright 的环境中验证浏览器 backend。
-2. 为缓存清理增加更细粒度策略，例如按模型源、repo id 或 keep-list 排除关键模型。
-3. 增加 repair resume 的执行审计摘要，在 report 中展示本次 resume 复用了哪些 stage、重跑了哪些 stage。
-4. 扩展 Gradio verify 对 queue `/call/<api_name>` 的支持，并增加文件产物下载验证。
+2. 增加 repair resume 的执行审计摘要，在 report 中展示本次 resume 复用了哪些 stage、重跑了哪些 stage。
+3. 扩展 Gradio verify 对 queue `/call/<api_name>` 的支持，并增加文件产物下载验证。
+4. 增加 Git LFS 检测和下载准备，覆盖权重在 Git 仓库/LFS 中的项目。
 
 ## 2026-07-03
 

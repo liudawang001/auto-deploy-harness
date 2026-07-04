@@ -484,6 +484,8 @@ model_cache/
 - file path
 - size
 
+当前已完成第一版：缓存目录会写入 `.auto_harness_asset.json`，记录 source、repo id、revision、origin、asset id 和 cache key；缓存清理可按 source / repo id 限定范围，并通过 cache key 或 repo id keep-list 保护关键模型。
+
 ### 5.3 下载策略
 
 - 小文件直接下载。
@@ -733,7 +735,7 @@ tests/fixtures/
 2. 任务队列。
 3. 多任务并发。
 4. GPU 调度。
-5. 缓存清理策略。
+5. 缓存清理策略。已完成第一版，支持 dry-run / apply、按 source/repo id 过滤和 keep-list。
 6. memory promotion 命令。
 7. 自动生成部署产物包。
 8. CI benchmark。

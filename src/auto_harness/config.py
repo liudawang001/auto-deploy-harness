@@ -26,12 +26,20 @@ class HarnessConfig:
     model_download_retry_backoff_seconds: float = 1.0
     model_cache_cleanup_max_total_bytes: Optional[int] = None
     model_cache_cleanup_older_than_days: Optional[float] = None
+    model_cache_cleanup_source: Optional[str] = None
+    model_cache_cleanup_repo_id: Optional[str] = None
+    model_cache_cleanup_keep_cache_keys: List[str] = None
+    model_cache_cleanup_keep_repo_ids: List[str] = None
     max_skill_chars: int = 6000
     max_memory_items: int = 5
 
     def __post_init__(self) -> None:
         if self.allowed_commands is None:
             self.allowed_commands = ["python", "python3", "pip", "curl", "git", "streamlit"]
+        if self.model_cache_cleanup_keep_cache_keys is None:
+            self.model_cache_cleanup_keep_cache_keys = []
+        if self.model_cache_cleanup_keep_repo_ids is None:
+            self.model_cache_cleanup_keep_repo_ids = []
 
     @classmethod
     def load(cls, path: str = None) -> "HarnessConfig":
