@@ -21,6 +21,7 @@ from auto_harness.modules.analyzer import ProjectAnalyzer
 from auto_harness.modules.env_deploy import EnvDeployModule
 from auto_harness.modules.model_prepare import ModelPrepareModule
 from auto_harness.modules.resource_plan import ResourcePlanner
+from auto_harness.modules.runner import RunnerModule
 from auto_harness.modules.verify import VerifyModule
 from auto_harness.models.result import StageResult
 from auto_harness.providers import Message, MockLLMProvider
@@ -231,6 +232,34 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(captured["url"], "http://127.0.0.1:7860/api/predict")
             self.assertEqual(json.loads(captured["body"])["fn_index"], 3)
 
+    def test_verify_handles_gradio_api_shape_variation(self):
+        captured = {}
+
+        def fake_urlopen(req, timeout):
+            if req.full_url.endswith("/config"):
+                return FakeHttpResponse(json.dumps({
+                    "dependencies": [
+                        {"id": 1, "api_name": False, "backend_fn": False},
+                        {"id": 7, "api_name": "/predict", "backend_fn": True},
+                    ]
+                }))
+            captured["url"] = req.full_url
+            captured["body"] = req.data.decode("utf-8")
+            trace = json.loads(captured["body"])["data"][0]
+            return FakeHttpResponse(json.dumps({"data": [trace]}))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / "workspace" / "repo").mkdir(parents=True)
+            result = VerifyModule(urlopen=fake_urlopen).verify(
+                run_dir,
+                analysis={"frameworks": ["gradio"], "verify_hint": {"endpoint": "http://127.0.0.1:7860"}},
+                runner_result={"pid": 1234, "expected_port": 7860, "service_ready": True},
+            )
+            self.assertEqual(result.status, "passed")
+            self.assertEqual(captured["url"], "http://127.0.0.1:7860/api/predict")
+            self.assertEqual(json.loads(captured["body"])["fn_index"], 7)
+
     def test_mock_provider(self):
         result = MockLLMProvider().complete([Message(role="user", content="hello")])
         self.assertIn("mock provider response", result.text)
@@ -245,6 +274,21 @@ class CoreTests(unittest.TestCase):
             )
             self.assertEqual(result.status, "failed")
             self.assertIn("disallowed command", result.error)
+
+    def test_runner_detects_service_exit_after_start(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "workspace" / "repo"
+            repo.mkdir(parents=True)
+            (repo / "app.py").write_text("print('boot'); raise SystemExit(3)\n", encoding="utf-8")
+            result = RunnerModule().run(
+                repo,
+                {"run_candidates": [{"cmd": ["python3", "app.py"], "expected_port": 7860}]},
+                execute=True,
+                wait_seconds=0.2,
+                allowed_commands=["python3"],
+            )
+            self.assertEqual(result.status, "failed")
+            self.assertEqual(result.summary, "service process exited")
 
     def test_skill_registry_selects_verify_skill(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -502,6 +546,11 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(result["category"], "dependency_missing")
         self.assertGreater(result["confidence"], 0.8)
 
+    def test_log_classifier_detects_missing_token(self):
+        result = LogClassifier().classify("401 Unauthorized: Repository Not Found. Please set HF_TOKEN.")
+        self.assertEqual(result["category"], "auth_required")
+        self.assertGreaterEqual(result["confidence"], 0.9)
+
     def test_repair_planner_proposes_dependency_action(self):
         plan = RepairPlanner().propose(
             "env_deploy",
@@ -672,6 +721,24 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(checks["streamlit_dom_probe"]["status"], "fail")
             self.assertEqual(result.status, "uncertain")
 
+    def test_verify_ignores_stale_artifact(self):
+        def fake_urlopen(req, timeout):
+            return FakeHttpResponse("ok without current trace")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            repo = run_dir / "workspace" / "repo"
+            repo.mkdir(parents=True)
+            (repo / "old_output.txt").write_text("old successful output", encoding="utf-8")
+            result = VerifyModule(urlopen=fake_urlopen).verify(
+                run_dir,
+                analysis={"verify_hint": {"endpoint": "http://127.0.0.1:8000/health"}},
+                runner_result={"pid": 1234, "expected_port": 8000, "service_ready": True},
+            )
+            checks = {check["name"]: check for check in result.data["checks"]}
+            self.assertEqual(result.status, "uncertain")
+            self.assertEqual(checks["artifact_freshness"]["status"], "uncertain")
+
     def test_verify_browser_dom_probe_can_pass_with_trace(self):
         def fake_urlopen(req, timeout):
             return FakeHttpResponse("http response without trace")
@@ -748,11 +815,15 @@ class CoreTests(unittest.TestCase):
         self.assertIn("cache_cleanup_plan", ids)
         self.assertIn("repair_loop_attempt_limit", ids)
         self.assertIn("operator_repair_approval", ids)
+        self.assertIn("service_exits_after_start", ids)
+        self.assertIn("stale_artifact_ignored", ids)
+        self.assertIn("gradio_api_shape_variation", ids)
+        self.assertIn("token_missing_diagnosis", ids)
 
     def test_benchmark_runner_executes_all_fixture_cases(self):
         report = BenchmarkRunner().run(Path("tests/fixtures/benchmarks/manifest.json"))
         self.assertEqual(report["status"], "passed")
-        self.assertEqual(len(report["cases"]), 13)
+        self.assertEqual(len(report["cases"]), 17)
         self.assertTrue(all(case["status"] == "passed" for case in report["cases"]))
 
     def test_benchmark_cli_writes_output(self):

@@ -48,6 +48,7 @@ class RunnerModule:
             stderr=subprocess.STDOUT,
             text=True,
         )
+        log_file.close()
         time.sleep(wait_seconds)
         port = int(candidate.get("expected_port") or 0)
         ready = bool(port and is_port_open("127.0.0.1", port))

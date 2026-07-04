@@ -64,6 +64,26 @@
       "id": "operator_repair_approval",
       "purpose": "验证需要人工批准的 repair action 只有在 operator approval 存在时才能通过",
       "expected_signal": "policy is rejected before approval and allowed after approval"
+    },
+    {
+      "id": "service_exits_after_start",
+      "purpose": "验证服务进程启动后很快退出时 runner 不能判定启动成功",
+      "expected_signal": "runner status is failed and summary is service process exited"
+    },
+    {
+      "id": "stale_artifact_ignored",
+      "purpose": "验证历史输出文件不能作为本次 verify 的新鲜证据",
+      "expected_signal": "artifact_freshness remains uncertain"
+    },
+    {
+      "id": "gradio_api_shape_variation",
+      "purpose": "验证 Gradio /config 中 api_name 带斜杠且前置 dependency 不可用时仍能选中正确 API",
+      "expected_signal": "request is sent to /api/predict with selected fn_index"
+    },
+    {
+      "id": "token_missing_diagnosis",
+      "purpose": "验证 token 缺失或 401 日志会被诊断为 auth_required",
+      "expected_signal": "log classifier category is auth_required"
     }
   ]
 }

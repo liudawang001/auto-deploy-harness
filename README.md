@@ -28,7 +28,7 @@ AI-Auto-Harness 是一个面向 AI 开源 demo 项目的自动部署与验证 Ag
 - `verify` 增强：支持 Gradio `/config` discovery、Streamlit DOM/HTML 证据探测，以及可选 Playwright 浏览器 DOM probe。
 - 日志规则分类器：对缺依赖、CUDA OOM、磁盘不足、token 权限、wheel 构建失败等常见错误生成结构化诊断。
 - Repair loop：失败或 uncertain 阶段会生成结构化修复建议，经过 policy 和 loop gate 校验后写入受控 repair artifacts；同一问题有最大尝试次数，不安全的 `rerun_from` 会回退到安全阶段，需要人工确认的 action 可通过 `repair-approve` 批准。
-- Benchmark fixtures：`tests/fixtures/benchmarks` 覆盖下载续传、缓存命中、并发下载、etag 缓存失效、缓存清理、Gradio `/config` discovery、浏览器 DOM trace、Streamlit 错误页面、HTTP 200 false-positive 防护、repair policy 拒绝、repair loop 限流、人工审批和 checksum 失败。
+- Benchmark fixtures：`tests/fixtures/benchmarks` 覆盖下载续传、缓存命中、并发下载、etag 缓存失效、缓存清理、服务启动后退出、历史 artifact 干扰、Gradio API shape 变化、token 缺失、Gradio `/config` discovery、浏览器 DOM trace、Streamlit 错误页面、HTTP 200 false-positive 防护、repair policy 拒绝、repair loop 限流、人工审批和 checksum 失败。
 - 开发进度报告：`docs/progress.md`。
 
 ## 快速开始
@@ -183,9 +183,13 @@ PYTHONPATH=src python3 -m auto_harness.cli benchmark --manifest tests/fixtures/b
 - 远端 etag 变化时本地缓存失效并重新下载。
 - 模型缓存 dry-run 清理和受控删除。
 - Gradio `/config` discovery 构造 `/api/predict` trace 请求。
+- Gradio `/config` shape 变化时仍能选中正确 backend API。
 - 浏览器 DOM 中出现当前 trace 时可以作为强证据。
 - Streamlit HTTP 200 错误页面不能通过 verify。
 - HTTP 200 但无当前 trace 不能判定成功。
+- 历史 artifact 不能作为本次 verify 的新鲜证据。
+- 服务进程启动后快速退出不能判定为启动成功。
+- token 缺失或 401 日志会被诊断为 `auth_required`。
 - 权限不足时 repair action 被 policy 拒绝。
 - 同一问题的 repair loop 超过次数后会拒绝继续自动修复。
 - 需要人工确认的 repair action 只有审批后才能通过。

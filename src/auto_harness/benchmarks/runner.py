@@ -5,7 +5,9 @@ from typing import Dict, List
 
 from auto_harness.assets import HuggingFaceDownloader, ModelCache
 from auto_harness.assets.manifest import ModelAsset
+from auto_harness.diagnostics import LogClassifier
 from auto_harness.models.base import write_json
+from auto_harness.modules.runner import RunnerModule
 from auto_harness.modules.verify import VerifyModule
 from auto_harness.models.task import RuntimePolicy
 from auto_harness.repair import RepairLoopController, RepairPolicy
@@ -89,6 +91,14 @@ class BenchmarkRunner:
                 return self._case_repair_loop_attempt_limit(case)
             if case_id == "operator_repair_approval":
                 return self._case_operator_repair_approval(case)
+            if case_id == "service_exits_after_start":
+                return self._case_service_exits_after_start(case)
+            if case_id == "stale_artifact_ignored":
+                return self._case_stale_artifact_ignored(case)
+            if case_id == "gradio_api_shape_variation":
+                return self._case_gradio_api_shape_variation(case)
+            if case_id == "token_missing_diagnosis":
+                return self._case_token_missing_diagnosis(case)
             return self._result(case, "skipped", "unknown benchmark case")
         except Exception as exc:  # noqa: BLE001 - benchmark report should continue
             return self._result(case, "failed", str(exc))
@@ -323,6 +333,72 @@ class BenchmarkRunner:
         )
         ok = rejected["allowed"] is False and approved["allowed"] is True
         return self._result(case, "passed" if ok else "failed", "operator approval gate verified")
+
+    def _case_service_exits_after_start(self, case: Dict) -> Dict:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "workspace" / "repo"
+            repo.mkdir(parents=True)
+            (repo / "app.py").write_text("print('boot'); raise SystemExit(3)\n", encoding="utf-8")
+            result = RunnerModule().run(
+                repo,
+                {"run_candidates": [{"cmd": ["python3", "app.py"], "expected_port": 7860}]},
+                execute=True,
+                wait_seconds=0.2,
+                allowed_commands=["python3"],
+            )
+        ok = result.status == "failed" and result.summary == "service process exited"
+        return self._result(case, "passed" if ok else "failed", "runner detects early service exit")
+
+    def _case_stale_artifact_ignored(self, case: Dict) -> Dict:
+        def fake_urlopen(req, timeout):
+            return _FakeResponse("ok without current trace")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            repo = run_dir / "workspace" / "repo"
+            repo.mkdir(parents=True)
+            (repo / "old_output.txt").write_text("stale successful output from previous run", encoding="utf-8")
+            result = VerifyModule(urlopen=fake_urlopen).verify(
+                run_dir,
+                analysis={"verify_hint": {"endpoint": "http://127.0.0.1:8000/health"}},
+                runner_result={"pid": 1234, "expected_port": 8000, "service_ready": True},
+            )
+        checks = {check["name"]: check for check in result.data["checks"]}
+        ok = result.status == "uncertain" and checks["artifact_freshness"]["status"] == "uncertain"
+        return self._result(case, "passed" if ok else "failed", "stale artifact did not pass verify")
+
+    def _case_gradio_api_shape_variation(self, case: Dict) -> Dict:
+        captured = {}
+
+        def fake_urlopen(req, timeout):
+            if req.full_url.endswith("/config"):
+                return _FakeResponse(json.dumps({
+                    "dependencies": [
+                        {"id": 1, "api_name": False, "backend_fn": False},
+                        {"id": 7, "api_name": "/predict", "backend_fn": True},
+                    ]
+                }))
+            captured["url"] = req.full_url
+            captured["body"] = req.data.decode("utf-8")
+            trace = json.loads(captured["body"])["data"][0]
+            return _FakeResponse(json.dumps({"data": [trace]}))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / "workspace" / "repo").mkdir(parents=True)
+            result = VerifyModule(urlopen=fake_urlopen).verify(
+                run_dir,
+                analysis={"frameworks": ["gradio"], "verify_hint": {"endpoint": "http://127.0.0.1:7860"}},
+                runner_result={"pid": 1234, "expected_port": 7860, "service_ready": True},
+            )
+        body = json.loads(captured.get("body", "{}"))
+        ok = result.status == "passed" and captured.get("url") == "http://127.0.0.1:7860/api/predict" and body.get("fn_index") == 7
+        return self._result(case, "passed" if ok else "failed", "Gradio API shape variation verified")
+
+    def _case_token_missing_diagnosis(self, case: Dict) -> Dict:
+        diagnosis = LogClassifier().classify("401 Unauthorized: Repository Not Found. Please set HF_TOKEN.")
+        ok = diagnosis["category"] == "auth_required" and diagnosis["confidence"] >= 0.9
+        return self._result(case, "passed" if ok else "failed", "token missing diagnosis verified")
 
     def _result(self, case: Dict, status: str, reason: str) -> Dict:
         return {

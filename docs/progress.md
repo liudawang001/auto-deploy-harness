@@ -5,6 +5,14 @@
 ### 已完成
 
 - 继续执行 P0/P1 优化任务：
+  - Benchmark cases 从 13 个扩展到 17 个，新增 `service_exits_after_start`、`stale_artifact_ignored`、`gradio_api_shape_variation`、`token_missing_diagnosis`。
+  - 新增服务启动后快速退出回归用例，确保 `RunnerModule` 不会把瞬时退出进程误判为启动成功。
+  - 新增历史 artifact 干扰回归用例，确保 verify 只接受本次 trace 后的新鲜 artifact 或 trace evidence。
+  - 新增 Gradio API shape 变化回归用例，覆盖 `backend_fn=false` 跳过和 `api_name="/predict"` 归一化。
+  - 新增 token 缺失诊断回归用例，确保 401 / Repository Not Found 会归类为 `auth_required`。
+  - 修复 `RunnerModule` 父进程未关闭 runner log 文件句柄的问题。
+  - 单测扩展到 44 个，覆盖上述新增场景。
+- 继续执行 P0/P1 优化任务：
   - 新增 `RepairLoopController`，对同一问题 signature 记录 repair attempts，并通过 `max_repair_attempts` 控制自动修复尝试次数。
   - Repair plan 会记录 `rerun_from_requested` 和 `rerun_from_effective`；当 plan 给出不安全阶段时，会回退到当前安全阶段或 `analyze`。
   - `RepairPolicy` 支持 `operator_approval.json`，需要人工确认的 action 在审批前会拒绝，审批后可通过；需要 secret 的 action 仍不会记录密钥值。
@@ -52,10 +60,10 @@
 
 ### 下一步
 
-1. 扩展 benchmark cases：服务启动后退出、历史 artifact 干扰、Gradio API shape 变化、token 缺失。
-2. 增加真实 Playwright smoke test 文档和可选 CI job，在安装 Playwright 的环境中验证浏览器 backend。
-3. 将下载并发、缓存清理和重试参数暴露到配置文件与 CLI。
-4. 增加 repair resume 的阶段级跳转执行，按 `rerun_from_effective` 从安全阶段重跑，而不是总是全量 pipeline。
+1. 增加真实 Playwright smoke test 文档和可选 CI job，在安装 Playwright 的环境中验证浏览器 backend。
+2. 将下载并发、缓存清理和重试参数暴露到配置文件与 CLI。
+3. 增加 repair resume 的阶段级跳转执行，按 `rerun_from_effective` 从安全阶段重跑，而不是总是全量 pipeline。
+4. 增加 token 缺失时的可操作提示，把所需变量名写入 report，但不记录密钥值。
 
 ## 2026-07-03
 
