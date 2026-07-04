@@ -11,7 +11,7 @@ description: 对 AI 自动部署结果做证据化验证。用于 verify 阶段�
 
 1. 每次 verify 都生成唯一 `trace_id`。
 2. 优先使用框架 API，而不是只检查页面是否能打开：
-   - Gradio：优先 POST `/api/predict` 或已发现的 API endpoint，请求体可用 `{"data":["{{trace_id}}"]}`。
+   - Gradio：优先读取 `/config`，根据 dependency 的 `api_name` / `fn_index` 构造请求；无法 discovery 时再回退 POST `/api/predict`，请求体可用 `{"data":["{{trace_id}}"]}`。
    - FastAPI/Flask：调用能 echo 或处理 trace 输入的 GET/POST endpoint。
    - Streamlit：单纯 HTTP readiness 证据较弱；若无 API，需要 DOM、日志或文件产物证据。
 3. 端口开放或 HTTP 200 只能证明服务可能活着，不能证明业务链路成功。

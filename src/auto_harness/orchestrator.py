@@ -175,7 +175,8 @@ class TaskRunner:
     def _save_stage(self, task_id: str, stage: str, result) -> None:
         path = self.store.save_result(task_id, stage, result)
         stage_status = "passed" if result.status in ("passed", "pass") else result.status
-        self.store.update_stage(task_id, stage, stage_status, result_path=str(path), error=result.error)
+        progress = result.data.get("progress", {}) if isinstance(result.data, dict) else {}
+        self.store.update_stage(task_id, stage, stage_status, result_path=str(path), error=result.error, progress=progress)
 
     def _stage_context(self, stage: str, analysis: Dict) -> Dict:
         skills = [skill.to_context() for skill in self.skills.select_for_stage(stage, analysis, limit=3)]

@@ -24,7 +24,8 @@ AI-Auto-Harness 是一个面向 AI 开源 demo 项目的自动部署与验证 Ag
 - 仓库内置 skill：位于 `skills/*/SKILL.md`，按阶段选择并记录 hash。
 - 结构化问题记忆：位于 `memory/deployment_issues.jsonl`，用于检索历史相似失败。
 - `resource_plan` 阶段：识别模型资产、GPU/CUDA 信号、磁盘风险和外部 token 需求。
-- `model_prepare` 阶段：生成模型资产 manifest、缓存 key 和 `model_cache` 路径；当前默认只规划，不执行真实下载。
+- `model_prepare` 阶段：生成模型资产 manifest、缓存 key 和 `model_cache` 路径；执行模式下支持 Hugging Face 文件清单解析、断点续传和缓存写入。
+- 日志规则分类器：对缺依赖、CUDA OOM、磁盘不足、token 权限、wheel 构建失败等常见错误生成结构化诊断。
 - 开发进度报告：`docs/progress.md`。
 
 ## 快速开始
@@ -123,7 +124,9 @@ runs/<task-id>/reports/model_assets_manifest.json
 model_cache/
 ```
 
-当前版本不会自动联网下载模型；它先建立可恢复下载所需的 manifest/cache 基础结构。真实 Hugging Face / ModelScope 下载器会在后续 P0 任务中接入。
+执行模式下，Hugging Face 资产会通过 tree API 获取文件清单，并将 `.safetensors`、`.bin`、`.pt`、`.gguf`、配置文件等下载到缓存目录。下载过程中使用 `.part` 文件和 HTTP Range 支持续传。ModelScope 下载器尚未接入。
+
+阶段进度会写入 `state.json` 的 `model_prepare.progress`，包括当前文件、已下载字节、总字节和状态。
 
 ## 优化路线图
 

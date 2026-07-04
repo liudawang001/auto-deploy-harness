@@ -89,6 +89,15 @@
   - 新增 `model_cache_dir` 配置，并将 `model_cache/` 加入 `.gitignore`。
   - 新增 `prepare-model-assets` skill，覆盖 resource_plan 和 model_prepare 阶段。
   - 单测扩展到 15 个，覆盖模型资产识别、资源规划和 manifest 生成。
+- 继续执行 P0 优化任务：
+  - 新增 `HuggingFaceDownloader`，支持 Hugging Face tree API 文件发现。
+  - 支持 `.part` 文件和 HTTP Range 断点续传。
+  - `model_prepare` 在执行模式下可以下载 Hugging Face 资产，并把进度写入 stage result。
+  - `StateStore.update_stage` 支持保存 stage progress，`state.json` 可展示下载进度。
+  - `VerifyModule` 增加 Gradio `/config` discovery，能基于 dependency `api_name` / `fn_index` 构造 trace 请求。
+  - 新增 `LogClassifier`，覆盖缺依赖、CUDA OOM、磁盘不足、token 权限、Git LFS、wheel 构建、numpy/pydantic/protobuf 冲突和端口占用。
+  - `env_deploy` 和 `runner` 失败时会附带结构化 diagnosis。
+  - 单测扩展到 19 个，覆盖 HF 续传、Gradio config discovery、log classifier 和 progress 写入。
 
 ### 当前行为
 
@@ -103,7 +112,7 @@
 - Claude Code 通过 `CLAUDE_CODE_CMD` 配置，是可选能力。当前 dry-run MVP 不依赖 Claude Code。
 - Skill 是建议性控制文档，不能覆盖 Python 执行策略、命令白名单或源码修改限制。
 - Memory 使用机器可读 JSONL，而不是 Markdown，这样后续部署可以检索、打分和去重。
-- 当前 `model_prepare` 只生成 manifest/cache 规划，不执行真实下载。这是为了先稳定长任务状态和资产清单结构，避免第一版直接引入不可恢复的网络长耗时操作。
+- `model_prepare` 已具备 Hugging Face 下载执行能力，但真实联网下载仍应在私有环境中配合 token、磁盘和网络策略验证。ModelScope 下载器尚未接入。
 
 ### 下一步
 
@@ -121,7 +130,7 @@
    - 服务启动后立刻退出。
 9. 增加 repair-loop，让 Agent 使用 selected skills 和 memory hits 提出或执行受控修复。
 10. 增加 memory promotion 工作流，把反复出现的问题记忆提升为稳定 `SKILL.md` 规则。
-11. 继续执行 P0：接入 Hugging Face 下载器、断点续传、下载进度状态、Gradio API discovery、log classifier 和 repair plan schema。
+11. 继续执行 P0：接入 ModelScope 下载器、增强 Hugging Face 文件选择策略、长耗时下载状态刷新、repair plan schema 和更多 Gradio/Streamlit verify。
 
 ### 已知限制
 
@@ -131,4 +140,5 @@
 - `XunfeiSparkProvider` 当前假设 Anthropic-compatible HTTP messages 接口；如果选定的 Spark API 变体需要 WebSocket 签名，需要新增 transport。
 - 测试套件仍较小，目前主要覆盖 dry-run 核心路径。
 - Memory 会自动记录，但还没有 human review/promotion 命令来把重复 memory 转成 skill 更新。
-- `model_prepare` 已生成 asset manifest，但真实 Hugging Face / ModelScope 下载器尚未接入。
+- `model_prepare` 已接入 Hugging Face 下载器；ModelScope 下载器尚未接入。
+- Hugging Face 下载器目前使用 stdlib HTTP 实现，尚未支持并发下载、etag 校验和完整 checksum 校验。

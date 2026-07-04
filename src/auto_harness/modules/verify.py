@@ -84,6 +84,7 @@ class VerifyModule:
             "trace_id": trace_id,
             "headers": headers,
             "body": request_plan.get("body_json") if request_plan.get("body_json") is not None else None,
+            "discovery": request_plan.get("discovery"),
         }
         response_record = {}
         status = "uncertain"
@@ -125,6 +126,11 @@ class VerifyModule:
         if not endpoint:
             return None
 
+        discovered = self._discover_gradio_request(endpoint, analysis)
+        if discovered:
+            request_hint = discovered["request"]
+            endpoint = discovered["endpoint"]
+
         method = str(request_hint.get("method") or "GET").upper()
         path = request_hint.get("path")
         if path:
@@ -150,7 +156,59 @@ class VerifyModule:
             "body": body,
             "body_json": body_json,
             "headers": headers,
+            "discovery": discovered,
         }
+
+    def _discover_gradio_request(self, endpoint: str, analysis: Dict) -> Optional[Dict]:
+        frameworks = set(analysis.get("frameworks") or []) if isinstance(analysis, dict) else set()
+        verify_hint = analysis.get("verify_hint", {}) if isinstance(analysis, dict) else {}
+        if "gradio" not in frameworks and verify_hint.get("service_type") != "webui":
+            return None
+        config_url = urllib.parse.urljoin(endpoint.rstrip("/") + "/", "config")
+        try:
+            req = urllib.request.Request(config_url, method="GET")
+            with self.urlopen(req, timeout=5) as resp:
+                raw = resp.read().decode("utf-8", errors="replace")
+            config = json.loads(raw)
+        except Exception:  # noqa: BLE001 - discovery is optional
+            return None
+        dependency = self._select_gradio_dependency(config)
+        if not dependency:
+            return None
+        fn_index = dependency.get("id")
+        api_name = dependency.get("api_name")
+        path = "/api/predict"
+        if isinstance(api_name, str) and api_name and api_name not in ("false", "None"):
+            path = "/api/%s" % api_name.strip("/")
+        body = {"data": ["{{trace_id}}"]}
+        if fn_index is not None:
+            body["fn_index"] = fn_index
+        return {
+            "type": "gradio_config",
+            "config_url": config_url,
+            "endpoint": endpoint,
+            "dependency_id": fn_index,
+            "api_name": api_name,
+            "request": {
+                "method": "POST",
+                "path": path,
+                "json": body,
+            },
+        }
+
+    def _select_gradio_dependency(self, config: Dict) -> Optional[Dict]:
+        dependencies = config.get("dependencies") if isinstance(config, dict) else None
+        if not isinstance(dependencies, list):
+            return None
+        for dependency in dependencies:
+            if not isinstance(dependency, dict):
+                continue
+            if dependency.get("backend_fn") is False:
+                continue
+            if dependency.get("api_name") is False:
+                continue
+            return dependency
+        return None
 
     def _append_trace_query(self, endpoint: str, trace_id: str) -> str:
         parsed = urllib.parse.urlparse(endpoint)

@@ -2,11 +2,15 @@ from pathlib import Path
 from typing import Dict, List
 
 from auto_harness.models.result import StageResult
+from auto_harness.diagnostics import LogClassifier
 from auto_harness.utils.commands import is_allowed_command
 from auto_harness.utils.shell import run_command
 
 
 class EnvDeployModule:
+    def __init__(self, log_classifier: LogClassifier = None) -> None:
+        self.log_classifier = log_classifier or LogClassifier()
+
     def deploy(
         self,
         repo_dir: Path,
@@ -41,11 +45,12 @@ class EnvDeployModule:
                 "timed_out": result.timed_out,
             })
             if result.exit_code != 0:
+                diagnosis = self.log_classifier.classify(result.stderr + "\n" + result.stdout)
                 return StageResult(
                     "env_deploy",
                     "failed",
                     "dependency installation failed",
-                    {"commands": command_results},
+                    {"commands": command_results, "diagnosis": diagnosis},
                     error=result.stderr[-2000:],
                 )
         return StageResult("env_deploy", "passed", "environment deployed", {"commands": command_results})

@@ -4,11 +4,15 @@ from pathlib import Path
 from typing import Dict, List
 
 from auto_harness.models.result import StageResult
+from auto_harness.diagnostics import LogClassifier
 from auto_harness.utils.commands import is_allowed_command
 from auto_harness.utils.ports import is_port_open
 
 
 class RunnerModule:
+    def __init__(self, log_classifier: LogClassifier = None) -> None:
+        self.log_classifier = log_classifier or LogClassifier()
+
     def run(
         self,
         repo_dir: Path,
@@ -55,4 +59,9 @@ class RunnerModule:
             "service_ready": ready,
             "log_path": str(log_path),
         }
+        if status == "failed":
+            try:
+                data["diagnosis"] = self.log_classifier.classify(log_path.read_text(encoding="utf-8", errors="ignore")[-8000:])
+            except OSError:
+                data["diagnosis"] = self.log_classifier.classify("")
         return StageResult("runner", status, "service process started" if status == "passed" else "service process exited", data)

@@ -33,6 +33,14 @@ description: 规划和准备开源模型资产。用于 resource_plan 和 model_
 
 不要在 skill 中写密钥。不要在未检查磁盘空间和 token 的情况下直接下载大文件。下载计划必须写入 manifest，便于中断后恢复。
 
-## 当前实现约束
+## 当前实现状态
 
-当前阶段可以先生成 dry-run manifest 和缓存路径。真实下载器接入前，不要把“已规划”误判为“已下载完成”。
+当前阶段已经支持 Hugging Face 资产下载的第一版实现：
+
+- 通过 Hugging Face tree API 获取文件清单。
+- 使用 `resolve` URL 下载模型文件和配置文件。
+- 使用 `.part` 文件保存未完成下载。
+- 已有 `.part` 时通过 HTTP Range 续传。
+- 进度写入 stage result 和 `state.json`。
+
+ModelScope 下载器、并发下载、etag 校验和完整 checksum 校验尚未接入。不要把这些能力假定为已完成。

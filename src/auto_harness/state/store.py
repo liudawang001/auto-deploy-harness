@@ -79,6 +79,7 @@ class StateStore:
         status: str,
         result_path: Optional[str] = None,
         error: Optional[str] = None,
+        progress: Optional[Dict[str, Any]] = None,
     ) -> None:
         state = self.load_state(task_id)
         state.current_stage = stage
@@ -90,12 +91,13 @@ class StateStore:
             updated_at=utc_now_iso(),
             result_path=result_path,
             error=error,
+            progress=progress or {},
         )
         if stage == "report" and result_path:
             state.report_path = result_path
             state.status = "completed"
         self.save_state(state)
-        self.events(task_id).append(stage, "stage_update", {"status": status, "result_path": result_path, "error": error})
+        self.events(task_id).append(stage, "stage_update", {"status": status, "result_path": result_path, "error": error, "progress": progress or {}})
 
     def save_result(self, task_id: str, stage: str, data: Any) -> Path:
         path = self.run_dir(task_id) / "reports" / ("%s_result.json" % stage)

@@ -4,6 +4,8 @@ import unittest
 from pathlib import Path
 
 from auto_harness.config import HarnessConfig
+from auto_harness.assets.huggingface import HuggingFaceDownloader
+from auto_harness.diagnostics import LogClassifier
 from auto_harness.models.task import ProjectSpec, RuntimePolicy, TaskSpec
 from auto_harness.agents.base import AgentResult
 from auto_harness.memory import MemoryStore
@@ -36,6 +38,26 @@ class FakeHttpResponse:
         return self.body.encode("utf-8")
 
 
+class FakeStreamingResponse:
+    def __init__(self, body: bytes, status: int = 200):
+        self.body = body
+        self.status = status
+        self.offset = 0
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def read(self, size=-1):
+        if size is None or size < 0:
+            size = len(self.body) - self.offset
+        chunk = self.body[self.offset:self.offset + size]
+        self.offset += len(chunk)
+        return chunk
+
+
 class FakeAgentExecutor:
     def __init__(self, text='{"risk":"low"}'):
         self.text = text
@@ -60,9 +82,10 @@ class CoreTests(unittest.TestCase):
                 created_at=utc_now_iso(),
             )
             store.create_task(spec)
-            store.update_stage("task1", "analyze", "passed", result_path="analysis.json")
+            store.update_stage("task1", "analyze", "passed", result_path="analysis.json", progress={"step": "done"})
             state = store.load_state("task1")
             self.assertEqual(state.stages["analyze"].status, "passed")
+            self.assertEqual(state.stages["analyze"].progress["step"], "done")
             self.assertEqual(state.last_safe_stage, "analyze")
             self.assertIn("resource_plan", state.stages)
             self.assertIn("model_prepare", state.stages)
@@ -152,6 +175,35 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(captured["method"], "POST")
             self.assertEqual(captured["url"], "http://127.0.0.1:8000/api/check")
             self.assertIn("verify_", captured["body"])
+
+    def test_verify_discovers_gradio_config_request(self):
+        captured = {"config_called": False}
+
+        def fake_urlopen(req, timeout):
+            if req.full_url.endswith("/config"):
+                captured["config_called"] = True
+                return FakeHttpResponse(json.dumps({
+                    "dependencies": [
+                        {"id": 3, "api_name": "predict", "backend_fn": True}
+                    ]
+                }))
+            captured["url"] = req.full_url
+            captured["body"] = req.data.decode("utf-8")
+            trace = json.loads(captured["body"])["data"][0]
+            return FakeHttpResponse("gradio handled %s" % trace)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / "workspace" / "repo").mkdir(parents=True)
+            result = VerifyModule(urlopen=fake_urlopen).verify(
+                run_dir,
+                analysis={"frameworks": ["gradio"], "verify_hint": {"endpoint": "http://127.0.0.1:7860"}},
+                runner_result={"pid": 1234, "expected_port": 7860, "service_ready": True},
+            )
+            self.assertEqual(result.status, "passed")
+            self.assertTrue(captured["config_called"])
+            self.assertEqual(captured["url"], "http://127.0.0.1:7860/api/predict")
+            self.assertEqual(json.loads(captured["body"])["fn_index"], 3)
 
     def test_mock_provider(self):
         result = MockLLMProvider().complete([Message(role="user", content="hello")])
@@ -263,6 +315,39 @@ class CoreTests(unittest.TestCase):
             self.assertTrue(Path(result.data["manifest_path"]).exists())
             self.assertEqual(result.data["assets"][0]["source"], "huggingface")
             self.assertIn("model_cache", result.data["assets"][0]["cache_path"])
+
+    def test_huggingface_downloader_resumes_partial_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = ModelCache(Path(tmp) / "model_cache")
+            asset = cache.reserve(ModelAssetDetector().detect(self._repo_with_hf_model(Path(tmp) / "repo"))[0])
+            target_dir = Path(asset.cache_path)
+            partial = target_dir / "model.safetensors.part"
+            partial.parent.mkdir(parents=True)
+            partial.write_bytes(b"abc")
+            calls = []
+
+            def fake_urlopen(req, timeout):
+                calls.append(req)
+                if "/api/models/" in req.full_url:
+                    return FakeStreamingResponse(json.dumps([
+                        {"type": "file", "path": "model.safetensors", "size": 6}
+                    ]).encode("utf-8"))
+                return FakeStreamingResponse(b"def", status=206)
+
+            result = HuggingFaceDownloader(urlopen=fake_urlopen, token="", chunk_size=2).download(asset)
+            self.assertEqual(result.status, "downloaded")
+            self.assertEqual((target_dir / "model.safetensors").read_bytes(), b"abcdef")
+            self.assertEqual(calls[1].headers.get("Range"), "bytes=3-")
+
+    def _repo_with_hf_model(self, repo: Path) -> Path:
+        repo.mkdir()
+        (repo / "README.md").write_text("https://huggingface.co/org/demo-model", encoding="utf-8")
+        return repo
+
+    def test_log_classifier_detects_common_failures(self):
+        result = LogClassifier().classify("ModuleNotFoundError: No module named 'gradio'")
+        self.assertEqual(result["category"], "dependency_missing")
+        self.assertGreater(result["confidence"], 0.8)
 
     def test_task_runner_dry_run_includes_resource_and_model_prepare(self):
         with tempfile.TemporaryDirectory() as tmp:

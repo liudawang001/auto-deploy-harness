@@ -15,6 +15,7 @@ class ModelAsset:
     status: str = "planned"
     resume_supported: bool = True
     files: List[Dict] = field(default_factory=list)
+    downloaded_bytes: int = 0
     last_error: Optional[str] = None
 
 
@@ -24,4 +25,3 @@ class AssetManifest:
     total_expected_size_bytes: Optional[int] = None
     cache_root: str = ""
     status: str = "planned"
-

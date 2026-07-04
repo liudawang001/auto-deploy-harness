@@ -812,16 +812,16 @@ src/auto_harness/
 2. 添加 `AssetManifest`、`ModelAsset`、`ModelCache` 数据结构。已完成。
 3. 实现本地缓存目录和 manifest 持久化。已完成。
 4. 支持从 README/requirements/code 中识别 Hugging Face repo id。已完成第一版，覆盖 README、Python 代码和常见配置文件。
-5. 实现 dry-run model_prepare，输出待下载资产和预估大小。
+5. 实现 dry-run model_prepare，输出待下载资产和预估大小。已完成。
 6. 新增 fake large model fixture。
 
 ### 第 2 周
 
-1. 实现 Hugging Face 下载器。
-2. 支持 resume 和缓存命中。
-3. 将 state 扩展为可记录 download progress。
-4. 增强 Gradio `/config` API discovery。
-5. 增加 log classifier 第一批规则。
+1. 实现 Hugging Face 下载器。已完成第一版，使用 stdlib HTTP 和 Hugging Face tree API。
+2. 支持 resume 和缓存命中。已完成第一版，使用 `.part` 文件和 Range 续传。
+3. 将 state 扩展为可记录 download progress。已完成第一版，stage progress 写入 `state.json`。
+4. 增强 Gradio `/config` API discovery。已完成第一版，支持 dependency `api_name` / `fn_index`。
+5. 增加 log classifier 第一批规则。已完成第一版，覆盖常见依赖、CUDA、磁盘、权限和版本冲突错误。
 6. 设计 repair plan schema，并在失败时生成建议但暂不自动 apply。
 
 第 2 周结束时应达到：

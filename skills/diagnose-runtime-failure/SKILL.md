@@ -18,12 +18,13 @@ description: 诊断并沉淀自动部署中的复发问题。用于 env_deploy�
    - 模型资产或硬件需求缺失；
    - 环境变量缺失；
    - 验证链路证据不足。
-4. 判断修复是否被当前策略允许：
+4. 优先使用内置 log classifier 的结构化结果；只有规则无法覆盖或置信度较低时，才把裁剪后的日志交给 LLM 进一步分析。
+5. 判断修复是否被当前策略允许：
    - 是否允许安装依赖；
    - 是否允许启动服务；
    - 是否允许修改源代码；
    - 是否允许联网或下载模型。
-5. 写入 issue memory，包含 symptom、root cause、affected framework、evidence 和 next action。
+6. 写入 issue memory，包含 symptom、root cause、affected framework、evidence 和 next action。
 
 ## 记忆写入规则
 
