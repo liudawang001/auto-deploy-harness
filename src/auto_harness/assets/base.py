@@ -1,10 +1,38 @@
 import hashlib
 import json
+import time
 from pathlib import Path
 from typing import Dict, Optional
 
 
 class ResumableDownloadMixin:
+    def _call_with_retries(self, fn):
+        attempts = max(1, int(getattr(self, "retry_count", 0) or 0) + 1)
+        last_error = None
+        for attempt in range(attempts):
+            try:
+                return fn()
+            except Exception as exc:  # noqa: BLE001 - persisted by callers
+                if not self._should_retry(exc) or attempt == attempts - 1:
+                    raise
+                last_error = exc
+                backoff = float(getattr(self, "retry_backoff_seconds", 0.0) or 0.0)
+                if backoff > 0:
+                    time.sleep(backoff * (attempt + 1))
+        if last_error:
+            raise last_error
+
+    def _should_retry(self, exc: Exception) -> bool:
+        message = str(exc).lower()
+        permanent_markers = (
+            "sha256 mismatch",
+            "checksum",
+            "no downloadable model files",
+            "only huggingface assets",
+            "only modelscope assets",
+        )
+        return not any(marker in message for marker in permanent_markers)
+
     def _download_file_to_cache(self, req, rel_path: str, cache_path: Path, item: Dict, progress_callback, emit_fn) -> Dict:
         target = cache_path / rel_path
         part = target.with_name(target.name + ".part")

@@ -136,7 +136,34 @@ HuggingFaceDownloader(max_workers=4)
 ModelScopeDownloader(max_workers=4)
 ```
 
+生产部署时可以通过 `configs/default.json` 控制下载并发、失败重试和缓存清理阈值：
+
+```json
+{
+  "model_download_max_workers": 2,
+  "model_download_retry_count": 2,
+  "model_download_retry_backoff_seconds": 1.0,
+  "model_cache_cleanup_max_total_bytes": 500000000000,
+  "model_cache_cleanup_older_than_days": 30
+}
+```
+
+`deploy` / `resume` 也支持临时覆盖下载参数：
+
+```bash
+PYTHONPATH=src python3 -m auto_harness.cli deploy --repo <repo> --execute --model-download-workers 2 --download-retries 3 --download-retry-backoff 2
+PYTHONPATH=src python3 -m auto_harness.cli resume --task-id <task-id> --execute --model-download-workers 2
+```
+
 缓存清理由 `ModelCache.cleanup(...)` 提供，默认 `dry_run=True`，会先返回候选列表、候选大小和预计删除项；只有显式传入 `dry_run=False` 才会删除缓存目录。
+
+CLI 缓存清理同样默认 dry-run：
+
+```bash
+PYTHONPATH=src python3 -m auto_harness.cli cache --cleanup
+PYTHONPATH=src python3 -m auto_harness.cli cache --cleanup --max-total-bytes 500000000000
+PYTHONPATH=src python3 -m auto_harness.cli cache --cleanup --max-total-bytes 500000000000 --apply
+```
 
 阶段进度会写入 `state.json` 的 `model_prepare.progress`，包括当前文件、已下载字节、总字节和状态。
 
@@ -180,6 +207,7 @@ PYTHONPATH=src python3 -m auto_harness.cli benchmark --manifest tests/fixtures/b
 - 模型下载断点续传。
 - 缓存命中避免重复下载。
 - 多文件并发下载。
+- 临时下载错误会按有限次数重试，不会无限 retry。
 - 远端 etag 变化时本地缓存失效并重新下载。
 - 模型缓存 dry-run 清理和受控删除。
 - Gradio `/config` discovery 构造 `/api/predict` trace 请求。

@@ -2,7 +2,7 @@ import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 
 @dataclass
@@ -21,6 +21,11 @@ class HarnessConfig:
     skills_dir: str = "skills"
     memory_dir: str = "memory"
     model_cache_dir: str = "model_cache"
+    model_download_max_workers: int = 1
+    model_download_retry_count: int = 2
+    model_download_retry_backoff_seconds: float = 1.0
+    model_cache_cleanup_max_total_bytes: Optional[int] = None
+    model_cache_cleanup_older_than_days: Optional[float] = None
     max_skill_chars: int = 6000
     max_memory_items: int = 5
 

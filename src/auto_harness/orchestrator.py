@@ -6,7 +6,7 @@ from typing import Dict
 
 from auto_harness.config import HarnessConfig
 from auto_harness.agents.claude_code import ClaudeCodeExecutor
-from auto_harness.assets import ModelCache
+from auto_harness.assets import HuggingFaceDownloader, ModelCache, ModelScopeDownloader
 from auto_harness.models.base import read_json, to_plain, write_json
 from auto_harness.models.task import ProjectSpec, RuntimePolicy, TaskSpec
 from auto_harness.memory import MemoryStore
@@ -33,6 +33,19 @@ class TaskRunner:
         self.skills = SkillRegistry(config.skills_path, max_chars=config.max_skill_chars)
         self.memory = MemoryStore(config.memory_path)
         self.model_cache = ModelCache(config.model_cache_path)
+        self.model_prepare = ModelPrepareModule(
+            self.model_cache,
+            huggingface_downloader=HuggingFaceDownloader(
+                max_workers=config.model_download_max_workers,
+                retry_count=config.model_download_retry_count,
+                retry_backoff_seconds=config.model_download_retry_backoff_seconds,
+            ),
+            modelscope_downloader=ModelScopeDownloader(
+                max_workers=config.model_download_max_workers,
+                retry_count=config.model_download_retry_count,
+                retry_backoff_seconds=config.model_download_retry_backoff_seconds,
+            ),
+        )
         self.repair_planner = RepairPlanner()
         self.repair_policy = RepairPolicy()
         self.repair_applier = RepairApplier()
@@ -138,7 +151,7 @@ class TaskRunner:
         self._remember(task_id, "env_deploy", env_result, effective_analysis)
 
         model_context = self._stage_context("model_prepare", resource_result.data)
-        model_result = ModelPrepareModule(self.model_cache).prepare(
+        model_result = self.model_prepare.prepare(
             run_dir,
             resource_result.data,
             execute=not dry_run,

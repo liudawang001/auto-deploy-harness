@@ -21,6 +21,8 @@ class ModelScopeDownloader(ResumableDownloadMixin):
         chunk_size: int = 1024 * 1024,
         selector: ModelFileSelector = None,
         max_workers: int = 1,
+        retry_count: int = 2,
+        retry_backoff_seconds: float = 1.0,
     ) -> None:
         self.urlopen = urlopen or urllib.request.urlopen
         self.token = token if token is not None else os.environ.get("MODELSCOPE_TOKEN")
@@ -29,6 +31,8 @@ class ModelScopeDownloader(ResumableDownloadMixin):
         self.chunk_size = chunk_size
         self.selector = selector or ModelFileSelector()
         self.max_workers = max(1, int(max_workers or 1))
+        self.retry_count = max(0, int(retry_count or 0))
+        self.retry_backoff_seconds = max(0.0, float(retry_backoff_seconds or 0.0))
 
     def download(self, asset: ModelAsset, progress_callback: Optional[Callable[[Dict], None]] = None) -> ModelAsset:
         if asset.source != "modelscope":
@@ -56,8 +60,11 @@ class ModelScopeDownloader(ResumableDownloadMixin):
         url = "%s/%s/repo/files?Revision=%s&Recursive=true" % (self.api_base, repo, revision)
         req = urllib.request.Request(url, method="GET")
         self._add_auth(req)
-        with self.urlopen(req, timeout=60) as resp:
-            body = resp.read().decode("utf-8", errors="replace")
+        def fetch_body():
+            with self.urlopen(req, timeout=60) as resp:
+                return resp.read().decode("utf-8", errors="replace")
+
+        body = self._call_with_retries(fetch_body)
         payload = json.loads(body)
         items = payload.get("Data") or payload.get("data") or payload.get("files") or payload
         if isinstance(items, dict):
@@ -93,9 +100,19 @@ class ModelScopeDownloader(ResumableDownloadMixin):
 
     def _download_file(self, asset: ModelAsset, item: Dict, cache_path: Path, progress_callback) -> Dict:
         rel_path = item["path"]
-        req = urllib.request.Request(self._resolve_url(asset, rel_path), method="GET")
-        self._add_auth(req)
-        return self._download_file_to_cache(req, rel_path, cache_path, item, progress_callback, lambda cb, path, downloaded, total, status: self._emit(cb, asset, path, downloaded, total, status))
+        def download_once():
+            req = urllib.request.Request(self._resolve_url(asset, rel_path), method="GET")
+            self._add_auth(req)
+            return self._download_file_to_cache(
+                req,
+                rel_path,
+                cache_path,
+                item,
+                progress_callback,
+                lambda cb, path, downloaded, total, status: self._emit(cb, asset, path, downloaded, total, status),
+            )
+
+        return self._call_with_retries(download_once)
 
     def _resolve_url(self, asset: ModelAsset, rel_path: str) -> str:
         repo = urllib.parse.quote(asset.repo_id, safe="/")

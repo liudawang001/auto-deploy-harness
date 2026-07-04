@@ -22,11 +22,17 @@ def build_parser() -> argparse.ArgumentParser:
     deploy.add_argument("--allow-install", action="store_true", default=False)
     deploy.add_argument("--allow-start", action="store_true", default=False)
     deploy.add_argument("--skip-clone", action="store_true", default=False)
+    deploy.add_argument("--model-download-workers", type=int, default=None)
+    deploy.add_argument("--download-retries", type=int, default=None)
+    deploy.add_argument("--download-retry-backoff", type=float, default=None)
 
     resume = sub.add_parser("resume", help="resume an existing task")
     resume.add_argument("--task-id", required=True)
     resume.add_argument("--dry-run", action="store_true", default=False)
     resume.add_argument("--execute", action="store_true", default=False)
+    resume.add_argument("--model-download-workers", type=int, default=None)
+    resume.add_argument("--download-retries", type=int, default=None)
+    resume.add_argument("--download-retry-backoff", type=float, default=None)
 
     status = sub.add_parser("status", help="show task status")
     status.add_argument("--task-id", required=True)
@@ -46,12 +52,28 @@ def build_parser() -> argparse.ArgumentParser:
     benchmark.add_argument("--manifest", default="tests/fixtures/benchmarks/manifest.json")
     benchmark.add_argument("--output", default="")
 
+    cache = sub.add_parser("cache", help="inspect or clean model cache")
+    cache.add_argument("--cleanup", action="store_true", default=False)
+    cache.add_argument("--max-total-bytes", type=int, default=None)
+    cache.add_argument("--older-than-days", type=float, default=None)
+    cache.add_argument("--apply", action="store_true", default=False)
+
     return parser
+
+
+def _apply_cli_overrides(config: HarnessConfig, args) -> None:
+    if getattr(args, "model_download_workers", None) is not None:
+        config.model_download_max_workers = max(1, args.model_download_workers)
+    if getattr(args, "download_retries", None) is not None:
+        config.model_download_retry_count = max(0, args.download_retries)
+    if getattr(args, "download_retry_backoff", None) is not None:
+        config.model_download_retry_backoff_seconds = max(0.0, args.download_retry_backoff)
 
 
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
     config = HarnessConfig.load()
+    _apply_cli_overrides(config, args)
     runner = TaskRunner(config)
 
     if args.command == "init":
@@ -105,6 +127,27 @@ def main(argv=None) -> int:
         report = BenchmarkRunner().run(Path(args.manifest), output)
         print(json.dumps(report, ensure_ascii=False, indent=2))
         return 0 if report.get("status") == "passed" else 2
+
+    if args.command == "cache":
+        if args.cleanup:
+            max_total_bytes = args.max_total_bytes
+            if max_total_bytes is None:
+                max_total_bytes = config.model_cache_cleanup_max_total_bytes
+            older_than_days = args.older_than_days
+            if older_than_days is None:
+                older_than_days = config.model_cache_cleanup_older_than_days
+            result = runner.model_cache.cleanup(
+                max_total_bytes=max_total_bytes,
+                older_than_days=older_than_days,
+                dry_run=not args.apply,
+            )
+        else:
+            result = {
+                "root": str(config.model_cache_path),
+                "entries": runner.model_cache.entries(),
+            }
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0
 
     return 1
 

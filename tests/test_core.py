@@ -9,9 +9,10 @@ from pathlib import Path
 
 from auto_harness.config import HarnessConfig
 from auto_harness.benchmarks import BenchmarkRunner
-from auto_harness.cli import main as cli_main
+from auto_harness.cli import _apply_cli_overrides, build_parser, main as cli_main
 from auto_harness.assets.huggingface import HuggingFaceDownloader
 from auto_harness.assets.modelscope import ModelScopeDownloader
+from auto_harness.assets.manifest import ModelAsset
 from auto_harness.diagnostics import LogClassifier
 from auto_harness.models.task import ProjectSpec, RuntimePolicy, TaskSpec
 from auto_harness.agents.base import AgentResult
@@ -116,6 +117,41 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(state.last_safe_stage, "analyze")
             self.assertIn("resource_plan", state.stages)
             self.assertIn("model_prepare", state.stages)
+
+    def test_config_loads_download_and_cache_tuning(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.json"
+            path.write_text(json.dumps({
+                "model_download_max_workers": 4,
+                "model_download_retry_count": 3,
+                "model_download_retry_backoff_seconds": 0.25,
+                "model_cache_cleanup_max_total_bytes": 1024,
+                "model_cache_cleanup_older_than_days": 7,
+            }), encoding="utf-8")
+            config = HarnessConfig.load(str(path))
+            self.assertEqual(config.model_download_max_workers, 4)
+            self.assertEqual(config.model_download_retry_count, 3)
+            self.assertEqual(config.model_download_retry_backoff_seconds, 0.25)
+            self.assertEqual(config.model_cache_cleanup_max_total_bytes, 1024)
+            self.assertEqual(config.model_cache_cleanup_older_than_days, 7)
+
+    def test_cli_download_overrides_update_config(self):
+        args = build_parser().parse_args([
+            "deploy",
+            "--repo",
+            "local",
+            "--model-download-workers",
+            "3",
+            "--download-retries",
+            "5",
+            "--download-retry-backoff",
+            "0",
+        ])
+        config = HarnessConfig()
+        _apply_cli_overrides(config, args)
+        self.assertEqual(config.model_download_max_workers, 3)
+        self.assertEqual(config.model_download_retry_count, 5)
+        self.assertEqual(config.model_download_retry_backoff_seconds, 0.0)
 
     def test_analyzer_detects_gradio_requirements(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -477,6 +513,33 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(len(download_urls), 2)
             self.assertEqual((Path(asset.cache_path) / "config.json").read_bytes(), b"a")
             self.assertEqual((Path(asset.cache_path) / "tokenizer.json").read_bytes(), b"b")
+
+    def test_huggingface_downloader_retries_transient_download_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = ModelCache(Path(tmp) / "model_cache")
+            asset = cache.reserve(ModelAsset(asset_id="huggingface:org/demo", source="huggingface", repo_id="org/demo"))
+            attempts = {"download": 0}
+
+            def fake_urlopen(req, timeout):
+                if "/api/models/" in req.full_url:
+                    return FakeStreamingResponse(json.dumps([
+                        {"type": "file", "path": "config.json", "size": 3}
+                    ]).encode("utf-8"))
+                attempts["download"] += 1
+                if attempts["download"] == 1:
+                    raise OSError("temporary network reset")
+                return FakeStreamingResponse(b"abc", status=200)
+
+            result = HuggingFaceDownloader(
+                urlopen=fake_urlopen,
+                token="",
+                chunk_size=1,
+                retry_count=1,
+                retry_backoff_seconds=0,
+            ).download(asset)
+            self.assertEqual(result.status, "downloaded")
+            self.assertEqual(attempts["download"], 2)
+            self.assertEqual((Path(asset.cache_path) / "config.json").read_bytes(), b"abc")
 
     def test_model_file_selector_skips_readme_and_scripts(self):
         selector = ModelFileSelector()
@@ -840,6 +903,36 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(code, 0)
             data = json.loads(output.read_text(encoding="utf-8"))
             self.assertEqual(data["status"], "passed")
+
+    def test_cache_cli_cleanup_defaults_to_dry_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cache_entry = root / "model_cache" / "huggingface" / "demo"
+            cache_entry.mkdir(parents=True)
+            (cache_entry / "weights.bin").write_bytes(b"0123456789")
+            config_path = root / "config.json"
+            config_path.write_text(json.dumps({
+                "runs_dir": str(root / "runs"),
+                "memory_dir": str(root / "memory"),
+                "model_cache_dir": str(root / "model_cache"),
+                "model_cache_cleanup_max_total_bytes": 5,
+            }), encoding="utf-8")
+            old_config = os.environ.get("AUTO_HARNESS_CONFIG")
+            os.environ["AUTO_HARNESS_CONFIG"] = str(config_path)
+            try:
+                output = io.StringIO()
+                with redirect_stdout(output):
+                    code = cli_main(["cache", "--cleanup"])
+            finally:
+                if old_config is None:
+                    os.environ.pop("AUTO_HARNESS_CONFIG", None)
+                else:
+                    os.environ["AUTO_HARNESS_CONFIG"] = old_config
+            self.assertEqual(code, 0)
+            result = json.loads(output.getvalue())
+            self.assertTrue(result["dry_run"])
+            self.assertEqual(result["candidate_count"], 1)
+            self.assertTrue((cache_entry / "weights.bin").exists())
 
     def test_task_runner_dry_run_includes_resource_and_model_prepare(self):
         with tempfile.TemporaryDirectory() as tmp:

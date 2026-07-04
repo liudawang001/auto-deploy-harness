@@ -819,6 +819,7 @@ src/auto_harness/
 
 1. 实现 Hugging Face 下载器。已完成第一版，使用 stdlib HTTP 和 Hugging Face tree API。
 2. 支持 resume 和缓存命中。已完成第一版，使用 `.part` 文件和 Range 续传。
+   - 下载并发、有限重试、重试 backoff 和缓存清理阈值已暴露到配置文件；`deploy` / `resume` 支持 CLI 临时覆盖，`cache` 子命令支持 dry-run / apply 清理。
 3. 将 state 扩展为可记录 download progress。已完成第一版，stage progress 写入 `state.json`。
 4. 增强 Gradio `/config` API discovery。已完成第一版，支持 dependency `api_name` / `fn_index`。
 5. 增加 log classifier 第一批规则。已完成第一版，覆盖常见依赖、CUDA、磁盘、权限和版本冲突错误。

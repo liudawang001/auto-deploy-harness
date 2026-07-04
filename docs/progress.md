@@ -5,6 +5,13 @@
 ### 已完成
 
 - 继续执行 P0/P1 优化任务：
+  - 将下载并发、下载重试和缓存清理阈值暴露到 `HarnessConfig` 与 `configs/default.json`。
+  - `TaskRunner` 会按配置创建 Hugging Face / ModelScope 下载器，`model_prepare` 不再只能使用硬编码下载参数。
+  - `deploy` / `resume` 新增 `--model-download-workers`、`--download-retries`、`--download-retry-backoff`，支持单次任务临时覆盖下载策略。
+  - 新增 CLI 子命令 `cache`，支持查看模型缓存和执行缓存清理计划；清理默认 dry-run，只有 `--apply` 才删除缓存目录。
+  - 下载器新增有限重试机制，覆盖文件清单请求和单文件下载；checksum、无可下载文件等确定性失败不会无限重试。
+  - 单测扩展到 48 个，覆盖配置读取、CLI 参数覆盖、临时下载错误重试和缓存清理 dry-run。
+- 继续执行 P0/P1 优化任务：
   - Benchmark cases 从 13 个扩展到 17 个，新增 `service_exits_after_start`、`stale_artifact_ignored`、`gradio_api_shape_variation`、`token_missing_diagnosis`。
   - 新增服务启动后快速退出回归用例，确保 `RunnerModule` 不会把瞬时退出进程误判为启动成功。
   - 新增历史 artifact 干扰回归用例，确保 verify 只接受本次 trace 后的新鲜 artifact 或 trace evidence。
@@ -61,9 +68,9 @@
 ### 下一步
 
 1. 增加真实 Playwright smoke test 文档和可选 CI job，在安装 Playwright 的环境中验证浏览器 backend。
-2. 将下载并发、缓存清理和重试参数暴露到配置文件与 CLI。
-3. 增加 repair resume 的阶段级跳转执行，按 `rerun_from_effective` 从安全阶段重跑，而不是总是全量 pipeline。
-4. 增加 token 缺失时的可操作提示，把所需变量名写入 report，但不记录密钥值。
+2. 增加 repair resume 的阶段级跳转执行，按 `rerun_from_effective` 从安全阶段重跑，而不是总是全量 pipeline。
+3. 增加 token 缺失时的可操作提示，把所需变量名写入 report，但不记录密钥值。
+4. 为缓存清理增加更细粒度策略，例如按模型源、repo id 或 keep-list 排除关键模型。
 
 ## 2026-07-03
 
