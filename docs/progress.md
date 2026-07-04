@@ -5,6 +5,12 @@
 ### 已完成
 
 - 继续执行 P0/P1 优化任务：
+  - Hugging Face / ModelScope 下载器新增 `max_workers`，支持 stdlib 线程池并发下载多个模型文件，并保持 manifest 文件顺序稳定。
+  - 下载完成后为每个文件写入 `.auto_harness_meta.json`，记录 size、sha256 和 etag；缓存命中时会校验远端 etag，etag 不一致会重新下载，避免旧缓存误用。
+  - `ModelCache` 新增 `entries()` 和 `cleanup()`，支持按总大小或时间生成清理候选；默认 `dry_run=True`，只有显式关闭 dry-run 才删除缓存目录。
+  - Benchmark cases 从 8 个扩展到 11 个，新增 `parallel_model_download`、`etag_cache_invalidation`、`cache_cleanup_plan`。
+  - 单测扩展到 36 个，覆盖并发下载、etag 缓存失效和缓存清理。
+- 继续执行 P0/P1 优化任务：
   - 新增 `BrowserVerifier` 和可选 `PlaywrightBrowserBackend`，用于 Gradio/Streamlit/webui 的浏览器 DOM probe。
   - `VerifyModule` 会对 webui 服务写入 `browser_dom_probe` evidence；DOM 包含当前 trace id 可作为强证据，DOM 出现 traceback/import/runtime error 会作为失败证据。
   - Playwright 是可选依赖；未安装时只记录 `uncertain`，不会让 HTTP trace 或 artifact evidence 被误判失败。
@@ -38,10 +44,10 @@
 
 ### 下一步
 
-1. 增强下载器并发、etag 强一致校验和缓存清理策略。
-2. 增加 repair loop 的受控重试次数、rerun_from 安全回退和人工审批入口。
-3. 扩展 benchmark cases：服务启动后退出、历史 artifact 干扰、Gradio API shape 变化、token 缺失。
-4. 增加真实 Playwright smoke test 文档和可选 CI job，在安装 Playwright 的环境中验证浏览器 backend。
+1. 增加 repair loop 的受控重试次数、rerun_from 安全回退和人工审批入口。
+2. 扩展 benchmark cases：服务启动后退出、历史 artifact 干扰、Gradio API shape 变化、token 缺失。
+3. 增加真实 Playwright smoke test 文档和可选 CI job，在安装 Playwright 的环境中验证浏览器 backend。
+4. 将下载并发、缓存清理和重试参数暴露到配置文件与 CLI。
 
 ## 2026-07-03
 

@@ -2,6 +2,7 @@ import json
 import os
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
@@ -19,6 +20,7 @@ class ModelScopeDownloader(ResumableDownloadMixin):
         download_base: Optional[str] = None,
         chunk_size: int = 1024 * 1024,
         selector: ModelFileSelector = None,
+        max_workers: int = 1,
     ) -> None:
         self.urlopen = urlopen or urllib.request.urlopen
         self.token = token if token is not None else os.environ.get("MODELSCOPE_TOKEN")
@@ -26,6 +28,7 @@ class ModelScopeDownloader(ResumableDownloadMixin):
         self.download_base = (download_base or os.environ.get("MODELSCOPE_DOWNLOAD_BASE") or "https://www.modelscope.cn/models").rstrip("/")
         self.chunk_size = chunk_size
         self.selector = selector or ModelFileSelector()
+        self.max_workers = max(1, int(max_workers or 1))
 
     def download(self, asset: ModelAsset, progress_callback: Optional[Callable[[Dict], None]] = None) -> ModelAsset:
         if asset.source != "modelscope":
@@ -37,8 +40,7 @@ class ModelScopeDownloader(ResumableDownloadMixin):
         try:
             files = self._list_files(asset)
             asset.files = []
-            for item in files:
-                record = self._download_file(asset, item, cache_path, progress_callback)
+            for record in self._download_files(asset, files, cache_path, progress_callback):
                 asset.files.append(record)
                 asset.downloaded_bytes = sum(int(file.get("downloaded_bytes") or 0) for file in asset.files)
             asset.status = "downloaded"
@@ -75,6 +77,19 @@ class ModelScopeDownloader(ResumableDownloadMixin):
         if not files:
             raise RuntimeError("no downloadable model files discovered for %s" % asset.repo_id)
         return files
+
+    def _download_files(self, asset: ModelAsset, files: List[Dict], cache_path: Path, progress_callback) -> List[Dict]:
+        if self.max_workers <= 1 or len(files) <= 1:
+            return [self._download_file(asset, dict(item), cache_path, progress_callback) for item in files]
+        results = {}
+        with ThreadPoolExecutor(max_workers=min(self.max_workers, len(files))) as executor:
+            future_map = {
+                executor.submit(self._download_file, asset, dict(item), cache_path, progress_callback): index
+                for index, item in enumerate(files)
+            }
+            for future in as_completed(future_map):
+                results[future_map[future]] = future.result()
+        return [results[index] for index in sorted(results)]
 
     def _download_file(self, asset: ModelAsset, item: Dict, cache_path: Path, progress_callback) -> Dict:
         rel_path = item["path"]

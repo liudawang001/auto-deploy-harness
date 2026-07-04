@@ -79,6 +79,12 @@ class BenchmarkRunner:
                 return self._case_checksum_failure(case)
             if case_id == "browser_dom_trace":
                 return self._case_browser_dom_trace(case)
+            if case_id == "parallel_model_download":
+                return self._case_parallel_model_download(case)
+            if case_id == "etag_cache_invalidation":
+                return self._case_etag_cache_invalidation(case)
+            if case_id == "cache_cleanup_plan":
+                return self._case_cache_cleanup_plan(case)
             return self._result(case, "skipped", "unknown benchmark case")
         except Exception as exc:  # noqa: BLE001 - benchmark report should continue
             return self._result(case, "failed", str(exc))
@@ -227,6 +233,65 @@ class BenchmarkRunner:
         checks = {check["name"]: check for check in result.data["checks"]}
         ok = result.status == "passed" and checks["browser_dom_probe"]["status"] == "pass"
         return self._result(case, "passed" if ok else "failed", "browser DOM trace evidence verified")
+
+    def _case_parallel_model_download(self, case: Dict) -> Dict:
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = ModelCache(Path(tmp) / "model_cache")
+            asset = cache.reserve(ModelAsset(asset_id="huggingface:org/demo", source="huggingface", repo_id="org/demo"))
+            download_urls = []
+
+            def fake_urlopen(req, timeout):
+                if "/api/models/" in req.full_url:
+                    return _FakeResponse(json.dumps([
+                        {"type": "file", "path": "config.json", "size": 1},
+                        {"type": "file", "path": "tokenizer.json", "size": 1},
+                    ]))
+                download_urls.append(req.full_url)
+                return _FakeResponse(b"a" if req.full_url.endswith("config.json") else b"b", status=200)
+
+            result = HuggingFaceDownloader(urlopen=fake_urlopen, token="", chunk_size=1, max_workers=2).download(asset)
+            ok = result.status == "downloaded" and len(download_urls) == 2 and [file["path"] for file in result.files] == ["config.json", "tokenizer.json"]
+            return self._result(case, "passed" if ok else "failed", "parallel file download verified")
+
+    def _case_etag_cache_invalidation(self, case: Dict) -> Dict:
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = ModelCache(Path(tmp) / "model_cache")
+            asset = cache.reserve(ModelAsset(asset_id="huggingface:org/demo", source="huggingface", repo_id="org/demo"))
+            target = Path(asset.cache_path) / "config.json"
+            target.parent.mkdir(parents=True)
+            target.write_bytes(b"old")
+            (target.parent / "config.json.auto_harness_meta.json").write_text(
+                json.dumps({"size_bytes": 3, "etag": "old-etag"}),
+                encoding="utf-8",
+            )
+            download_count = 0
+
+            def fake_urlopen(req, timeout):
+                nonlocal download_count
+                if "/api/models/" in req.full_url:
+                    return _FakeResponse(json.dumps([
+                        {"type": "file", "path": "config.json", "size": 3, "oid": "new-etag"}
+                    ]))
+                download_count += 1
+                return _FakeResponse(b"new", status=200)
+
+            result = HuggingFaceDownloader(urlopen=fake_urlopen, token="", chunk_size=1).download(asset)
+            ok = result.status == "downloaded" and target.read_bytes() == b"new" and download_count == 1
+            return self._result(case, "passed" if ok else "failed", "etag mismatch invalidated cached file")
+
+    def _case_cache_cleanup_plan(self, case: Dict) -> Dict:
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = ModelCache(Path(tmp) / "model_cache")
+            old_dir = cache.root / "huggingface" / "old"
+            new_dir = cache.root / "huggingface" / "new"
+            old_dir.mkdir(parents=True)
+            new_dir.mkdir(parents=True)
+            (old_dir / "model.bin").write_bytes(b"old")
+            (new_dir / "model.bin").write_bytes(b"newer")
+            plan = cache.cleanup(max_total_bytes=5, dry_run=True)
+            applied = cache.cleanup(max_total_bytes=5, dry_run=False)
+            ok = plan["candidate_count"] == 1 and len(applied["deleted"]) == 1 and not old_dir.exists() and new_dir.exists()
+            return self._result(case, "passed" if ok else "failed", "cache cleanup dry-run and delete verified")
 
     def _result(self, case: Dict, status: str, reason: str) -> Dict:
         return {

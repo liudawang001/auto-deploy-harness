@@ -24,11 +24,11 @@ AI-Auto-Harness 是一个面向 AI 开源 demo 项目的自动部署与验证 Ag
 - 仓库内置 skill：位于 `skills/*/SKILL.md`，按阶段选择并记录 hash。
 - 结构化问题记忆：位于 `memory/deployment_issues.jsonl`，用于检索历史相似失败。
 - `resource_plan` 阶段：识别模型资产、GPU/CUDA 信号、磁盘风险和外部 token 需求。
-- `model_prepare` 阶段：生成模型资产 manifest、缓存 key 和 `model_cache` 路径；执行模式下支持 Hugging Face / ModelScope 文件清单解析、断点续传、sha256 校验字段和缓存写入。
+- `model_prepare` 阶段：生成模型资产 manifest、缓存 key 和 `model_cache` 路径；执行模式下支持 Hugging Face / ModelScope 文件清单解析、断点续传、并发下载、sha256/etag 校验元数据和缓存写入。
 - `verify` 增强：支持 Gradio `/config` discovery、Streamlit DOM/HTML 证据探测，以及可选 Playwright 浏览器 DOM probe。
 - 日志规则分类器：对缺依赖、CUDA OOM、磁盘不足、token 权限、wheel 构建失败等常见错误生成结构化诊断。
 - Repair plan：失败或 uncertain 阶段会生成结构化修复建议，经过 policy 校验后写入受控 repair artifacts；下一次 `resume` 会在 policy 允许时把安装建议和 verify hint 回灌到 pipeline 输入，但仍不会绕过 `--execute`、命令白名单或源码修改限制。
-- Benchmark fixtures：`tests/fixtures/benchmarks` 覆盖下载续传、缓存命中、Gradio `/config` discovery、浏览器 DOM trace、Streamlit 错误页面、HTTP 200 false-positive 防护、repair policy 拒绝和 checksum 失败。
+- Benchmark fixtures：`tests/fixtures/benchmarks` 覆盖下载续传、缓存命中、并发下载、etag 缓存失效、缓存清理、Gradio `/config` discovery、浏览器 DOM trace、Streamlit 错误页面、HTTP 200 false-positive 防护、repair policy 拒绝和 checksum 失败。
 - 开发进度报告：`docs/progress.md`。
 
 ## 快速开始
@@ -127,7 +127,16 @@ runs/<task-id>/reports/model_assets_manifest.json
 model_cache/
 ```
 
-执行模式下，Hugging Face 资产会通过 tree API 获取文件清单；ModelScope 资产会通过可配置的 ModelScope API/下载 URL 模板获取文件。两者都会将 `.safetensors`、`.bin`、`.pt`、`.gguf` 和 tokenizer/config 等必要文件下载到缓存目录，默认跳过 README、示例脚本等非模型运行必要文件。下载过程中使用 `.part` 文件和 HTTP Range 支持续传；如果文件清单提供 `sha256`，下载后会做 sha256 校验。
+执行模式下，Hugging Face 资产会通过 tree API 获取文件清单；ModelScope 资产会通过可配置的 ModelScope API/下载 URL 模板获取文件。两者都会将 `.safetensors`、`.bin`、`.pt`、`.gguf` 和 tokenizer/config 等必要文件下载到缓存目录，默认跳过 README、示例脚本等非模型运行必要文件。下载过程中使用 `.part` 文件和 HTTP Range 支持续传；如果文件清单提供 `sha256`，下载后会做 sha256 校验。下载完成后会为每个文件写入 `.auto_harness_meta.json`，记录 size、sha256 和 etag；后续如果远端 etag 变化，本地缓存不会被误当成有效。
+
+下载器支持 stdlib 线程池并发：
+
+```python
+HuggingFaceDownloader(max_workers=4)
+ModelScopeDownloader(max_workers=4)
+```
+
+缓存清理由 `ModelCache.cleanup(...)` 提供，默认 `dry_run=True`，会先返回候选列表、候选大小和预计删除项；只有显式传入 `dry_run=False` 才会删除缓存目录。
 
 阶段进度会写入 `state.json` 的 `model_prepare.progress`，包括当前文件、已下载字节、总字节和状态。
 
@@ -170,6 +179,9 @@ PYTHONPATH=src python3 -m auto_harness.cli benchmark --manifest tests/fixtures/b
 
 - 模型下载断点续传。
 - 缓存命中避免重复下载。
+- 多文件并发下载。
+- 远端 etag 变化时本地缓存失效并重新下载。
+- 模型缓存 dry-run 清理和受控删除。
 - Gradio `/config` discovery 构造 `/api/predict` trace 请求。
 - 浏览器 DOM 中出现当前 trace 时可以作为强证据。
 - Streamlit HTTP 200 错误页面不能通过 verify。

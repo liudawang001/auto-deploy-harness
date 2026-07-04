@@ -39,6 +39,21 @@
       "id": "browser_dom_trace",
       "purpose": "验证浏览器 DOM 中出现当前 trace 时可以作为强证据",
       "expected_signal": "browser_dom_probe status is pass"
+    },
+    {
+      "id": "parallel_model_download",
+      "purpose": "验证模型下载器可以并发下载多个必要文件且保持 manifest 顺序",
+      "expected_signal": "two files are downloaded with max_workers > 1"
+    },
+    {
+      "id": "etag_cache_invalidation",
+      "purpose": "验证远端 etag 变化时本地缓存不会被误当成有效",
+      "expected_signal": "cached file is redownloaded when etag metadata mismatches"
+    },
+    {
+      "id": "cache_cleanup_plan",
+      "purpose": "验证模型缓存清理可以先 dry-run 生成候选，再受控删除",
+      "expected_signal": "old cache entry is selected and deleted only when dry_run is false"
     }
   ]
 }

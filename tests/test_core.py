@@ -382,6 +382,57 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(result.files[0]["etag"], "etag123")
             self.assertTrue(result.files[0]["verified"])
 
+    def test_huggingface_downloader_redownloads_on_etag_mismatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = ModelCache(Path(tmp) / "model_cache")
+            asset = cache.reserve(ModelAssetDetector().detect(self._repo_with_hf_model(Path(tmp) / "repo"))[0])
+            target = Path(asset.cache_path) / "config.json"
+            target.parent.mkdir(parents=True)
+            target.write_bytes(b"old")
+            (target.parent / "config.json.auto_harness_meta.json").write_text(
+                json.dumps({"size_bytes": 3, "etag": "old-etag"}),
+                encoding="utf-8",
+            )
+            download_calls = []
+
+            def fake_urlopen(req, timeout):
+                if "/api/models/" in req.full_url:
+                    return FakeStreamingResponse(json.dumps([
+                        {"type": "file", "path": "config.json", "size": 3, "oid": "new-etag"}
+                    ]).encode("utf-8"))
+                download_calls.append(req)
+                return FakeStreamingResponse(b"new", status=200)
+
+            result = HuggingFaceDownloader(urlopen=fake_urlopen, token="", chunk_size=2).download(asset)
+            self.assertEqual(result.status, "downloaded")
+            self.assertEqual(target.read_bytes(), b"new")
+            self.assertEqual(len(download_calls), 1)
+            self.assertTrue(result.files[0]["etag_verified"])
+
+    def test_huggingface_downloader_can_download_files_concurrently(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = ModelCache(Path(tmp) / "model_cache")
+            asset = cache.reserve(ModelAssetDetector().detect(self._repo_with_hf_model(Path(tmp) / "repo"))[0])
+            download_urls = []
+
+            def fake_urlopen(req, timeout):
+                if "/api/models/" in req.full_url:
+                    return FakeStreamingResponse(json.dumps([
+                        {"type": "file", "path": "config.json", "size": 1},
+                        {"type": "file", "path": "tokenizer.json", "size": 1},
+                    ]).encode("utf-8"))
+                download_urls.append(req.full_url)
+                if req.full_url.endswith("config.json"):
+                    return FakeStreamingResponse(b"a", status=200)
+                return FakeStreamingResponse(b"b", status=200)
+
+            result = HuggingFaceDownloader(urlopen=fake_urlopen, token="", chunk_size=1, max_workers=2).download(asset)
+            self.assertEqual(result.status, "downloaded")
+            self.assertEqual([file["path"] for file in result.files], ["config.json", "tokenizer.json"])
+            self.assertEqual(len(download_urls), 2)
+            self.assertEqual((Path(asset.cache_path) / "config.json").read_bytes(), b"a")
+            self.assertEqual((Path(asset.cache_path) / "tokenizer.json").read_bytes(), b"b")
+
     def test_model_file_selector_skips_readme_and_scripts(self):
         selector = ModelFileSelector()
         self.assertTrue(selector.should_download("model.safetensors"))
@@ -422,6 +473,23 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(result.status, "downloaded")
             self.assertEqual((target_dir / "weights.bin").read_bytes(), b"1234")
             self.assertEqual(calls[1].headers.get("Range"), "bytes=2-")
+
+    def test_model_cache_cleanup_plans_and_deletes_candidates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = ModelCache(Path(tmp) / "model_cache")
+            old_dir = cache.root / "huggingface" / "old"
+            new_dir = cache.root / "huggingface" / "new"
+            old_dir.mkdir(parents=True)
+            new_dir.mkdir(parents=True)
+            (old_dir / "model.bin").write_bytes(b"old")
+            (new_dir / "model.bin").write_bytes(b"newer")
+            plan = cache.cleanup(max_total_bytes=5, dry_run=True)
+            self.assertEqual(plan["candidate_count"], 1)
+            self.assertTrue(old_dir.exists())
+            applied = cache.cleanup(max_total_bytes=5, dry_run=False)
+            self.assertEqual(len(applied["deleted"]), 1)
+            self.assertFalse(old_dir.exists())
+            self.assertTrue(new_dir.exists())
 
     def _repo_with_hf_model(self, repo: Path) -> Path:
         repo.mkdir()
@@ -603,11 +671,14 @@ class CoreTests(unittest.TestCase):
         self.assertIn("repair_policy_reject", ids)
         self.assertIn("checksum_failure", ids)
         self.assertIn("browser_dom_trace", ids)
+        self.assertIn("parallel_model_download", ids)
+        self.assertIn("etag_cache_invalidation", ids)
+        self.assertIn("cache_cleanup_plan", ids)
 
     def test_benchmark_runner_executes_all_fixture_cases(self):
         report = BenchmarkRunner().run(Path("tests/fixtures/benchmarks/manifest.json"))
         self.assertEqual(report["status"], "passed")
-        self.assertEqual(len(report["cases"]), 8)
+        self.assertEqual(len(report["cases"]), 11)
         self.assertTrue(all(case["status"] == "passed" for case in report["cases"]))
 
     def test_benchmark_cli_writes_output(self):
