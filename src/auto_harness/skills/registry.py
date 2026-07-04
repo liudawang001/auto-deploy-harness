@@ -88,6 +88,7 @@ class SkillRegistry:
         stage_aliases = {
             "analyze": ["analyze", "analysis", "classify", "project"],
             "resource_plan": ["resource", "plan", "gpu", "cuda", "disk", "model asset"],
+            "env_solve": ["env", "solve", "dependency", "cuda", "torch", "python"],
             "env_deploy": ["env", "deploy", "install", "dependency"],
             "model_prepare": ["model", "asset", "download", "cache", "huggingface", "modelscope"],
             "runner": ["runner", "run", "startup", "service"],

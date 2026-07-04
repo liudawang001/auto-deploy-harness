@@ -96,6 +96,11 @@
       "expected_signal": "git lfs install and pull are executed only when git is allowed"
     },
     {
+      "id": "env_solve_legacy_gradio_constraints",
+      "purpose": "验证 env_solve 会为老 Gradio/未 pin 依赖项目生成 numpy/pydantic/opencv 兼容约束",
+      "expected_signal": "install_plan includes numpy<2, pydantic<2 and opencv-python-headless"
+    },
+    {
       "id": "gradio_api_shape_variation",
       "purpose": "验证 Gradio /config 中 api_name 带斜杠且前置 dependency 不可用时仍能选中正确 API",
       "expected_signal": "request is sent to /api/predict with selected fn_index"

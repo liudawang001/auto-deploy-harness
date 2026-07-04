@@ -12,6 +12,7 @@ from auto_harness.models.task import ProjectSpec, RuntimePolicy, TaskSpec
 from auto_harness.memory import MemoryStore
 from auto_harness.modules import (
     EnvDeployModule,
+    EnvSolveModule,
     ModelPrepareModule,
     ProjectAnalyzer,
     ReportGenerator,
@@ -27,8 +28,8 @@ from auto_harness.utils.time import compact_timestamp, utc_now_iso
 
 
 class TaskRunner:
-    PIPELINE_STAGES = ("analyze", "resource_plan", "env_deploy", "model_prepare", "runner", "verify", "report")
-    RERUN_STAGES = ("analyze", "resource_plan", "env_deploy", "model_prepare", "runner", "verify")
+    PIPELINE_STAGES = ("analyze", "resource_plan", "env_solve", "env_deploy", "model_prepare", "runner", "verify", "report")
+    RERUN_STAGES = ("analyze", "resource_plan", "env_solve", "env_deploy", "model_prepare", "runner", "verify")
 
     def __init__(self, config: HarnessConfig) -> None:
         self.config = config
@@ -158,11 +159,22 @@ class TaskRunner:
         else:
             resource_data = results["resource_plan"]["data"]
 
+        if should_run("env_solve"):
+            env_solve_context = self._stage_context("env_solve", effective_analysis)
+            env_solve_result = EnvSolveModule().solve(repo_dir, effective_analysis, resource_data)
+            self._attach_context(env_solve_result, env_solve_context)
+            results["env_solve"] = to_plain(env_solve_result)
+            self._save_stage(task_id, "env_solve", env_solve_result)
+            self._remember(task_id, "env_solve", env_solve_result, effective_analysis)
+            deploy_analysis = env_solve_result.data.get("analysis", effective_analysis)
+        else:
+            deploy_analysis = results["env_solve"]["data"].get("analysis", effective_analysis)
+
         if should_run("env_deploy"):
-            env_context = self._stage_context("env_deploy", effective_analysis)
+            env_context = self._stage_context("env_deploy", deploy_analysis)
             env_result = EnvDeployModule().deploy(
                 repo_dir,
-                effective_analysis,
+                deploy_analysis,
                 execute=not dry_run and task.runtime.allow_dependency_install,
                 allowed_commands=self.config.allowed_commands,
             )
@@ -170,7 +182,7 @@ class TaskRunner:
             self._attach_repair_overlay(env_result, repair_overlay)
             results["env_deploy"] = to_plain(env_result)
             self._save_stage(task_id, "env_deploy", env_result)
-            self._remember(task_id, "env_deploy", env_result, effective_analysis)
+            self._remember(task_id, "env_deploy", env_result, deploy_analysis)
 
         if should_run("model_prepare"):
             model_context = self._stage_context("model_prepare", resource_data)
@@ -189,27 +201,27 @@ class TaskRunner:
             self._remember(task_id, "model_prepare", model_result, effective_analysis)
 
         if should_run("runner"):
-            runner_context = self._stage_context("runner", effective_analysis)
+            runner_context = self._stage_context("runner", deploy_analysis)
             runner_result = RunnerModule().run(
                 repo_dir,
-                effective_analysis,
+                deploy_analysis,
                 execute=not dry_run and task.runtime.allow_service_start,
                 allowed_commands=self.config.allowed_commands,
             )
             self._attach_context(runner_result, runner_context)
             results["runner"] = to_plain(runner_result)
             self._save_stage(task_id, "runner", runner_result)
-            self._remember(task_id, "runner", runner_result, effective_analysis)
+            self._remember(task_id, "runner", runner_result, deploy_analysis)
             runner_data = runner_result.data
         else:
             runner_data = results["runner"]["data"]
 
-        verify_context = self._stage_context("verify", effective_analysis)
-        verify_result = VerifyModule(stage_context=verify_context).verify(run_dir, effective_analysis, runner_data)
+        verify_context = self._stage_context("verify", deploy_analysis)
+        verify_result = VerifyModule(stage_context=verify_context).verify(run_dir, deploy_analysis, runner_data)
         self._attach_repair_overlay(verify_result, repair_overlay)
         results["verify"] = to_plain(verify_result)
         self._save_stage(task_id, "verify", verify_result)
-        self._remember(task_id, "verify", verify_result, effective_analysis)
+        self._remember(task_id, "verify", verify_result, deploy_analysis)
 
         task_data = read_json(run_dir / "task.json")
         report_result = ReportGenerator().generate(run_dir, task_data, results, execution_audit=execution_audit)

@@ -9,6 +9,7 @@ class RepairLoopController:
     SAFE_RERUN_STAGES = (
         "analyze",
         "resource_plan",
+        "env_solve",
         "env_deploy",
         "model_prepare",
         "runner",

@@ -8,6 +8,7 @@ from auto_harness.assets.manifest import ModelAsset
 from auto_harness.config import HarnessConfig
 from auto_harness.diagnostics import LogClassifier
 from auto_harness.models.base import read_json, write_json
+from auto_harness.modules.env_solve import EnvSolveModule
 from auto_harness.modules.model_prepare import ModelPrepareModule
 from auto_harness.modules.reporter import ReportGenerator
 from auto_harness.modules.resource_plan import ResourcePlanner
@@ -109,6 +110,8 @@ class BenchmarkRunner:
                 return self._case_git_lfs_detection(case)
             if case_id == "git_lfs_prepare_execute":
                 return self._case_git_lfs_prepare_execute(case)
+            if case_id == "env_solve_legacy_gradio_constraints":
+                return self._case_env_solve_legacy_gradio_constraints(case)
             if case_id == "gradio_api_shape_variation":
                 return self._case_gradio_api_shape_variation(case)
             if case_id == "gradio_queue_call_followup":
@@ -493,6 +496,29 @@ class BenchmarkRunner:
         )
         return self._result(case, "passed" if ok else "failed", "Git LFS controlled execution verified")
 
+    def _case_env_solve_legacy_gradio_constraints(self, case: Dict) -> Dict:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "requirements.txt").write_text("gradio\nopencv-python\n", encoding="utf-8")
+            result = EnvSolveModule().solve(
+                repo,
+                {
+                    "frameworks": ["gradio"],
+                    "install_plan": [
+                        ["python3", "-m", "venv", ".venv"],
+                        [".venv/bin/python", "-m", "pip", "install", "-r", "requirements.txt"],
+                    ],
+                },
+                {"python_range": ">=3.10,<3.12"},
+            )
+        ok = (
+            result.status == "passed"
+            and {"numpy<2", "pydantic<2", "opencv-python-headless"}.issubset(set(result.data.get("constraints", [])))
+            and "numpy<2" in result.data.get("install_plan", [[], []])[1]
+            and result.data.get("analysis", {}).get("env_solution", {}).get("python") == "3.10"
+        )
+        return self._result(case, "passed" if ok else "failed", "env_solve legacy gradio constraints verified")
+
     def _case_gradio_api_shape_variation(self, case: Dict) -> Dict:
         captured = {}
 
@@ -591,7 +617,7 @@ class BenchmarkRunner:
             ok = (
                 after.get("verify", 0) > before.get("verify", 0)
                 and after.get("report", 0) > before.get("report", 0)
-                and all(after.get(stage, 0) == before.get(stage, 0) for stage in ("analyze", "resource_plan", "env_deploy", "model_prepare", "runner"))
+                and all(after.get(stage, 0) == before.get(stage, 0) for stage in ("analyze", "resource_plan", "env_solve", "env_deploy", "model_prepare", "runner"))
             )
         return self._result(case, "passed" if ok else "failed", "repair resume stage jump verified")
 
@@ -622,7 +648,7 @@ class BenchmarkRunner:
             report = (run_dir / "reports" / "report.md").read_text(encoding="utf-8")
             ok = (
                 audit.get("effective_start_stage") == "verify"
-                and audit.get("reused_stages") == ["analyze", "resource_plan", "env_deploy", "model_prepare", "runner"]
+                and audit.get("reused_stages") == ["analyze", "resource_plan", "env_solve", "env_deploy", "model_prepare", "runner"]
                 and audit.get("rerun_stages") == ["verify", "report"]
                 and "## Execution Audit" in report
                 and "- Rerun stages: `verify`, `report`" in report

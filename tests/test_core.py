@@ -20,6 +20,7 @@ from auto_harness.memory import MemoryStore
 from auto_harness.assets import GitLFSDetector, ModelCache, ModelAssetDetector, ModelFileSelector
 from auto_harness.modules.analyzer import ProjectAnalyzer
 from auto_harness.modules.env_deploy import EnvDeployModule
+from auto_harness.modules.env_solve import EnvSolveModule
 from auto_harness.modules.model_prepare import ModelPrepareModule
 from auto_harness.modules.resource_plan import ResourcePlanner
 from auto_harness.modules.reporter import ReportGenerator
@@ -472,6 +473,42 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(result.data["diagnosis"]["category"], "git_lfs_missing")
             self.assertTrue(result.data["git_lfs"]["prepare_commands"])
             self.assertIn("Git LFS model files detected", result.data["risk_reasons"])
+
+    def test_env_solve_adds_legacy_gradio_constraints(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "requirements.txt").write_text("gradio\nopencv-python\n", encoding="utf-8")
+            analysis = {
+                "frameworks": ["gradio"],
+                "install_plan": [
+                    ["python3", "-m", "venv", ".venv"],
+                    [".venv/bin/python", "-m", "pip", "install", "-r", "requirements.txt"],
+                ],
+            }
+            result = EnvSolveModule().solve(repo, analysis, {"python_range": ">=3.10,<3.12"})
+            self.assertEqual(result.status, "passed")
+            self.assertIn("numpy<2", result.data["constraints"])
+            self.assertIn("pydantic<2", result.data["constraints"])
+            self.assertIn("opencv-python-headless", result.data["constraints"])
+            self.assertEqual(result.data["python"], "3.10")
+            self.assertIn("numpy<2", result.data["install_plan"][1])
+            self.assertIn("env_solution", result.data["analysis"])
+
+    def test_env_solve_marks_cuda_torch_risk(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "requirements.txt").write_text("transformers\nflash-attn\n", encoding="utf-8")
+            result = EnvSolveModule().solve(
+                repo,
+                {
+                    "frameworks": ["torch", "transformers"],
+                    "install_plan": [["python3", "-m", "venv", ".venv"]],
+                },
+                {"gpu_required": True, "torch_variant": "cuda_or_cpu"},
+            )
+            self.assertIn("GPU/CUDA signals detected; torch wheel variant must match local CUDA runtime", result.data["risk_reasons"])
+            self.assertIn("torch framework detected but requirements do not pin torch", result.data["risk_reasons"])
+            self.assertIn("flash-attn may require CUDA toolkit and build isolation tuning", result.data["risk_reasons"])
 
     def test_model_prepare_writes_manifest_and_cache_paths(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -931,6 +968,9 @@ class CoreTests(unittest.TestCase):
             self.assertFalse(second["allowed"])
             self.assertIn("repair attempt limit reached", second["loop"]["reasons"])
             self.assertTrue((Path(tmp) / "repairs" / "repair_loop_state.json").exists())
+            env_plan = {"root_cause": "dependency solve", "rerun_from": "env_solve", "actions": []}
+            env_gate = RepairLoopController(max_attempts=1).gate(Path(tmp) / "fresh", "env_deploy", {"signature": "env"}, env_plan, policy)
+            self.assertEqual(env_gate["loop"]["rerun_from_effective"], "env_solve")
 
     def test_repair_overlay_merges_allowed_artifacts(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1184,6 +1224,7 @@ class CoreTests(unittest.TestCase):
         self.assertIn("artifact_download_validation", ids)
         self.assertIn("git_lfs_detection", ids)
         self.assertIn("git_lfs_prepare_execute", ids)
+        self.assertIn("env_solve_legacy_gradio_constraints", ids)
         self.assertIn("gradio_api_shape_variation", ids)
         self.assertIn("gradio_queue_call_followup", ids)
         self.assertIn("token_missing_diagnosis", ids)
@@ -1194,7 +1235,7 @@ class CoreTests(unittest.TestCase):
     def test_benchmark_runner_executes_all_fixture_cases(self):
         report = BenchmarkRunner().run(Path("tests/fixtures/benchmarks/manifest.json"))
         self.assertEqual(report["status"], "passed")
-        self.assertEqual(len(report["cases"]), 25)
+        self.assertEqual(len(report["cases"]), 26)
         self.assertTrue(all(case["status"] == "passed" for case in report["cases"]))
 
     def test_benchmark_cli_writes_output(self):
@@ -1300,8 +1341,10 @@ class CoreTests(unittest.TestCase):
             pipeline_path = root / "runs" / task_id / "reports" / "pipeline_results.json"
             data = json.loads(pipeline_path.read_text(encoding="utf-8"))
             self.assertIn("resource_plan", data)
+            self.assertIn("env_solve", data)
             self.assertIn("model_prepare", data)
             self.assertEqual(data["resource_plan"]["data"]["model_assets"][0]["repo_id"], "org/demo-model")
+            self.assertIn("numpy<2", data["env_solve"]["data"]["constraints"])
             self.assertTrue(Path(data["model_prepare"]["data"]["manifest_path"]).exists())
 
     def test_resume_uses_repair_rerun_from_effective_stage(self):
@@ -1354,6 +1397,7 @@ class CoreTests(unittest.TestCase):
             new_events = after[len(before):]
             self.assertNotIn(("analyze", "passed"), new_events)
             self.assertNotIn(("resource_plan", "passed"), new_events)
+            self.assertNotIn(("env_solve", "passed"), new_events)
             self.assertNotIn(("env_deploy", "passed"), new_events)
             self.assertNotIn(("model_prepare", "passed"), new_events)
             self.assertNotIn(("runner", "passed"), new_events)
@@ -1367,7 +1411,7 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(audit["rerun_stages"], ["verify", "report"])
             report = (run_dir / "reports" / "report.md").read_text(encoding="utf-8")
             self.assertIn("## Execution Audit", report)
-            self.assertIn("- Reused stages: `analyze`, `resource_plan`, `env_deploy`, `model_prepare`, `runner`", report)
+            self.assertIn("- Reused stages: `analyze`, `resource_plan`, `env_solve`, `env_deploy`, `model_prepare`, `runner`", report)
             self.assertIn("- Rerun stages: `verify`, `report`", report)
 
     def test_resume_falls_back_when_previous_stage_results_are_missing(self):

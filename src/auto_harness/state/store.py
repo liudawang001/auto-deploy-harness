@@ -30,6 +30,7 @@ class StateStore:
             stages={
                 "analyze": StageState(),
                 "resource_plan": StageState(),
+                "env_solve": StageState(),
                 "env_deploy": StageState(),
                 "model_prepare": StageState(),
                 "runner": StageState(),

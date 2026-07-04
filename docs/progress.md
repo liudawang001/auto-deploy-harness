@@ -41,6 +41,14 @@
   - `model_prepare.progress` 会在 Git LFS 执行期间刷新为 `git_lfs_running` / `git_lfs_ready`，命令结果写入 `model_prepare.git_lfs.commands`。
   - Benchmark cases 从 24 个扩展到 25 个，新增 `git_lfs_prepare_execute`。
   - 定向单测与 benchmark 已通过，覆盖允许执行和白名单拒绝两条路径。
+- 下一阶段优化任务：
+  - 新增正式 pipeline stage `env_solve`，位于 `resource_plan` 和 `env_deploy` 之间；`StateStore`、resume stage、report、benchmark 均已接入。
+  - 新增 `EnvSolveModule`，读取 analyzer install plan、requirements 和 resource plan，输出带约束的 install plan、constraints、constraint reasons 和 risk reasons。
+  - 第一版兼容规则覆盖老 Gradio / 未 pin Gradio 项目的 `numpy<2`、`pydantic<2`，headless 部署的 `opencv-python-headless`，以及 GPU/CUDA/Torch、`flash-attn`、`bitsandbytes` 风险提示。
+  - 新增 `skills/solve-python-cuda-env/SKILL.md`，让 agent 在环境求解阶段有明确中文控制文档。
+  - `env_deploy` 改为消费 `env_solve` 输出后的 `install_plan`；真正安装仍受 `--execute --allow-install` 和命令白名单控制。
+  - Benchmark cases 从 25 个扩展到 26 个，新增 `env_solve_legacy_gradio_constraints`。
+  - 定向单测与 benchmark 已通过，覆盖约束生成、CUDA/Torch 风险和 dry-run pipeline 中的 env_solve 结果。
 
 ### 五阶段总结与总进度
 
@@ -52,13 +60,13 @@
 4. Git LFS 检测：识别 LFS pointer 和 `.gitattributes`，缺 `git-lfs` 时进入诊断态，并给出准备命令。
 5. Playwright smoke 治理：补齐真实浏览器 backend 的本地 smoke 文档和手动 CI workflow。
 
-按 `docs/optimization-roadmap.md` 的“全自动开源模型部署 Agent”目标估算，当前总项目进度约为 **72%**。
+按 `docs/optimization-roadmap.md` 的“全自动开源模型部署 Agent”目标估算，当前总项目进度约为 **74%**。
 
 估算依据：
 
 - 已完成约 85% 的 P0/P1 核心控制链路：下载缓存、断点续传、verify 防误判、repair plan/policy/resume、benchmark 回归体系已经成型。
 - 已完成约 65% 的真实开源模型部署能力：Hugging Face / ModelScope 下载、Git LFS 检测、Gradio/Streamlit/browser verify 已具备第一版，但真实端到端部署矩阵仍需扩大。
-- 尚未完成的关键 28% 主要是：环境求解 `env_solve`、CUDA/PyTorch 兼容策略、Docker/sandbox 隔离、真实大模型长耗时 E2E 验证、memory promotion 到 skill 的人工审核流程。
+- 尚未完成的关键 26% 主要是：更完整的 CUDA/PyTorch wheel 求解、Docker/sandbox 隔离、真实大模型长耗时 E2E 验证、memory promotion 到 skill 的人工审核流程。
 - 继续执行 P0/P1 优化任务：
   - `ModelCache.reserve` 会为缓存目录写入 `.auto_harness_asset.json`，记录 source、repo id、revision、origin、asset id 和 cache key。
   - `ModelCache.entries()` 会读取缓存元数据，返回 repo id、revision、origin，便于后续审计和精细清理。
@@ -144,7 +152,7 @@
 
 ### 下一步
 
-1. 增加 `env_solve` 第一版：识别 Python、Torch、CUDA、numpy/pydantic/gradio 兼容风险，生成更稳定的安装方案。
+1. 扩展 `env_solve` 的 Torch/CUDA wheel 求解：识别本机 CUDA、Python 版本和 torch index URL，生成 CPU/CUDA fallback 方案。
 2. 扩展真实 E2E fixture：至少覆盖一个小型 Gradio 模型、一个 Streamlit demo、一个 Git LFS 权重仓库。
 3. 增加 memory promotion 工作流：把高频失败记忆提升为可审核的 skill 更新建议。
 4. 引入更强 sandbox / Docker backend，隔离真实依赖安装和服务启动。
