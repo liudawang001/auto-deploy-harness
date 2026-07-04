@@ -56,12 +56,13 @@ class RepairPlanner:
                 )
             ]
         if category == "auth_required":
+            env_vars = data.get("diagnosis", {}).get("required_env_vars") or ["HF_TOKEN", "MODELSCOPE_TOKEN"]
             return [
                 RepairAction(
                     type="set_env_var_name_only",
                     reason="model repository requires token",
                     requires={"operator_secret": True},
-                    payload={"env_vars": ["HF_TOKEN", "MODELSCOPE_TOKEN"]},
+                    payload={"env_vars": sorted(set(env_vars)), "values_recorded": False},
                 )
             ]
         if stage == "verify":

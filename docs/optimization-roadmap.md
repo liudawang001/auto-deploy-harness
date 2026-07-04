@@ -303,6 +303,7 @@ src/auto_harness/diagnostics/
 - 对常见错误优先使用规则分类，不把整段日志直接丢给 LLM。
 - LLM 只在规则无法分类或低置信度时介入。
 - 每次诊断都写入 evidence 和 memory。
+- token 权限问题只抽取所需环境变量名，并在 report 中提示 operator/secret manager 注入，不记录密钥值。已完成第一版，覆盖 `auth_required` 诊断、repair plan 和 report 输出。
 
 ### 3.6 repair_plan / repair_apply
 
@@ -822,7 +823,7 @@ src/auto_harness/
    - 下载并发、有限重试、重试 backoff 和缓存清理阈值已暴露到配置文件；`deploy` / `resume` 支持 CLI 临时覆盖，`cache` 子命令支持 dry-run / apply 清理。
 3. 将 state 扩展为可记录 download progress。已完成第一版，stage progress 写入 `state.json`。
 4. 增强 Gradio `/config` API discovery。已完成第一版，支持 dependency `api_name` / `fn_index`。
-5. 增加 log classifier 第一批规则。已完成第一版，覆盖常见依赖、CUDA、磁盘、权限和版本冲突错误。
+5. 增加 log classifier 第一批规则。已完成第一版，覆盖常见依赖、CUDA、磁盘、权限和版本冲突错误；token 权限错误会提取变量名并在 report 中生成无密钥值提示。
 6. 设计 repair plan schema，并在失败时生成建议但暂不自动 apply。已完成第一版；当前已增加 policy 校验、artifact 级受控 apply 和按 `rerun_from_effective` 的阶段级 resume，但仍不会直接执行 shell 或修改源码。
 
 第 2 周结束时应达到：

@@ -8,6 +8,7 @@ from auto_harness.assets.manifest import ModelAsset
 from auto_harness.config import HarnessConfig
 from auto_harness.diagnostics import LogClassifier
 from auto_harness.models.base import write_json
+from auto_harness.modules.reporter import ReportGenerator
 from auto_harness.modules.runner import RunnerModule
 from auto_harness.modules.verify import VerifyModule
 from auto_harness.models.task import RuntimePolicy
@@ -103,6 +104,8 @@ class BenchmarkRunner:
                 return self._case_token_missing_diagnosis(case)
             if case_id == "repair_resume_stage_jump":
                 return self._case_repair_resume_stage_jump(case)
+            if case_id == "token_report_required_env":
+                return self._case_token_report_required_env(case)
             return self._result(case, "skipped", "unknown benchmark case")
         except Exception as exc:  # noqa: BLE001 - benchmark report should continue
             return self._result(case, "failed", str(exc))
@@ -435,6 +438,34 @@ class BenchmarkRunner:
                 and all(after.get(stage, 0) == before.get(stage, 0) for stage in ("analyze", "resource_plan", "env_deploy", "model_prepare", "runner"))
             )
         return self._result(case, "passed" if ok else "failed", "repair resume stage jump verified")
+
+    def _case_token_report_required_env(self, case: Dict) -> Dict:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            repair_dir = run_dir / "repairs"
+            repair_dir.mkdir(parents=True)
+            write_json(repair_dir / "repair_plan.json", {
+                "actions": [
+                    {
+                        "type": "set_env_var_name_only",
+                        "payload": {"env_vars": ["HF_TOKEN"], "token_value": "should_not_be_recorded"},
+                    }
+                ]
+            })
+            result = ReportGenerator().generate(
+                run_dir,
+                {"project": {"name": "demo", "repo_url": "local"}},
+                {
+                    "model_prepare": {
+                        "status": "failed",
+                        "summary": "auth required",
+                        "data": {"diagnosis": {"category": "auth_required", "required_env_vars": ["HF_TOKEN"]}},
+                    }
+                },
+            )
+            report = Path(result.data["report_path"]).read_text(encoding="utf-8")
+            ok = "`HF_TOKEN`" in report and "should_not_be_recorded" not in report and "Values are not recorded" in report
+        return self._result(case, "passed" if ok else "failed", "token env var report hint verified")
 
     def _stage_update_count(self, run_dir: Path) -> Dict[str, int]:
         counts: Dict[str, int] = {}

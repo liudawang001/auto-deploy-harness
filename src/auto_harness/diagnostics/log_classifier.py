@@ -3,6 +3,8 @@ from typing import Dict, List
 
 
 class LogClassifier:
+    TOKEN_ENV_PATTERN = re.compile(r"\b[A-Z][A-Z0-9_]*(?:TOKEN|API_KEY|API_SECRET|ACCESS_KEY|SECRET_KEY)\b")
+
     RULES = [
         ("dependency_missing", re.compile(r"ModuleNotFoundError: No module named ['\"]([^'\"]+)['\"]"), "install missing Python package"),
         ("import_error", re.compile(r"ImportError: (.+)"), "inspect incompatible or missing dependency"),
@@ -27,21 +29,29 @@ class LogClassifier:
             signal = match.group(0)
             if match.groups():
                 signal = match.group(1)
-            matches.append({
+            item = {
                 "category": category,
                 "signal": signal[-500:],
                 "suggested_fix": suggestion,
                 "confidence": 0.9,
-            })
+            }
+            if category == "auth_required":
+                item["required_env_vars"] = self._required_env_vars(text)
+                item["values_recorded"] = False
+            matches.append(item)
         if matches:
             top = matches[0]
-            return {
+            result = {
                 "category": top["category"],
                 "signal": top["signal"],
                 "suggested_fix": top["suggested_fix"],
                 "confidence": top["confidence"],
                 "matches": matches,
             }
+            if top["category"] == "auth_required":
+                result["required_env_vars"] = top.get("required_env_vars") or self._required_env_vars(text)
+                result["values_recorded"] = False
+            return result
         return {
             "category": "unknown",
             "signal": (text or "")[-500:],
@@ -49,3 +59,12 @@ class LogClassifier:
             "confidence": 0.2,
             "matches": [],
         }
+
+    def _required_env_vars(self, text: str) -> List[str]:
+        names = set(self.TOKEN_ENV_PATTERN.findall(text or ""))
+        lower = (text or "").lower()
+        if "huggingface" in lower or "hugging face" in lower or "hf_" in lower or "repository not found" in lower:
+            names.add("HF_TOKEN")
+        if "modelscope" in lower:
+            names.add("MODELSCOPE_TOKEN")
+        return sorted(names)

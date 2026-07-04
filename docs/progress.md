@@ -5,6 +5,13 @@
 ### 已完成
 
 - 继续执行 P0/P1 优化任务：
+  - `LogClassifier` 在 `auth_required` 诊断中提取 `HF_TOKEN`、`MODELSCOPE_TOKEN` 等所需环境变量名，并显式标记 `values_recorded=false`。
+  - `RepairPlanner` 的 `set_env_var_name_only` action 会优先使用诊断提取到的变量名，不写入任何密钥值。
+  - `ReportGenerator` 会汇总 repair artifact、repair plan、阶段 diagnosis 和 `resource_plan.external_tokens` 中的变量名，生成 `Required Environment Variables` 小节。
+  - Report 只展示变量名和“由 operator/secret manager 提供”的提示，测试覆盖不会把伪造 token value 写入报告。
+  - Benchmark cases 从 18 个扩展到 19 个，新增 `token_report_required_env`。
+  - 单测扩展到 53 个，覆盖 token 变量名提取、repair plan 变量名传递和 report 无密钥值输出。
+- 继续执行 P0/P1 优化任务：
   - `TaskRunner.run_existing` 支持 `start_stage`，可以复用目标阶段之前的历史 `pipeline_results.json` / `*_result.json`，只重跑目标阶段及其后续阶段。
   - `resume` 会读取已允许的 `repair_apply_result.json` / `repair_plan.json`，按 `rerun_from_effective` 从 `analyze`、`resource_plan`、`env_deploy`、`model_prepare`、`runner` 或 `verify` 中的安全阶段继续。
   - 如果前置 stage result 缺失或结构不完整，会写入 `resume_stage_fallback` 事件，并安全回退到 `analyze` 全量重跑，避免复用坏状态。
@@ -75,9 +82,9 @@
 ### 下一步
 
 1. 增加真实 Playwright smoke test 文档和可选 CI job，在安装 Playwright 的环境中验证浏览器 backend。
-2. 增加 token 缺失时的可操作提示，把所需变量名写入 report，但不记录密钥值。
-3. 为缓存清理增加更细粒度策略，例如按模型源、repo id 或 keep-list 排除关键模型。
-4. 增加 repair resume 的执行审计摘要，在 report 中展示本次 resume 复用了哪些 stage、重跑了哪些 stage。
+2. 为缓存清理增加更细粒度策略，例如按模型源、repo id 或 keep-list 排除关键模型。
+3. 增加 repair resume 的执行审计摘要，在 report 中展示本次 resume 复用了哪些 stage、重跑了哪些 stage。
+4. 扩展 Gradio verify 对 queue `/call/<api_name>` 的支持，并增加文件产物下载验证。
 
 ## 2026-07-03
 

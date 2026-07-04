@@ -22,6 +22,7 @@ from auto_harness.modules.analyzer import ProjectAnalyzer
 from auto_harness.modules.env_deploy import EnvDeployModule
 from auto_harness.modules.model_prepare import ModelPrepareModule
 from auto_harness.modules.resource_plan import ResourcePlanner
+from auto_harness.modules.reporter import ReportGenerator
 from auto_harness.modules.runner import RunnerModule
 from auto_harness.modules.verify import VerifyModule
 from auto_harness.models.result import StageResult
@@ -610,9 +611,76 @@ class CoreTests(unittest.TestCase):
         self.assertGreater(result["confidence"], 0.8)
 
     def test_log_classifier_detects_missing_token(self):
-        result = LogClassifier().classify("401 Unauthorized: Repository Not Found. Please set HF_TOKEN.")
+        result = LogClassifier().classify("401 Unauthorized: Repository Not Found. Please set HF_TOKEN=should_not_be_recorded.")
         self.assertEqual(result["category"], "auth_required")
         self.assertGreaterEqual(result["confidence"], 0.9)
+        self.assertEqual(result["required_env_vars"], ["HF_TOKEN"])
+        self.assertFalse(result["values_recorded"])
+        self.assertNotIn("should_not_be_recorded", json.dumps(result))
+
+    def test_repair_planner_uses_diagnosed_required_env_vars(self):
+        plan = RepairPlanner().propose(
+            "model_prepare",
+            StageResult(
+                "model_prepare",
+                "failed",
+                "model download failed",
+                {
+                    "diagnosis": {
+                        "category": "auth_required",
+                        "required_env_vars": ["HF_TOKEN"],
+                        "confidence": 0.9,
+                    }
+                },
+            ),
+            {},
+        )
+        self.assertEqual(plan["actions"][0]["type"], "set_env_var_name_only")
+        self.assertEqual(plan["actions"][0]["payload"]["env_vars"], ["HF_TOKEN"])
+        self.assertFalse(plan["actions"][0]["payload"]["values_recorded"])
+
+    def test_report_lists_required_env_var_names_without_values(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            repair_dir = run_dir / "repairs"
+            repair_dir.mkdir(parents=True)
+            (repair_dir / "repair_plan.json").write_text(json.dumps({
+                "actions": [
+                    {
+                        "type": "set_env_var_name_only",
+                        "payload": {
+                            "env_vars": ["HF_TOKEN"],
+                            "token_value": "should_not_be_recorded",
+                        },
+                    }
+                ]
+            }), encoding="utf-8")
+            result = ReportGenerator().generate(
+                run_dir,
+                {"project": {"name": "demo", "repo_url": "local"}},
+                {
+                    "model_prepare": {
+                        "status": "failed",
+                        "summary": "download failed",
+                        "data": {
+                            "diagnosis": {
+                                "category": "auth_required",
+                                "required_env_vars": ["HF_TOKEN"],
+                            }
+                        },
+                    },
+                    "resource_plan": {
+                        "status": "passed",
+                        "summary": "resource plan generated",
+                        "data": {"external_tokens": ["HF_TOKEN"]},
+                    },
+                },
+            )
+            report = Path(result.data["report_path"]).read_text(encoding="utf-8")
+            self.assertIn("Required Environment Variables", report)
+            self.assertIn("`HF_TOKEN`", report)
+            self.assertIn("Values are not recorded", report)
+            self.assertNotIn("should_not_be_recorded", report)
 
     def test_repair_planner_proposes_dependency_action(self):
         plan = RepairPlanner().propose(
@@ -883,11 +951,12 @@ class CoreTests(unittest.TestCase):
         self.assertIn("gradio_api_shape_variation", ids)
         self.assertIn("token_missing_diagnosis", ids)
         self.assertIn("repair_resume_stage_jump", ids)
+        self.assertIn("token_report_required_env", ids)
 
     def test_benchmark_runner_executes_all_fixture_cases(self):
         report = BenchmarkRunner().run(Path("tests/fixtures/benchmarks/manifest.json"))
         self.assertEqual(report["status"], "passed")
-        self.assertEqual(len(report["cases"]), 18)
+        self.assertEqual(len(report["cases"]), 19)
         self.assertTrue(all(case["status"] == "passed" for case in report["cases"]))
 
     def test_benchmark_cli_writes_output(self):
