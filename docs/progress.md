@@ -22,6 +22,13 @@
   - 空文件、不可读文件或非文件变化会记录为 invalid artifact，并阻止 verify 误判成功。
   - Benchmark cases 从 22 个扩展到 23 个，新增 `artifact_download_validation`。
   - 定向单测与 benchmark 已通过，覆盖非空产物通过和空产物拒绝。
+- 五阶段优化任务 - 阶段 4：
+  - 新增 `GitLFSDetector`，可解析 `.gitattributes` 中的 `filter=lfs` pattern，并识别仓库内 Git LFS pointer 文件的 oid 与 size。
+  - `ResourcePlanner` 接入 Git LFS 检测，`resource_plan.git_lfs` 会记录 required、available、patterns、pointers、total pointer size 和 `git lfs install/pull` 准备命令。
+  - 检测到 LFS 但本机缺少 `git-lfs` 时，`resource_plan` 返回 `uncertain`，并附带 `git_lfs_missing` diagnosis，避免继续假装权重已存在。
+  - Git LFS pointer size 会纳入磁盘估算，风险原因中会标记 `Git LFS model files detected`。
+  - Benchmark cases 从 23 个扩展到 24 个，新增 `git_lfs_detection`。
+  - 定向单测与 benchmark 已通过，覆盖 LFS pointer 解析和缺工具诊断。
 - 继续执行 P0/P1 优化任务：
   - `ModelCache.reserve` 会为缓存目录写入 `.auto_harness_asset.json`，记录 source、repo id、revision、origin、asset id 和 cache key。
   - `ModelCache.entries()` 会读取缓存元数据，返回 repo id、revision、origin，便于后续审计和精细清理。
@@ -108,7 +115,7 @@
 ### 下一步
 
 1. 增加真实 Playwright smoke test 文档和可选 CI job，在安装 Playwright 的环境中验证浏览器 backend。
-2. 增加 Git LFS 检测和下载准备，覆盖权重在 Git 仓库/LFS 中的项目。
+2. 增加真实 Playwright smoke test 文档和可选 CI job，在安装 Playwright 的环境中验证浏览器 backend。
 
 ## 2026-07-03
 

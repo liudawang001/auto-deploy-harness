@@ -1,19 +1,21 @@
 from pathlib import Path
 from typing import Dict, List
 
-from auto_harness.assets import ModelAssetDetector
+from auto_harness.assets import GitLFSDetector, ModelAssetDetector
 from auto_harness.models.result import StageResult
 
 
 class ResourcePlanner:
-    def __init__(self, detector: ModelAssetDetector = None) -> None:
+    def __init__(self, detector: ModelAssetDetector = None, git_lfs_detector: GitLFSDetector = None) -> None:
         self.detector = detector or ModelAssetDetector()
+        self.git_lfs_detector = git_lfs_detector or GitLFSDetector()
 
     def plan(self, repo_dir: Path, analysis: Dict) -> StageResult:
         assets = self.detector.detect(repo_dir, analysis)
+        git_lfs = self.git_lfs_detector.detect(repo_dir)
         frameworks = set(analysis.get("frameworks") or [])
         gpu_required = self._gpu_required(repo_dir, frameworks)
-        estimated_disk = self._estimate_disk(assets, frameworks)
+        estimated_disk = self._estimate_disk(assets, frameworks, git_lfs)
         data = {
             "python_range": self._python_range(repo_dir),
             "gpu_required": gpu_required,
@@ -22,14 +24,18 @@ class ResourcePlanner:
             "estimated_vram_gb": 16 if gpu_required else 0,
             "estimated_disk_gb": estimated_disk,
             "external_tokens": self._external_tokens(repo_dir, assets),
-            "risk_level": self._risk_level(gpu_required, estimated_disk, assets),
-            "risk_reasons": self._risk_reasons(gpu_required, assets),
+            "risk_level": self._risk_level(gpu_required, estimated_disk, assets, git_lfs),
+            "risk_reasons": self._risk_reasons(gpu_required, assets, git_lfs),
             "model_assets": [asset.__dict__ for asset in assets],
+            "git_lfs": git_lfs,
         }
+        status = "uncertain" if git_lfs.get("diagnosis") else "passed"
+        if git_lfs.get("diagnosis"):
+            data["diagnosis"] = git_lfs["diagnosis"]
         return StageResult(
             "resource_plan",
-            "passed",
-            "resource plan generated",
+            status,
+            "git lfs required but unavailable" if status == "uncertain" else "resource plan generated",
             data,
             evidence=[],
         )
@@ -50,8 +56,11 @@ class ResourcePlanner:
             return any(token in text for token in gpu_tokens)
         return False
 
-    def _estimate_disk(self, assets: List, frameworks: set) -> int:
+    def _estimate_disk(self, assets: List, frameworks: set, git_lfs: Dict = None) -> int:
         hinted = [asset.expected_size_bytes for asset in assets if asset.expected_size_bytes]
+        lfs_total = (git_lfs or {}).get("total_pointer_size_bytes") or 0
+        if lfs_total:
+            hinted.append(lfs_total)
         if hinted:
             return max(1, int(sum(hinted) / (1024 ** 3)) + 5)
         if assets:
@@ -69,19 +78,23 @@ class ResourcePlanner:
             tokens.append("MODELSCOPE_TOKEN")
         return sorted(set(tokens))
 
-    def _risk_level(self, gpu_required: bool, estimated_disk: int, assets: List) -> str:
-        if gpu_required or estimated_disk >= 20 or assets:
+    def _risk_level(self, gpu_required: bool, estimated_disk: int, assets: List, git_lfs: Dict = None) -> str:
+        if gpu_required or estimated_disk >= 20 or assets or (git_lfs or {}).get("required"):
             return "high"
         if estimated_disk >= 8:
             return "medium"
         return "low"
 
-    def _risk_reasons(self, gpu_required: bool, assets: List) -> List[str]:
+    def _risk_reasons(self, gpu_required: bool, assets: List, git_lfs: Dict = None) -> List[str]:
         reasons = []
         if gpu_required:
             reasons.append("GPU/CUDA signals detected")
         if assets:
             reasons.append("external model assets detected")
+        if (git_lfs or {}).get("required"):
+            reasons.append("Git LFS model files detected")
+        if (git_lfs or {}).get("diagnosis"):
+            reasons.append("git-lfs is not available")
         return reasons
 
     def _read_key_text(self, repo_dir: Path) -> str:

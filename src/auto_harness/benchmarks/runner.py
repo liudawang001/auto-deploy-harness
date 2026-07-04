@@ -3,12 +3,13 @@ import tempfile
 from pathlib import Path
 from typing import Dict, List
 
-from auto_harness.assets import HuggingFaceDownloader, ModelCache
+from auto_harness.assets import GitLFSDetector, HuggingFaceDownloader, ModelCache
 from auto_harness.assets.manifest import ModelAsset
 from auto_harness.config import HarnessConfig
 from auto_harness.diagnostics import LogClassifier
 from auto_harness.models.base import read_json, write_json
 from auto_harness.modules.reporter import ReportGenerator
+from auto_harness.modules.resource_plan import ResourcePlanner
 from auto_harness.modules.runner import RunnerModule
 from auto_harness.modules.verify import VerifyModule
 from auto_harness.models.task import RuntimePolicy
@@ -102,6 +103,8 @@ class BenchmarkRunner:
                 return self._case_stale_artifact_ignored(case)
             if case_id == "artifact_download_validation":
                 return self._case_artifact_download_validation(case)
+            if case_id == "git_lfs_detection":
+                return self._case_git_lfs_detection(case)
             if case_id == "gradio_api_shape_variation":
                 return self._case_gradio_api_shape_variation(case)
             if case_id == "gradio_queue_call_followup":
@@ -429,6 +432,27 @@ class BenchmarkRunner:
             and len(evidence.get("validated", [{}])[0].get("sha256", "")) == 64
         )
         return self._result(case, "passed" if ok else "failed", "artifact download validation verified")
+
+    def _case_git_lfs_detection(self, case: Dict) -> Dict:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / ".gitattributes").write_text("*.safetensors filter=lfs diff=lfs merge=lfs -text\n", encoding="utf-8")
+            (repo / "model.safetensors").write_text(
+                "version https://git-lfs.github.com/spec/v1\n"
+                "oid sha256:%s\n"
+                "size 2147483648\n" % ("b" * 64),
+                encoding="utf-8",
+            )
+            result = ResourcePlanner(git_lfs_detector=GitLFSDetector(available=False)).plan(repo, {"frameworks": []})
+        lfs = result.data.get("git_lfs", {})
+        ok = (
+            result.status == "uncertain"
+            and result.data.get("diagnosis", {}).get("category") == "git_lfs_missing"
+            and lfs.get("pointer_count") == 1
+            and lfs.get("total_pointer_size_bytes") == 2147483648
+            and lfs.get("prepare_commands") == [["git", "lfs", "install"], ["git", "lfs", "pull"]]
+        )
+        return self._result(case, "passed" if ok else "failed", "Git LFS detection verified")
 
     def _case_gradio_api_shape_variation(self, case: Dict) -> Dict:
         captured = {}

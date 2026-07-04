@@ -86,6 +86,11 @@
       "expected_signal": "artifact_download_validation passes with size and sha256 evidence"
     },
     {
+      "id": "git_lfs_detection",
+      "purpose": "验证 Git LFS pointer 和 .gitattributes 会被资源规划识别，缺 git-lfs 时进入诊断态",
+      "expected_signal": "resource_plan is uncertain with git_lfs_missing diagnosis and lfs pull preparation"
+    },
+    {
       "id": "gradio_api_shape_variation",
       "purpose": "验证 Gradio /config 中 api_name 带斜杠且前置 dependency 不可用时仍能选中正确 API",
       "expected_signal": "request is sent to /api/predict with selected fn_index"

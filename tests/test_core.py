@@ -17,7 +17,7 @@ from auto_harness.diagnostics import LogClassifier
 from auto_harness.models.task import ProjectSpec, RuntimePolicy, TaskSpec
 from auto_harness.agents.base import AgentResult
 from auto_harness.memory import MemoryStore
-from auto_harness.assets import ModelCache, ModelAssetDetector, ModelFileSelector
+from auto_harness.assets import GitLFSDetector, ModelCache, ModelAssetDetector, ModelFileSelector
 from auto_harness.modules.analyzer import ProjectAnalyzer
 from auto_harness.modules.env_deploy import EnvDeployModule
 from auto_harness.modules.model_prepare import ModelPrepareModule
@@ -443,6 +443,34 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(result.data["risk_level"], "high")
             self.assertEqual(result.data["model_assets"][0]["repo_id"], "org/demo-model")
             self.assertIn("HF_TOKEN", result.data["external_tokens"])
+
+    def test_git_lfs_detector_reads_attributes_and_pointers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / ".gitattributes").write_text("*.safetensors filter=lfs diff=lfs merge=lfs -text\n", encoding="utf-8")
+            (repo / "model.safetensors").write_text(
+                "version https://git-lfs.github.com/spec/v1\n"
+                "oid sha256:%s\n"
+                "size 123456\n" % ("a" * 64),
+                encoding="utf-8",
+            )
+            result = GitLFSDetector(available=False).detect(repo)
+            self.assertTrue(result["required"])
+            self.assertFalse(result["available"])
+            self.assertEqual(result["patterns"], ["*.safetensors"])
+            self.assertEqual(result["pointers"][0]["path"], "model.safetensors")
+            self.assertEqual(result["pointers"][0]["size_bytes"], 123456)
+            self.assertEqual(result["diagnosis"]["category"], "git_lfs_missing")
+
+    def test_resource_planner_marks_missing_git_lfs_uncertain(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / ".gitattributes").write_text("*.bin filter=lfs diff=lfs merge=lfs -text\n", encoding="utf-8")
+            result = ResourcePlanner(git_lfs_detector=GitLFSDetector(available=False)).plan(repo, {"frameworks": []})
+            self.assertEqual(result.status, "uncertain")
+            self.assertEqual(result.data["diagnosis"]["category"], "git_lfs_missing")
+            self.assertTrue(result.data["git_lfs"]["prepare_commands"])
+            self.assertIn("Git LFS model files detected", result.data["risk_reasons"])
 
     def test_model_prepare_writes_manifest_and_cache_paths(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1093,6 +1121,7 @@ class CoreTests(unittest.TestCase):
         self.assertIn("service_exits_after_start", ids)
         self.assertIn("stale_artifact_ignored", ids)
         self.assertIn("artifact_download_validation", ids)
+        self.assertIn("git_lfs_detection", ids)
         self.assertIn("gradio_api_shape_variation", ids)
         self.assertIn("gradio_queue_call_followup", ids)
         self.assertIn("token_missing_diagnosis", ids)
@@ -1103,7 +1132,7 @@ class CoreTests(unittest.TestCase):
     def test_benchmark_runner_executes_all_fixture_cases(self):
         report = BenchmarkRunner().run(Path("tests/fixtures/benchmarks/manifest.json"))
         self.assertEqual(report["status"], "passed")
-        self.assertEqual(len(report["cases"]), 23)
+        self.assertEqual(len(report["cases"]), 24)
         self.assertTrue(all(case["status"] == "passed" for case in report["cases"]))
 
     def test_benchmark_cli_writes_output(self):

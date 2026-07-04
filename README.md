@@ -24,6 +24,7 @@ AI-Auto-Harness 是一个面向 AI 开源 demo 项目的自动部署与验证 Ag
 - 仓库内置 skill：位于 `skills/*/SKILL.md`，按阶段选择并记录 hash。
 - 结构化问题记忆：位于 `memory/deployment_issues.jsonl`，用于检索历史相似失败。
 - `resource_plan` 阶段：识别模型资产、GPU/CUDA 信号、磁盘风险和外部 token 需求。
+- Git LFS 检测：识别 `.gitattributes` 和 LFS pointer 文件，估算 pointer size，缺少 `git-lfs` 时给出 `git_lfs_missing` 诊断和 `git lfs install/pull` 准备命令。
 - `model_prepare` 阶段：生成模型资产 manifest、缓存 key 和 `model_cache` 路径；执行模式下支持 Hugging Face / ModelScope 文件清单解析、断点续传、并发下载、sha256/etag 校验元数据和缓存写入。
 - `verify` 增强：支持 Gradio `/config` discovery、Gradio queue `/call/<api_name>` follow-up、Streamlit DOM/HTML 证据探测，以及可选 Playwright 浏览器 DOM probe。
 - 日志规则分类器：对缺依赖、CUDA OOM、磁盘不足、token 权限、wheel 构建失败等常见错误生成结构化诊断；token 权限问题只提取所需环境变量名，不记录密钥值。
@@ -175,6 +176,13 @@ PYTHONPATH=src python3 -m auto_harness.cli cache --cleanup --source huggingface 
 
 阶段进度会写入 `state.json` 的 `model_prepare.progress`，包括当前文件、已下载字节、总字节和状态。
 
+如果项目使用 Git LFS 保存权重，`resource_plan.git_lfs` 会记录：
+
+- `.gitattributes` 中的 LFS patterns。
+- 当前仓库内尚未拉取的 LFS pointer 文件、oid 和 size。
+- `prepare_commands`: `git lfs install` 与 `git lfs pull`。
+- 缺少 `git-lfs` 时的 `git_lfs_missing` diagnosis。
+
 ## Browser Verify
 
 `VerifyModule` 会对 Gradio、Streamlit 或 `verify_hint.service_type=webui` 的服务增加 `browser_dom_probe`。该 probe 会给页面 URL 注入当前 trace id，并检查浏览器渲染后的 DOM：
@@ -227,6 +235,7 @@ PYTHONPATH=src python3 -m auto_harness.cli benchmark --manifest tests/fixtures/b
 - HTTP 200 但无当前 trace 不能判定成功。
 - 历史 artifact 不能作为本次 verify 的新鲜证据。
 - 本次 trace 后产生的新文件产物必须可读、非空并记录 sha256 后，才能作为 artifact 强证据。
+- Git LFS pointer 和 `.gitattributes` 会被识别；缺 `git-lfs` 时 resource plan 进入诊断态，并输出 LFS 准备命令。
 - 服务进程启动后快速退出不能判定为启动成功。
 - token 缺失或 401 日志会被诊断为 `auth_required`。
 - token 缺失时 report 只展示 `HF_TOKEN` / `MODELSCOPE_TOKEN` 等变量名，不记录密钥值。
