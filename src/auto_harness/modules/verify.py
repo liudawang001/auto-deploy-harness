@@ -105,6 +105,7 @@ class VerifyModule:
             "discovery": request_plan.get("discovery"),
         }
         response_record = {}
+        follow_up_record = None
         status = "uncertain"
         reason = "HTTP response did not contain trace id"
         try:
@@ -120,12 +121,24 @@ class VerifyModule:
                 if trace_id in body:
                     status = "pass"
                     reason = "HTTP response contains trace id"
+                elif request_plan.get("follow_up_url_template"):
+                    follow_up_record = self._execute_follow_up_trace(
+                        request_plan["follow_up_url_template"],
+                        body,
+                        trace_id,
+                    )
+                    if follow_up_record.get("trace_found"):
+                        status = "pass"
+                        reason = "HTTP follow-up response contains trace id"
+                    elif follow_up_record.get("error"):
+                        reason = "HTTP follow-up request failed"
         except Exception as exc:  # noqa: BLE001 - stored as evidence, not re-raised
             response_record = {"error": str(exc)}
             reason = "HTTP trace request failed"
         evidence = {
             "request": request_record,
             "response": response_record,
+            "follow_up_response": follow_up_record,
             "check": {
                 "name": "http_trace_response",
                 "status": status,
@@ -177,6 +190,7 @@ class VerifyModule:
             request_hint = discovered["request"]
             endpoint = discovered["endpoint"]
 
+        base_endpoint = endpoint
         method = str(request_hint.get("method") or "GET").upper()
         path = request_hint.get("path")
         if path:
@@ -196,6 +210,12 @@ class VerifyModule:
             headers["Content-Type"] = "application/json"
         else:
             return None
+        follow_up_url_template = None
+        follow_up_hint = request_hint.get("follow_up") if isinstance(request_hint, dict) else None
+        if isinstance(follow_up_hint, dict) and follow_up_hint.get("method", "GET").upper() == "GET":
+            follow_up_path = follow_up_hint.get("path")
+            if follow_up_path:
+                follow_up_url_template = urllib.parse.urljoin(base_endpoint.rstrip("/") + "/", follow_up_path.lstrip("/"))
         return {
             "method": method,
             "url": endpoint,
@@ -203,6 +223,7 @@ class VerifyModule:
             "body_json": body_json,
             "headers": headers,
             "discovery": discovered,
+            "follow_up_url_template": follow_up_url_template,
         }
 
     def _discover_gradio_request(self, endpoint: str, analysis: Dict) -> Optional[Dict]:
@@ -229,16 +250,28 @@ class VerifyModule:
         body = {"data": ["{{trace_id}}"]}
         if fn_index is not None:
             body["fn_index"] = fn_index
+        follow_up = None
+        if self._gradio_queue_enabled(config, dependency) and isinstance(api_name, str) and api_name.strip("/"):
+            normalized_api = api_name.strip("/")
+            path = "/call/%s" % normalized_api
+            body = {"data": ["{{trace_id}}"]}
+            follow_up = {
+                "method": "GET",
+                "path": "/call/%s/{{event_id}}" % normalized_api,
+            }
+            fn_index = dependency.get("id")
         return {
             "type": "gradio_config",
             "config_url": config_url,
             "endpoint": endpoint,
             "dependency_id": fn_index,
             "api_name": api_name,
+            "queue_enabled": bool(follow_up),
             "request": {
                 "method": "POST",
                 "path": path,
                 "json": body,
+                "follow_up": follow_up,
             },
         }
 
@@ -254,6 +287,64 @@ class VerifyModule:
             if dependency.get("api_name") is False:
                 continue
             return dependency
+        return None
+
+    def _gradio_queue_enabled(self, config: Dict, dependency: Dict) -> bool:
+        if dependency.get("queue") is True:
+            return True
+        if config.get("enable_queue") is True:
+            return True
+        if config.get("queue") is True:
+            return True
+        return False
+
+    def _execute_follow_up_trace(self, url_template: str, initial_body: str, trace_id: str) -> Dict:
+        event_id = self._extract_event_id(initial_body)
+        if not event_id:
+            return {
+                "status": "skipped",
+                "reason": "Gradio queue event_id was not present in initial response",
+                "trace_found": False,
+            }
+        follow_up_url = url_template.replace("{{event_id}}", urllib.parse.quote(event_id, safe=""))
+        try:
+            req = urllib.request.Request(follow_up_url, method="GET")
+            with self.urlopen(req, timeout=10) as resp:
+                body = resp.read().decode("utf-8", errors="replace")
+            return {
+                "status": "completed",
+                "url": follow_up_url,
+                "event_id": event_id,
+                "status_code": getattr(resp, "status", None) or getattr(resp, "code", None),
+                "body_tail": body[-4000:],
+                "trace_found": trace_id in body,
+            }
+        except Exception as exc:  # noqa: BLE001 - stored as evidence, not re-raised
+            return {
+                "status": "failed",
+                "url": follow_up_url,
+                "event_id": event_id,
+                "error": str(exc),
+                "trace_found": False,
+            }
+
+    def _extract_event_id(self, body: str) -> Optional[str]:
+        try:
+            parsed = json.loads(body)
+        except ValueError:
+            parsed = None
+        if isinstance(parsed, dict) and isinstance(parsed.get("event_id"), str):
+            return parsed["event_id"]
+        for line in body.splitlines():
+            line = line.strip()
+            if not line.startswith("data:"):
+                continue
+            try:
+                parsed = json.loads(line[5:].strip())
+            except ValueError:
+                continue
+            if isinstance(parsed, dict) and isinstance(parsed.get("event_id"), str):
+                return parsed["event_id"]
         return None
 
     def _append_trace_query(self, endpoint: str, trace_id: str) -> str:

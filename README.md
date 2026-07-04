@@ -25,7 +25,7 @@ AI-Auto-Harness 是一个面向 AI 开源 demo 项目的自动部署与验证 Ag
 - 结构化问题记忆：位于 `memory/deployment_issues.jsonl`，用于检索历史相似失败。
 - `resource_plan` 阶段：识别模型资产、GPU/CUDA 信号、磁盘风险和外部 token 需求。
 - `model_prepare` 阶段：生成模型资产 manifest、缓存 key 和 `model_cache` 路径；执行模式下支持 Hugging Face / ModelScope 文件清单解析、断点续传、并发下载、sha256/etag 校验元数据和缓存写入。
-- `verify` 增强：支持 Gradio `/config` discovery、Streamlit DOM/HTML 证据探测，以及可选 Playwright 浏览器 DOM probe。
+- `verify` 增强：支持 Gradio `/config` discovery、Gradio queue `/call/<api_name>` follow-up、Streamlit DOM/HTML 证据探测，以及可选 Playwright 浏览器 DOM probe。
 - 日志规则分类器：对缺依赖、CUDA OOM、磁盘不足、token 权限、wheel 构建失败等常见错误生成结构化诊断；token 权限问题只提取所需环境变量名，不记录密钥值。
 - Report 会汇总 `resource_plan`、diagnosis 和 repair plan 中的 token 变量名，提示 operator/secret manager 注入，报告中不保存任何 token value。
 - Repair loop：失败或 uncertain 阶段会生成结构化修复建议，经过 policy 和 loop gate 校验后写入受控 repair artifacts；同一问题有最大尝试次数，不安全的 `rerun_from` 会回退到安全阶段，`resume` 会按 `rerun_from_effective` 从安全阶段重跑，需要人工确认的 action 可通过 `repair-approve` 批准。
@@ -221,6 +221,7 @@ PYTHONPATH=src python3 -m auto_harness.cli benchmark --manifest tests/fixtures/b
 - 模型缓存可以按 source / repo id 限定清理范围，并用 keep-list 保护关键模型。
 - Gradio `/config` discovery 构造 `/api/predict` trace 请求。
 - Gradio `/config` shape 变化时仍能选中正确 backend API。
+- Gradio queue 模式会先 POST `/call/<api_name>` 获取 `event_id`，再 GET `/call/<api_name>/<event_id>`，只有 follow-up 结果包含当前 trace 才通过。
 - 浏览器 DOM 中出现当前 trace 时可以作为强证据。
 - Streamlit HTTP 200 错误页面不能通过 verify。
 - HTTP 200 但无当前 trace 不能判定成功。

@@ -86,6 +86,11 @@
       "expected_signal": "request is sent to /api/predict with selected fn_index"
     },
     {
+      "id": "gradio_queue_call_followup",
+      "purpose": "验证 Gradio queue 模式下可以通过 /call/<api_name> 和 event_id follow-up 获取 trace",
+      "expected_signal": "POST /call/predict returns event_id and GET follow-up contains trace"
+    },
+    {
       "id": "token_missing_diagnosis",
       "purpose": "验证 token 缺失或 401 日志会被诊断为 auth_required",
       "expected_signal": "log classifier category is auth_required"

@@ -305,6 +305,41 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(captured["url"], "http://127.0.0.1:7860/api/predict")
             self.assertEqual(json.loads(captured["body"])["fn_index"], 7)
 
+    def test_verify_supports_gradio_queue_call_followup(self):
+        captured = {"urls": []}
+
+        def fake_urlopen(req, timeout):
+            captured["urls"].append(req.full_url)
+            if req.full_url.endswith("/config"):
+                return FakeHttpResponse(json.dumps({
+                    "enable_queue": True,
+                    "dependencies": [
+                        {"id": 7, "api_name": "/predict", "backend_fn": True, "queue": True},
+                    ],
+                }))
+            if req.full_url.endswith("/call/predict"):
+                captured["body"] = req.data.decode("utf-8")
+                return FakeHttpResponse(json.dumps({"event_id": "evt-123"}))
+            if req.full_url.endswith("/call/predict/evt-123"):
+                trace = json.loads(captured["body"])["data"][0]
+                return FakeHttpResponse("event: complete\ndata: {\"data\": [\"%s\"]}\n\n" % trace)
+            raise AssertionError("unexpected url %s" % req.full_url)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / "workspace" / "repo").mkdir(parents=True)
+            result = VerifyModule(urlopen=fake_urlopen).verify(
+                run_dir,
+                analysis={"frameworks": ["gradio"], "verify_hint": {"endpoint": "http://127.0.0.1:7860"}},
+                runner_result={"pid": 1234, "expected_port": 7860, "service_ready": True},
+            )
+            self.assertEqual(result.status, "passed")
+            self.assertIn("http://127.0.0.1:7860/call/predict", captured["urls"])
+            self.assertIn("http://127.0.0.1:7860/call/predict/evt-123", captured["urls"])
+            evidence = json.loads(Path(result.evidence[1]).read_text(encoding="utf-8"))
+            self.assertTrue(evidence["request"]["discovery"]["queue_enabled"])
+            self.assertTrue(evidence["follow_up_response"]["trace_found"])
+
     def test_mock_provider(self):
         result = MockLLMProvider().complete([Message(role="user", content="hello")])
         self.assertIn("mock provider response", result.text)
@@ -1014,6 +1049,7 @@ class CoreTests(unittest.TestCase):
         self.assertIn("service_exits_after_start", ids)
         self.assertIn("stale_artifact_ignored", ids)
         self.assertIn("gradio_api_shape_variation", ids)
+        self.assertIn("gradio_queue_call_followup", ids)
         self.assertIn("token_missing_diagnosis", ids)
         self.assertIn("repair_resume_stage_jump", ids)
         self.assertIn("repair_resume_audit_report", ids)
@@ -1022,7 +1058,7 @@ class CoreTests(unittest.TestCase):
     def test_benchmark_runner_executes_all_fixture_cases(self):
         report = BenchmarkRunner().run(Path("tests/fixtures/benchmarks/manifest.json"))
         self.assertEqual(report["status"], "passed")
-        self.assertEqual(len(report["cases"]), 21)
+        self.assertEqual(len(report["cases"]), 22)
         self.assertTrue(all(case["status"] == "passed" for case in report["cases"]))
 
     def test_benchmark_cli_writes_output(self):

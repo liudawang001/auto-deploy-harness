@@ -10,6 +10,12 @@
   - `ReportGenerator` 新增 `Execution Audit` 小节，展示 reused stages / rerun stages，避免 report 只给阶段结果而无法解释 resume 行为。
   - Benchmark cases 从 20 个扩展到 21 个，新增 `repair_resume_audit_report`。
   - 定向单测与 benchmark 已通过，覆盖 report 审计摘要和阶段跳转审计文件。
+- 五阶段优化任务 - 阶段 2：
+  - `VerifyModule` 的 Gradio `/config` discovery 新增 queue 模式识别：当 config 或 dependency 显示 queue 启用且存在 named API 时，会使用 `/call/<api_name>`。
+  - HTTP trace evidence 支持 follow-up 请求：先 POST `/call/<api_name>` 获取 `event_id`，再 GET `/call/<api_name>/<event_id>` 读取 SSE/JSON 输出。
+  - verify 只有在初始响应或 follow-up 响应包含当前 trace id 时才判定 `http_trace_response=pass`，不会因为 event_id 存在就误判成功。
+  - Benchmark cases 从 21 个扩展到 22 个，新增 `gradio_queue_call_followup`。
+  - 定向单测与 benchmark 已通过，覆盖 `/call/predict` 和 follow-up trace 证据。
 - 继续执行 P0/P1 优化任务：
   - `ModelCache.reserve` 会为缓存目录写入 `.auto_harness_asset.json`，记录 source、repo id、revision、origin、asset id 和 cache key。
   - `ModelCache.entries()` 会读取缓存元数据，返回 repo id、revision、origin，便于后续审计和精细清理。
@@ -96,7 +102,7 @@
 ### 下一步
 
 1. 增加真实 Playwright smoke test 文档和可选 CI job，在安装 Playwright 的环境中验证浏览器 backend。
-2. 扩展 Gradio verify 对 queue `/call/<api_name>` 的支持，并增加文件产物下载验证。
+2. 增加文件产物下载验证。
 3. 增加 Git LFS 检测和下载准备，覆盖权重在 Git 仓库/LFS 中的项目。
 
 ## 2026-07-03

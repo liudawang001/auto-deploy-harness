@@ -102,6 +102,8 @@ class BenchmarkRunner:
                 return self._case_stale_artifact_ignored(case)
             if case_id == "gradio_api_shape_variation":
                 return self._case_gradio_api_shape_variation(case)
+            if case_id == "gradio_queue_call_followup":
+                return self._case_gradio_queue_call_followup(case)
             if case_id == "token_missing_diagnosis":
                 return self._case_token_missing_diagnosis(case)
             if case_id == "repair_resume_stage_jump":
@@ -426,6 +428,43 @@ class BenchmarkRunner:
         body = json.loads(captured.get("body", "{}"))
         ok = result.status == "passed" and captured.get("url") == "http://127.0.0.1:7860/api/predict" and body.get("fn_index") == 7
         return self._result(case, "passed" if ok else "failed", "Gradio API shape variation verified")
+
+    def _case_gradio_queue_call_followup(self, case: Dict) -> Dict:
+        captured = {"urls": []}
+
+        def fake_urlopen(req, timeout):
+            captured["urls"].append(req.full_url)
+            if req.full_url.endswith("/config"):
+                return _FakeResponse(json.dumps({
+                    "enable_queue": True,
+                    "dependencies": [
+                        {"id": 7, "api_name": "/predict", "backend_fn": True, "queue": True},
+                    ],
+                }))
+            if req.full_url.endswith("/call/predict"):
+                captured["body"] = req.data.decode("utf-8")
+                return _FakeResponse(json.dumps({"event_id": "evt-123"}))
+            if req.full_url.endswith("/call/predict/evt-123"):
+                trace = json.loads(captured["body"])["data"][0]
+                return _FakeResponse("event: complete\ndata: {\"data\": [\"%s\"]}\n\n" % trace)
+            raise AssertionError("unexpected url %s" % req.full_url)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / "workspace" / "repo").mkdir(parents=True)
+            result = VerifyModule(urlopen=fake_urlopen).verify(
+                run_dir,
+                analysis={"frameworks": ["gradio"], "verify_hint": {"endpoint": "http://127.0.0.1:7860"}},
+                runner_result={"pid": 1234, "expected_port": 7860, "service_ready": True},
+            )
+            evidence = read_json(Path(result.evidence[1]))
+            ok = (
+                result.status == "passed"
+                and "http://127.0.0.1:7860/call/predict" in captured["urls"]
+                and "http://127.0.0.1:7860/call/predict/evt-123" in captured["urls"]
+                and evidence.get("follow_up_response", {}).get("trace_found") is True
+            )
+        return self._result(case, "passed" if ok else "failed", "Gradio queue /call follow-up verified")
 
     def _case_token_missing_diagnosis(self, case: Dict) -> Dict:
         diagnosis = LogClassifier().classify("401 Unauthorized: Repository Not Found. Please set HF_TOKEN.")
