@@ -13,7 +13,7 @@ AI-Auto-Harness 是一个面向 AI 开源 demo 项目的自动部署与验证 Ag
 
 当前仓库已经包含：
 
-- CLI：`init`、`deploy`、`resume`、`status`、`report`、`llm-test`。
+- CLI：`init`、`deploy`、`resume`、`status`、`report`、`llm-test`、`benchmark`。
 - 任务状态存储：`task.json`、`state.json`、`events.jsonl`。
 - 确定性项目分析器。
 - 安全默认的 `env_deploy`、`runner`、`verify`、report 模块。
@@ -140,6 +140,21 @@ docs/optimization-roadmap.md
 ```
 
 该文档覆盖模型下载与缓存、断点续传、资源预估、CUDA/PyTorch 环境求解、长任务状态机、自动诊断修复、增强 verify、安全沙箱和 benchmark 体系。
+
+## Benchmark
+
+本地 benchmark fixtures 可直接执行，不访问外网：
+
+```bash
+PYTHONPATH=src python3 -m auto_harness.cli benchmark --manifest tests/fixtures/benchmarks/manifest.json --output benchmark_report.json
+```
+
+当前 benchmark 覆盖：
+
+- 模型下载断点续传。
+- 缓存命中避免重复下载。
+- Streamlit HTTP 200 错误页面不能通过 verify。
+- HTTP 200 但无当前 trace 不能判定成功。
 
 ## 安全默认值
 

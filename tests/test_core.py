@@ -1,10 +1,14 @@
 import json
 import hashlib
+import io
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 
 from auto_harness.config import HarnessConfig
+from auto_harness.benchmarks import BenchmarkRunner
+from auto_harness.cli import main as cli_main
 from auto_harness.assets.huggingface import HuggingFaceDownloader
 from auto_harness.assets.modelscope import ModelScopeDownloader
 from auto_harness.diagnostics import LogClassifier
@@ -502,6 +506,27 @@ class CoreTests(unittest.TestCase):
         ids = {case["id"] for case in manifest["cases"]}
         self.assertIn("model_download_resume", ids)
         self.assertIn("verify_false_positive_http_200", ids)
+
+    def test_benchmark_runner_executes_all_fixture_cases(self):
+        report = BenchmarkRunner().run(Path("tests/fixtures/benchmarks/manifest.json"))
+        self.assertEqual(report["status"], "passed")
+        self.assertEqual(len(report["cases"]), 4)
+        self.assertTrue(all(case["status"] == "passed" for case in report["cases"]))
+
+    def test_benchmark_cli_writes_output(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "benchmark_report.json"
+            with redirect_stdout(io.StringIO()):
+                code = cli_main([
+                    "benchmark",
+                    "--manifest",
+                    "tests/fixtures/benchmarks/manifest.json",
+                    "--output",
+                    str(output),
+                ])
+            self.assertEqual(code, 0)
+            data = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(data["status"], "passed")
 
     def test_task_runner_dry_run_includes_resource_and_model_prepare(self):
         with tempfile.TemporaryDirectory() as tmp:

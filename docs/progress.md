@@ -5,6 +5,11 @@
 ### 已完成
 
 - 继续执行 P0 优化任务：
+  - 新增 `BenchmarkRunner`，可读取 `tests/fixtures/benchmarks/manifest.json` 并执行本地 benchmark cases。
+  - 新增 CLI 子命令 `benchmark`，支持 `--manifest` 和 `--output`。
+  - 当前 benchmark 不访问外网，覆盖下载续传、缓存命中、Streamlit 错误页、HTTP 200 false-positive 防护。
+  - 单测扩展到 29 个，覆盖 benchmark runner 和 benchmark CLI 输出。
+- 继续执行 P0 优化任务：
   - 新增 `RepairPolicy` 和 `RepairApplier`，repair plan 会先做权限校验，再生成受控 artifacts。
   - 受控 apply 当前只写入 `repairs/` 下的计划文件、依赖安装建议、verify hint 建议或所需环境变量名，不直接执行 shell，不修改源码。
   - 新增 `ModelFileSelector`，默认只下载模型权重和 tokenizer/config 等必要文件，跳过 README 和项目脚本。
@@ -22,9 +27,9 @@
 ### 下一步
 
 1. 增加 Playwright 或其他 browser backend，用于 Streamlit/Gradio 的真实交互验证。
-2. 扩展 benchmark runner，让 `tests/fixtures/benchmarks/manifest.json` 可被命令直接执行。
-3. 实现 repair apply 的下一阶段：在 policy 允许时，把 repair artifact 合并进 rerun pipeline。
-4. 增强下载器并发、etag 强一致校验和缓存清理策略。
+2. 实现 repair apply 的下一阶段：在 policy 允许时，把 repair artifact 合并进 rerun pipeline。
+3. 增强下载器并发、etag 强一致校验和缓存清理策略。
+4. 扩展 benchmark cases，加入 Gradio `/config`、repair policy 拒绝、模型 checksum 失败等场景。
 
 ## 2026-07-03
 

@@ -692,7 +692,7 @@ tests/fixtures/
 7. 增强 Gradio API discovery。
 8. 增加 diagnose log classifier。
 9. 增加结构化 repair plan。
-10. 添加基础 fixture 和 benchmark。
+10. 添加基础 fixture 和 benchmark。已完成第一版，提供 `benchmark` CLI 执行入口。
 
 验收：
 

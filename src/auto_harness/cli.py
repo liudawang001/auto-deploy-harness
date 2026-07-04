@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 
 from auto_harness.config import HarnessConfig
+from auto_harness.benchmarks import BenchmarkRunner
 from auto_harness.orchestrator import TaskRunner
 from auto_harness.providers import Message, MockLLMProvider, XunfeiSparkProvider
 
@@ -36,6 +37,10 @@ def build_parser() -> argparse.ArgumentParser:
     llm = sub.add_parser("llm-test", help="test LLM provider")
     llm.add_argument("--provider", choices=["mock", "xunfei"], default="mock")
     llm.add_argument("--prompt", default="Return a JSON object with status ok.")
+
+    benchmark = sub.add_parser("benchmark", help="run local benchmark fixtures")
+    benchmark.add_argument("--manifest", default="tests/fixtures/benchmarks/manifest.json")
+    benchmark.add_argument("--output", default="")
 
     return parser
 
@@ -85,6 +90,12 @@ def main(argv=None) -> int:
         result = provider.complete([Message(role="user", content=args.prompt)])
         print(result.text)
         return 0
+
+    if args.command == "benchmark":
+        output = Path(args.output) if args.output else None
+        report = BenchmarkRunner().run(Path(args.manifest), output)
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        return 0 if report.get("status") == "passed" else 2
 
     return 1
 
