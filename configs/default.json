@@ -2,6 +2,7 @@
   "runs_dir": "runs",
   "default_timeout_seconds": 900,
   "max_stage_attempts": 2,
+  "max_repair_attempts": 2,
   "allow_source_edit": false,
   "allow_dependency_install": false,
   "allow_service_start": false,

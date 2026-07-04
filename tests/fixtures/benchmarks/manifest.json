@@ -54,6 +54,16 @@
       "id": "cache_cleanup_plan",
       "purpose": "验证模型缓存清理可以先 dry-run 生成候选，再受控删除",
       "expected_signal": "old cache entry is selected and deleted only when dry_run is false"
+    },
+    {
+      "id": "repair_loop_attempt_limit",
+      "purpose": "验证 repair loop 会限制同一问题的自动修复尝试次数，并对不安全 rerun_from 做回退",
+      "expected_signal": "second repair gate is rejected and rerun_from falls back to safe stage"
+    },
+    {
+      "id": "operator_repair_approval",
+      "purpose": "验证需要人工批准的 repair action 只有在 operator approval 存在时才能通过",
+      "expected_signal": "policy is rejected before approval and allowed after approval"
     }
   ]
 }

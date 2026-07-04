@@ -20,7 +20,7 @@ from auto_harness.modules import (
     VerifyModule,
 )
 from auto_harness.skills import SkillRegistry
-from auto_harness.repair import RepairApplier, RepairOverlay, RepairPlanner, RepairPolicy
+from auto_harness.repair import RepairApplier, RepairLoopController, RepairOverlay, RepairPlanner, RepairPolicy
 from auto_harness.state import StateStore
 from auto_harness.utils.files import safe_name, short_hash
 from auto_harness.utils.time import compact_timestamp, utc_now_iso
@@ -37,6 +37,7 @@ class TaskRunner:
         self.repair_policy = RepairPolicy()
         self.repair_applier = RepairApplier()
         self.repair_overlay = RepairOverlay()
+        self.repair_loop = RepairLoopController(config.max_repair_attempts)
 
     def create_spec(
         self,
@@ -182,6 +183,12 @@ class TaskRunner:
         self.store.events(task_id).append("task", "resume_requested", {"dry_run": dry_run})
         return self.run_existing(task_id, dry_run=dry_run)
 
+    def approve_repair(self, task_id: str, note: str = "") -> Dict:
+        run_dir = self.store.run_dir(task_id)
+        approval = self.repair_loop.approve_latest(run_dir, note=note)
+        self.store.events(task_id).append("repair", "operator_approved", approval)
+        return approval
+
     def _save_stage(self, task_id: str, stage: str, result) -> None:
         path = self.store.save_result(task_id, stage, result)
         stage_status = "passed" if result.status in ("passed", "pass") else result.status
@@ -213,9 +220,13 @@ class TaskRunner:
         entry = self.memory.remember_issue(task_id, stage, result, analysis)
         if entry:
             task = self.store.load_task(task_id)
+            run_dir = self.store.run_dir(task_id)
             repair_plan = self.repair_planner.propose(stage, result, analysis)
-            policy_result = self.repair_policy.check(repair_plan, task.runtime)
-            apply_result = self.repair_applier.apply(self.store.run_dir(task_id), repair_plan, policy_result)
+            approval = self.repair_loop.load_approval(run_dir)
+            policy_result = self.repair_policy.check(repair_plan, task.runtime, operator_approval=approval)
+            state = self.store.load_state(task_id)
+            effective_policy = self.repair_loop.gate(run_dir, stage, entry, repair_plan, policy_result, state.last_safe_stage)
+            apply_result = self.repair_applier.apply(run_dir, repair_plan, effective_policy)
             self.store.events(task_id).append(
                 stage,
                 "memory_recorded",
@@ -223,7 +234,7 @@ class TaskRunner:
                     "memory_id": entry["id"],
                     "signature": entry["signature"],
                     "repair_plan": repair_plan,
-                    "repair_policy": policy_result,
+                    "repair_policy": effective_policy,
                     "repair_apply": apply_result,
                 },
             )

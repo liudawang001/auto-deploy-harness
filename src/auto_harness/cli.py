@@ -34,6 +34,10 @@ def build_parser() -> argparse.ArgumentParser:
     report = sub.add_parser("report", help="print report path")
     report.add_argument("--task-id", required=True)
 
+    repair_approve = sub.add_parser("repair-approve", help="approve the latest repair plan for a task")
+    repair_approve.add_argument("--task-id", required=True)
+    repair_approve.add_argument("--note", default="")
+
     llm = sub.add_parser("llm-test", help="test LLM provider")
     llm.add_argument("--provider", choices=["mock", "xunfei"], default="mock")
     llm.add_argument("--prompt", default="Return a JSON object with status ok.")
@@ -83,6 +87,11 @@ def main(argv=None) -> int:
         print(state.report_path or "")
         if state.report_path and Path(state.report_path).exists():
             print(Path(state.report_path).read_text(encoding="utf-8"))
+        return 0
+
+    if args.command == "repair-approve":
+        approval = runner.approve_repair(args.task_id, note=args.note)
+        print(json.dumps(approval, ensure_ascii=False, indent=2))
         return 0
 
     if args.command == "llm-test":

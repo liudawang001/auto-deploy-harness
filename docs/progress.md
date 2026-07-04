@@ -5,6 +5,14 @@
 ### 已完成
 
 - 继续执行 P0/P1 优化任务：
+  - 新增 `RepairLoopController`，对同一问题 signature 记录 repair attempts，并通过 `max_repair_attempts` 控制自动修复尝试次数。
+  - Repair plan 会记录 `rerun_from_requested` 和 `rerun_from_effective`；当 plan 给出不安全阶段时，会回退到当前安全阶段或 `analyze`。
+  - `RepairPolicy` 支持 `operator_approval.json`，需要人工确认的 action 在审批前会拒绝，审批后可通过；需要 secret 的 action 仍不会记录密钥值。
+  - 新增 CLI 子命令 `repair-approve`，用于为最新 repair plan 写入人工审批文件和事件日志。
+  - 被拒绝的 repair 现在也会写入 `repair_apply_result.json`，避免旧 overlay artifact 被误复用。
+  - Benchmark cases 从 11 个扩展到 13 个，新增 `repair_loop_attempt_limit` 和 `operator_repair_approval`。
+  - 单测扩展到 40 个，覆盖 attempt limit、安全回退、审批入口、rejected overlay 失效。
+- 继续执行 P0/P1 优化任务：
   - Hugging Face / ModelScope 下载器新增 `max_workers`，支持 stdlib 线程池并发下载多个模型文件，并保持 manifest 文件顺序稳定。
   - 下载完成后为每个文件写入 `.auto_harness_meta.json`，记录 size、sha256 和 etag；缓存命中时会校验远端 etag，etag 不一致会重新下载，避免旧缓存误用。
   - `ModelCache` 新增 `entries()` 和 `cleanup()`，支持按总大小或时间生成清理候选；默认 `dry_run=True`，只有显式关闭 dry-run 才删除缓存目录。
@@ -44,10 +52,10 @@
 
 ### 下一步
 
-1. 增加 repair loop 的受控重试次数、rerun_from 安全回退和人工审批入口。
-2. 扩展 benchmark cases：服务启动后退出、历史 artifact 干扰、Gradio API shape 变化、token 缺失。
-3. 增加真实 Playwright smoke test 文档和可选 CI job，在安装 Playwright 的环境中验证浏览器 backend。
-4. 将下载并发、缓存清理和重试参数暴露到配置文件与 CLI。
+1. 扩展 benchmark cases：服务启动后退出、历史 artifact 干扰、Gradio API shape 变化、token 缺失。
+2. 增加真实 Playwright smoke test 文档和可选 CI job，在安装 Playwright 的环境中验证浏览器 backend。
+3. 将下载并发、缓存清理和重试参数暴露到配置文件与 CLI。
+4. 增加 repair resume 的阶段级跳转执行，按 `rerun_from_effective` 从安全阶段重跑，而不是总是全量 pipeline。
 
 ## 2026-07-03
 

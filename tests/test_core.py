@@ -1,6 +1,7 @@
 import json
 import hashlib
 import io
+import os
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -26,7 +27,7 @@ from auto_harness.providers import Message, MockLLMProvider
 from auto_harness.skills import SkillRegistry
 from auto_harness.state import StateStore
 from auto_harness.orchestrator import TaskRunner
-from auto_harness.repair import RepairApplier, RepairOverlay, RepairPlanner, RepairPolicy
+from auto_harness.repair import RepairApplier, RepairLoopController, RepairOverlay, RepairPlanner, RepairPolicy
 from auto_harness.verify import BrowserVerifier
 from auto_harness.utils.time import utc_now_iso
 
@@ -532,6 +533,37 @@ class CoreTests(unittest.TestCase):
         self.assertFalse(result["allowed"])
         self.assertIn("dependency install is not allowed", result["decisions"][0]["reasons"])
 
+    def test_repair_policy_allows_operator_approved_action(self):
+        action = {
+            "type": "change_cache_dir",
+            "requires": {"operator_approval": True},
+            "payload": {"config": "model_cache_dir"},
+        }
+        runtime = RuntimePolicy(workspace_root="/tmp/demo")
+        rejected = RepairPolicy().check({"actions": [action]}, runtime)
+        approved = RepairPolicy().check(
+            {"actions": [action]},
+            runtime,
+            operator_approval={"approved": True, "approved_action_types": ["change_cache_dir"]},
+        )
+        self.assertFalse(rejected["allowed"])
+        self.assertTrue(approved["allowed"])
+
+    def test_repair_loop_limits_attempts_and_safely_falls_back(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            controller = RepairLoopController(max_attempts=1)
+            entry = {"signature": "sig-repair"}
+            policy = {"allowed": True, "decisions": []}
+            first_plan = {"root_cause": "missing trace", "rerun_from": "unsafe_stage", "actions": []}
+            first = controller.gate(Path(tmp), "verify", entry, first_plan, policy)
+            second_plan = {"root_cause": "missing trace", "rerun_from": "unsafe_stage", "actions": []}
+            second = controller.gate(Path(tmp), "verify", entry, second_plan, policy)
+            self.assertTrue(first["allowed"])
+            self.assertEqual(first["loop"]["rerun_from_effective"], "verify")
+            self.assertFalse(second["allowed"])
+            self.assertIn("repair attempt limit reached", second["loop"]["reasons"])
+            self.assertTrue((Path(tmp) / "repairs" / "repair_loop_state.json").exists())
+
     def test_repair_overlay_merges_allowed_artifacts(self):
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = Path(tmp)
@@ -563,6 +595,46 @@ class CoreTests(unittest.TestCase):
             self.assertIn([".venv/bin/python", "-m", "pip", "install", "gradio"], merged["install_plan"])
             self.assertEqual(merged["verify_hint"]["endpoint"], "http://127.0.0.1:7860")
             self.assertEqual(merged["verify_hint"]["request"]["path"], "/api/predict")
+
+    def test_rejected_repair_apply_result_disables_overlay(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            plan = {"actions": [{"type": "update_verify_hint", "payload": {"endpoint": "http://127.0.0.1:7860"}}]}
+            RepairApplier().apply(run_dir, plan, {"allowed": True, "decisions": []})
+            self.assertTrue(RepairOverlay().load(run_dir)["active"])
+            RepairApplier().apply(run_dir, plan, {"allowed": False, "decisions": [{"allowed": False}]})
+            self.assertFalse(RepairOverlay().load(run_dir)["active"])
+
+    def test_cli_repair_approve_writes_operator_approval(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path = root / "config.json"
+            config_path.write_text(json.dumps({
+                "runs_dir": str(root / "runs"),
+                "memory_dir": str(root / "memory"),
+                "model_cache_dir": str(root / "model_cache"),
+            }), encoding="utf-8")
+            repair_dir = root / "runs" / "task1" / "repairs"
+            repair_dir.mkdir(parents=True)
+            (repair_dir / "repair_plan.json").write_text(json.dumps({
+                "root_cause": "disk full",
+                "rerun_from": "model_prepare",
+                "actions": [{"type": "change_cache_dir", "requires": {"operator_approval": True}}],
+            }), encoding="utf-8")
+            old_config = os.environ.get("AUTO_HARNESS_CONFIG")
+            os.environ["AUTO_HARNESS_CONFIG"] = str(config_path)
+            try:
+                with redirect_stdout(io.StringIO()):
+                    code = cli_main(["repair-approve", "--task-id", "task1", "--note", "approved in test"])
+            finally:
+                if old_config is None:
+                    os.environ.pop("AUTO_HARNESS_CONFIG", None)
+                else:
+                    os.environ["AUTO_HARNESS_CONFIG"] = old_config
+            self.assertEqual(code, 0)
+            approval = json.loads((repair_dir / "operator_approval.json").read_text(encoding="utf-8"))
+            self.assertTrue(approval["approved"])
+            self.assertEqual(approval["approved_action_types"], ["change_cache_dir"])
 
     def test_verify_streamlit_dom_probe_can_pass_with_trace(self):
         def fake_urlopen(req, timeout):
@@ -674,11 +746,13 @@ class CoreTests(unittest.TestCase):
         self.assertIn("parallel_model_download", ids)
         self.assertIn("etag_cache_invalidation", ids)
         self.assertIn("cache_cleanup_plan", ids)
+        self.assertIn("repair_loop_attempt_limit", ids)
+        self.assertIn("operator_repair_approval", ids)
 
     def test_benchmark_runner_executes_all_fixture_cases(self):
         report = BenchmarkRunner().run(Path("tests/fixtures/benchmarks/manifest.json"))
         self.assertEqual(report["status"], "passed")
-        self.assertEqual(len(report["cases"]), 11)
+        self.assertEqual(len(report["cases"]), 13)
         self.assertTrue(all(case["status"] == "passed" for case in report["cases"]))
 
     def test_benchmark_cli_writes_output(self):

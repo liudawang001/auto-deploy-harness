@@ -10,6 +10,7 @@ class HarnessConfig:
     runs_dir: str = "runs"
     default_timeout_seconds: int = 900
     max_stage_attempts: int = 2
+    max_repair_attempts: int = 2
     allow_source_edit: bool = False
     allow_dependency_install: bool = False
     allow_service_start: bool = False

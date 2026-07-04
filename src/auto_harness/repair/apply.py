@@ -20,6 +20,8 @@ class RepairApplier:
         if not policy_result.get("allowed"):
             write_json(repair_dir / "repair_rejected.json", result)
             result["artifacts"].append(str(repair_dir / "repair_rejected.json"))
+            write_json(repair_dir / "repair_apply_result.json", result)
+            result["artifacts"].append(str(repair_dir / "repair_apply_result.json"))
             return result
 
         install_commands: List[List[str]] = []

@@ -8,7 +8,7 @@ from auto_harness.assets.manifest import ModelAsset
 from auto_harness.models.base import write_json
 from auto_harness.modules.verify import VerifyModule
 from auto_harness.models.task import RuntimePolicy
-from auto_harness.repair import RepairPolicy
+from auto_harness.repair import RepairLoopController, RepairPolicy
 from auto_harness.verify import BrowserVerifier, StreamlitVerifier
 
 
@@ -85,6 +85,10 @@ class BenchmarkRunner:
                 return self._case_etag_cache_invalidation(case)
             if case_id == "cache_cleanup_plan":
                 return self._case_cache_cleanup_plan(case)
+            if case_id == "repair_loop_attempt_limit":
+                return self._case_repair_loop_attempt_limit(case)
+            if case_id == "operator_repair_approval":
+                return self._case_operator_repair_approval(case)
             return self._result(case, "skipped", "unknown benchmark case")
         except Exception as exc:  # noqa: BLE001 - benchmark report should continue
             return self._result(case, "failed", str(exc))
@@ -292,6 +296,33 @@ class BenchmarkRunner:
             applied = cache.cleanup(max_total_bytes=5, dry_run=False)
             ok = plan["candidate_count"] == 1 and len(applied["deleted"]) == 1 and not old_dir.exists() and new_dir.exists()
             return self._result(case, "passed" if ok else "failed", "cache cleanup dry-run and delete verified")
+
+    def _case_repair_loop_attempt_limit(self, case: Dict) -> Dict:
+        with tempfile.TemporaryDirectory() as tmp:
+            controller = RepairLoopController(max_attempts=1)
+            plan = {"root_cause": "trace missing", "rerun_from": "unsafe_stage", "actions": []}
+            entry = {"signature": "bench-repair-loop"}
+            policy = {"allowed": True, "decisions": []}
+            first = controller.gate(Path(tmp), "verify", entry, dict(plan), policy)
+            second = controller.gate(Path(tmp), "verify", entry, dict(plan), policy)
+        ok = first["allowed"] is True and second["allowed"] is False and second["loop"]["rerun_from_effective"] == "verify"
+        return self._result(case, "passed" if ok else "failed", "repair loop attempt limit verified")
+
+    def _case_operator_repair_approval(self, case: Dict) -> Dict:
+        action = {
+            "type": "change_cache_dir",
+            "requires": {"operator_approval": True},
+            "payload": {"config": "model_cache_dir"},
+        }
+        runtime = RuntimePolicy(workspace_root="/tmp/auto-harness-benchmark")
+        rejected = RepairPolicy().check({"actions": [action]}, runtime)
+        approved = RepairPolicy().check(
+            {"actions": [action]},
+            runtime,
+            operator_approval={"approved": True, "approved_action_types": ["change_cache_dir"]},
+        )
+        ok = rejected["allowed"] is False and approved["allowed"] is True
+        return self._result(case, "passed" if ok else "failed", "operator approval gate verified")
 
     def _result(self, case: Dict, status: str, reason: str) -> Dict:
         return {
