@@ -5,6 +5,12 @@
 ### 已完成
 
 - 继续执行 P0 优化任务：
+  - 新增 `RepairPolicy` 和 `RepairApplier`，repair plan 会先做权限校验，再生成受控 artifacts。
+  - 受控 apply 当前只写入 `repairs/` 下的计划文件、依赖安装建议、verify hint 建议或所需环境变量名，不直接执行 shell，不修改源码。
+  - 新增 `ModelFileSelector`，默认只下载模型权重和 tokenizer/config 等必要文件，跳过 README 和项目脚本。
+  - 新增 benchmark fixtures：模型下载续传、缓存命中、Streamlit 错误页面、HTTP 200 false-positive 防护。
+  - 单测扩展到 27 个，覆盖 repair policy/apply、文件选择策略和 benchmark fixtures。
+- 继续执行 P0 优化任务：
   - 新增 `ModelScopeDownloader`，支持可配置 ModelScope API base / download base、文件清单解析、`.part` 和 Range 续传。
   - 抽取 `ResumableDownloadMixin`，复用断点续传、缓存命中和 sha256 校验逻辑。
   - Hugging Face 文件记录增加 `etag` / `sha256` / `verified` 字段；当清单提供 sha256 时会校验完整性。
@@ -15,10 +21,10 @@
 
 ### 下一步
 
-1. 为 repair plan 增加 policy 校验和受控 apply。
-2. 增加 benchmark fixtures，覆盖模型下载中断、缓存命中、Streamlit 页面错误、verify false-positive 防护。
-3. 增强 Hugging Face / ModelScope 文件选择策略，避免下载无关 `.md` 或仓库脚本。
-4. 增加 Playwright 或其他 browser backend，用于 Streamlit/Gradio 的真实交互验证。
+1. 增加 Playwright 或其他 browser backend，用于 Streamlit/Gradio 的真实交互验证。
+2. 扩展 benchmark runner，让 `tests/fixtures/benchmarks/manifest.json` 可被命令直接执行。
+3. 实现 repair apply 的下一阶段：在 policy 允许时，把 repair artifact 合并进 rerun pipeline。
+4. 增强下载器并发、etag 强一致校验和缓存清理策略。
 
 ## 2026-07-03
 
@@ -170,4 +176,4 @@
 - Memory 会自动记录，但还没有 human review/promotion 命令来把重复 memory 转成 skill 更新。
 - `model_prepare` 已接入 Hugging Face 和 ModelScope 下载器。
 - 下载器目前使用 stdlib HTTP 实现，尚未支持并发下载和 etag 强一致校验；sha256 仅在远端清单提供该字段时校验。
-- Repair plan 当前只生成建议，不会自动 apply。
+- Repair plan 当前会生成受控 artifacts，但不会直接执行 shell 或修改源码。

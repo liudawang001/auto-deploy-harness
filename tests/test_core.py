@@ -11,7 +11,7 @@ from auto_harness.diagnostics import LogClassifier
 from auto_harness.models.task import ProjectSpec, RuntimePolicy, TaskSpec
 from auto_harness.agents.base import AgentResult
 from auto_harness.memory import MemoryStore
-from auto_harness.assets import ModelCache, ModelAssetDetector
+from auto_harness.assets import ModelCache, ModelAssetDetector, ModelFileSelector
 from auto_harness.modules.analyzer import ProjectAnalyzer
 from auto_harness.modules.env_deploy import EnvDeployModule
 from auto_harness.modules.model_prepare import ModelPrepareModule
@@ -360,6 +360,13 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(result.files[0]["etag"], "etag123")
             self.assertTrue(result.files[0]["verified"])
 
+    def test_model_file_selector_skips_readme_and_scripts(self):
+        selector = ModelFileSelector()
+        self.assertTrue(selector.should_download("model.safetensors"))
+        self.assertTrue(selector.should_download("tokenizer.json"))
+        self.assertFalse(selector.should_download("README.md"))
+        self.assertFalse(selector.should_download("app.py"))
+
     def test_modelscope_downloader_downloads_with_resume(self):
         with tempfile.TemporaryDirectory() as tmp:
             cache = ModelCache(Path(tmp) / "model_cache")
@@ -437,6 +444,24 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(result.status, "passed")
             self.assertTrue(any(check["name"] == "streamlit_dom_probe" for check in result.data["checks"]))
 
+    def test_verify_streamlit_dom_probe_fails_on_error_page(self):
+        page = Path("tests/fixtures/benchmarks/streamlit_error_page.html").read_text(encoding="utf-8")
+
+        def fake_urlopen(req, timeout):
+            return FakeHttpResponse(page)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / "workspace" / "repo").mkdir(parents=True)
+            result = VerifyModule(urlopen=fake_urlopen).verify(
+                run_dir,
+                analysis={"frameworks": ["streamlit"], "verify_hint": {"endpoint": "http://127.0.0.1:8501"}},
+                runner_result={"pid": 1234, "expected_port": 8501, "service_ready": True},
+            )
+            checks = {check["name"]: check for check in result.data["checks"]}
+            self.assertEqual(checks["streamlit_dom_probe"]["status"], "fail")
+            self.assertEqual(result.status, "uncertain")
+
     def test_model_prepare_progress_callback_receives_download_updates(self):
         with tempfile.TemporaryDirectory() as tmp:
             cache = ModelCache(Path(tmp) / "model_cache")
@@ -471,6 +496,12 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(result.status, "passed")
             self.assertTrue(any(update.get("status") == "downloading" for update in updates))
             self.assertEqual(result.data["progress"]["downloaded_bytes"], 3)
+
+    def test_benchmark_fixture_manifest_is_present(self):
+        manifest = json.loads(Path("tests/fixtures/benchmarks/manifest.json").read_text(encoding="utf-8"))
+        ids = {case["id"] for case in manifest["cases"]}
+        self.assertIn("model_download_resume", ids)
+        self.assertIn("verify_false_positive_http_200", ids)
 
     def test_task_runner_dry_run_includes_resource_and_model_prepare(self):
         with tempfile.TemporaryDirectory() as tmp:

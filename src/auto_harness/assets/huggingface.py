@@ -7,32 +7,17 @@ from typing import Callable, Dict, List, Optional
 
 from auto_harness.assets.base import ResumableDownloadMixin
 from auto_harness.assets.manifest import ModelAsset
+from auto_harness.assets.selection import ModelFileSelector
 
 
 class HuggingFaceDownloader(ResumableDownloadMixin):
     """Small stdlib downloader with resumable file writes for Hugging Face assets."""
 
-    WEIGHT_SUFFIXES = (
-        ".safetensors",
-        ".bin",
-        ".pt",
-        ".pth",
-        ".ckpt",
-        ".gguf",
-        ".model",
-    )
-    CONFIG_SUFFIXES = (
-        ".json",
-        ".txt",
-        ".tiktoken",
-        ".py",
-        ".md",
-    )
-
-    def __init__(self, urlopen=None, token: Optional[str] = None, chunk_size: int = 1024 * 1024) -> None:
+    def __init__(self, urlopen=None, token: Optional[str] = None, chunk_size: int = 1024 * 1024, selector: ModelFileSelector = None) -> None:
         self.urlopen = urlopen or urllib.request.urlopen
         self.token = token if token is not None else os.environ.get("HF_TOKEN")
         self.chunk_size = chunk_size
+        self.selector = selector or ModelFileSelector()
 
     def download(self, asset: ModelAsset, progress_callback: Optional[Callable[[Dict], None]] = None) -> ModelAsset:
         if asset.source != "huggingface":
@@ -95,8 +80,7 @@ class HuggingFaceDownloader(ResumableDownloadMixin):
         return "https://huggingface.co/%s/resolve/%s/%s" % (repo, revision, path)
 
     def _should_download(self, path: str) -> bool:
-        lower = path.lower()
-        return lower.endswith(self.WEIGHT_SUFFIXES) or lower.endswith(self.CONFIG_SUFFIXES)
+        return self.selector.should_download(path)
 
     def _add_auth(self, req) -> None:
         if self.token:

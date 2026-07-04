@@ -27,7 +27,8 @@ AI-Auto-Harness 是一个面向 AI 开源 demo 项目的自动部署与验证 Ag
 - `model_prepare` 阶段：生成模型资产 manifest、缓存 key 和 `model_cache` 路径；执行模式下支持 Hugging Face / ModelScope 文件清单解析、断点续传、sha256 校验字段和缓存写入。
 - `verify` 增强：支持 Gradio `/config` discovery 和 Streamlit DOM/HTML 证据探测。
 - 日志规则分类器：对缺依赖、CUDA OOM、磁盘不足、token 权限、wheel 构建失败等常见错误生成结构化诊断。
-- Repair plan：失败或 uncertain 阶段会生成结构化修复建议，写入事件日志；当前只 propose，不自动 apply。
+- Repair plan：失败或 uncertain 阶段会生成结构化修复建议，经过 policy 校验后写入受控 repair artifacts；当前不会直接执行 shell 或修改源码。
+- Benchmark fixtures：`tests/fixtures/benchmarks` 覆盖下载续传、缓存命中、Streamlit 错误页面和 HTTP 200 false-positive 防护。
 - 开发进度报告：`docs/progress.md`。
 
 ## 快速开始
@@ -126,7 +127,7 @@ runs/<task-id>/reports/model_assets_manifest.json
 model_cache/
 ```
 
-执行模式下，Hugging Face 资产会通过 tree API 获取文件清单；ModelScope 资产会通过可配置的 ModelScope API/下载 URL 模板获取文件。两者都会将 `.safetensors`、`.bin`、`.pt`、`.gguf`、配置文件等下载到缓存目录。下载过程中使用 `.part` 文件和 HTTP Range 支持续传；如果文件清单提供 `sha256`，下载后会做 sha256 校验。
+执行模式下，Hugging Face 资产会通过 tree API 获取文件清单；ModelScope 资产会通过可配置的 ModelScope API/下载 URL 模板获取文件。两者都会将 `.safetensors`、`.bin`、`.pt`、`.gguf` 和 tokenizer/config 等必要文件下载到缓存目录，默认跳过 README、示例脚本等非模型运行必要文件。下载过程中使用 `.part` 文件和 HTTP Range 支持续传；如果文件清单提供 `sha256`，下载后会做 sha256 校验。
 
 阶段进度会写入 `state.json` 的 `model_prepare.progress`，包括当前文件、已下载字节、总字节和状态。
 

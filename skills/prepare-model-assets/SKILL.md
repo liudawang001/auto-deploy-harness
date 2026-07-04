@@ -40,6 +40,7 @@ description: 规划和准备开源模型资产。用于 resource_plan 和 model_
 - 通过 Hugging Face tree API 获取文件清单。
 - 使用 `resolve` URL 下载模型文件和配置文件。
 - 通过可配置 ModelScope API base / download base 获取 ModelScope 文件清单并下载。
+- 默认只选择权重文件和 tokenizer/config 等必要运行文件，跳过 README 和项目脚本。
 - 使用 `.part` 文件保存未完成下载。
 - 已有 `.part` 时通过 HTTP Range 续传。
 - 文件清单包含 `sha256` 时，下载后必须校验 sha256。

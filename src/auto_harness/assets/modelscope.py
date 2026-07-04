@@ -7,12 +7,10 @@ from typing import Callable, Dict, List, Optional
 
 from auto_harness.assets.base import ResumableDownloadMixin
 from auto_harness.assets.manifest import ModelAsset
+from auto_harness.assets.selection import ModelFileSelector
 
 
 class ModelScopeDownloader(ResumableDownloadMixin):
-    WEIGHT_SUFFIXES = (".safetensors", ".bin", ".pt", ".pth", ".ckpt", ".gguf", ".model")
-    CONFIG_SUFFIXES = (".json", ".txt", ".py", ".md", ".yaml", ".yml")
-
     def __init__(
         self,
         urlopen=None,
@@ -20,12 +18,14 @@ class ModelScopeDownloader(ResumableDownloadMixin):
         api_base: Optional[str] = None,
         download_base: Optional[str] = None,
         chunk_size: int = 1024 * 1024,
+        selector: ModelFileSelector = None,
     ) -> None:
         self.urlopen = urlopen or urllib.request.urlopen
         self.token = token if token is not None else os.environ.get("MODELSCOPE_TOKEN")
         self.api_base = (api_base or os.environ.get("MODELSCOPE_API_BASE") or "https://www.modelscope.cn/api/v1/models").rstrip("/")
         self.download_base = (download_base or os.environ.get("MODELSCOPE_DOWNLOAD_BASE") or "https://www.modelscope.cn/models").rstrip("/")
         self.chunk_size = chunk_size
+        self.selector = selector or ModelFileSelector()
 
     def download(self, asset: ModelAsset, progress_callback: Optional[Callable[[Dict], None]] = None) -> ModelAsset:
         if asset.source != "modelscope":
@@ -89,8 +89,7 @@ class ModelScopeDownloader(ResumableDownloadMixin):
         return "%s/%s/resolve/%s/%s" % (self.download_base, repo, revision, path)
 
     def _should_download(self, path: str) -> bool:
-        lower = path.lower()
-        return lower.endswith(self.WEIGHT_SUFFIXES) or lower.endswith(self.CONFIG_SUFFIXES)
+        return self.selector.should_download(path)
 
     def _add_auth(self, req) -> None:
         if self.token:

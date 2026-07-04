@@ -1,0 +1,24 @@
+{
+  "cases": [
+    {
+      "id": "model_download_resume",
+      "purpose": "验证模型下载中断后可通过 .part 和 Range 续传",
+      "expected_signal": "Range header is emitted when partial file exists"
+    },
+    {
+      "id": "cache_hit",
+      "purpose": "验证已完整下载的模型文件不会重复下载",
+      "expected_signal": "file status becomes cached"
+    },
+    {
+      "id": "streamlit_error_page",
+      "purpose": "验证 Streamlit 页面虽然 HTTP 200 但包含错误标记时不能通过",
+      "expected_signal": "streamlit_dom_probe status is fail"
+    },
+    {
+      "id": "verify_false_positive_http_200",
+      "purpose": "验证 HTTP 200 但没有当前 trace 时不能判定成功",
+      "expected_signal": "verify status remains uncertain"
+    }
+  ]
+}
