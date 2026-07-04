@@ -29,6 +29,29 @@
   - Git LFS pointer size 会纳入磁盘估算，风险原因中会标记 `Git LFS model files detected`。
   - Benchmark cases 从 23 个扩展到 24 个，新增 `git_lfs_detection`。
   - 定向单测与 benchmark 已通过，覆盖 LFS pointer 解析和缺工具诊断。
+- 五阶段优化任务 - 阶段 5：
+  - 新增 `docs/playwright-smoke.md`，给出真实 Python Playwright backend 的本地 smoke test 步骤和期望证据。
+  - 新增 `.github/workflows/playwright-smoke.yml`，提供手动触发的 GitHub Actions workflow，避免普通 push/PR 默认下载 Chromium。
+  - README 的 Browser Verify 小节补充 smoke test 文档和 workflow 入口。
+  - 该 smoke test 使用极小 HTTP server 将 `_auto_harness_trace` 渲染到 DOM，再调用 `BrowserVerifier` 验证 `browser_dom_probe=pass`。
+
+### 五阶段总结与总进度
+
+本轮 5 个阶段分别完成：
+
+1. 恢复执行审计：resume 从中间阶段重跑时，report 能解释复用了哪些阶段、重跑了哪些阶段。
+2. Gradio queue verify：支持 `/call/<api_name>` + `event_id` follow-up，不因 event id 存在而误判成功。
+3. 文件产物验证：新产物必须可读、非空并记录 sha256，空文件不会作为强证据。
+4. Git LFS 检测：识别 LFS pointer 和 `.gitattributes`，缺 `git-lfs` 时进入诊断态，并给出准备命令。
+5. Playwright smoke 治理：补齐真实浏览器 backend 的本地 smoke 文档和手动 CI workflow。
+
+按 `docs/optimization-roadmap.md` 的“全自动开源模型部署 Agent”目标估算，当前总项目进度约为 **70%**。
+
+估算依据：
+
+- 已完成约 85% 的 P0/P1 核心控制链路：下载缓存、断点续传、verify 防误判、repair plan/policy/resume、benchmark 回归体系已经成型。
+- 已完成约 65% 的真实开源模型部署能力：Hugging Face / ModelScope 下载、Git LFS 检测、Gradio/Streamlit/browser verify 已具备第一版，但真实端到端部署矩阵仍需扩大。
+- 尚未完成的关键 30% 主要是：受控执行 Git LFS 拉取、环境求解 `env_solve`、CUDA/PyTorch 兼容策略、Docker/sandbox 隔离、真实大模型长耗时 E2E 验证、memory promotion 到 skill 的人工审核流程。
 - 继续执行 P0/P1 优化任务：
   - `ModelCache.reserve` 会为缓存目录写入 `.auto_harness_asset.json`，记录 source、repo id、revision、origin、asset id 和 cache key。
   - `ModelCache.entries()` 会读取缓存元数据，返回 repo id、revision、origin，便于后续审计和精细清理。
@@ -114,8 +137,11 @@
 
 ### 下一步
 
-1. 增加真实 Playwright smoke test 文档和可选 CI job，在安装 Playwright 的环境中验证浏览器 backend。
-2. 增加真实 Playwright smoke test 文档和可选 CI job，在安装 Playwright 的环境中验证浏览器 backend。
+1. 为 Git LFS 增加受控执行层：在 `--execute` 且命令策略允许时执行 `git lfs pull`，并记录下载进度。
+2. 增加 `env_solve` 第一版：识别 Python、Torch、CUDA、numpy/pydantic/gradio 兼容风险，生成更稳定的安装方案。
+3. 扩展真实 E2E fixture：至少覆盖一个小型 Gradio 模型、一个 Streamlit demo、一个 Git LFS 权重仓库。
+4. 增加 memory promotion 工作流：把高频失败记忆提升为可审核的 skill 更新建议。
+5. 引入更强 sandbox / Docker backend，隔离真实依赖安装和服务启动。
 
 ## 2026-07-03
 
@@ -260,11 +286,11 @@
 ### 已知限制
 
 - 真实依赖安装和服务启动默认关闭。
-- `VerifyModule` 已支持 GET query trace、POST JSON trace template、Gradio `/config` discovery 和 Streamlit DOM/HTML probe，但还不支持 Playwright 真浏览器交互、文件下载验证或 CLI trace 执行。
+- `VerifyModule` 已支持 GET query trace、POST JSON trace template、Gradio `/config` discovery、Gradio queue `/call` follow-up、Streamlit DOM/HTML probe、可选 Playwright DOM probe 和文件产物校验；后续仍需补 CLI inference trace 与更复杂的多模态交互。
 - `RunnerModule` 尚未持久化进程句柄，后续需要支持清理。
 - `XunfeiSparkProvider` 当前假设 Anthropic-compatible HTTP messages 接口；如果选定的 Spark API 变体需要 WebSocket 签名，需要新增 transport。
-- 测试套件仍较小，目前主要覆盖 dry-run 核心路径。
+- 测试套件已覆盖核心 dry-run、verify、repair、下载和 benchmark 路径；后续仍需增加真实联网和真实浏览器矩阵。
 - Memory 会自动记录，但还没有 human review/promotion 命令来把重复 memory 转成 skill 更新。
 - `model_prepare` 已接入 Hugging Face 和 ModelScope 下载器。
-- 下载器目前使用 stdlib HTTP 实现，尚未支持并发下载和 etag 强一致校验；sha256 仅在远端清单提供该字段时校验。
+- 下载器目前使用 stdlib HTTP 实现，已支持并发下载、有限重试、etag 缓存失效和远端提供 sha256 时的校验；后续仍需扩展更多模型源和真实大文件 E2E。
 - Repair plan 当前会生成受控 artifacts，但不会直接执行 shell 或修改源码。

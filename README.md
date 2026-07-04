@@ -200,6 +200,14 @@ python3 -m playwright install chromium
 
 如果环境没有安装 Playwright，`browser_dom_probe` 会记录 `uncertain` 证据，不会阻塞已有 HTTP trace 或 artifact evidence。
 
+真实浏览器 backend smoke test 文档见：
+
+```text
+docs/playwright-smoke.md
+```
+
+仓库还提供手动触发的 GitHub Actions workflow：`.github/workflows/playwright-smoke.yml`。
+
 ## 优化路线图
 
 面向真实开源模型自动部署的长期优化计划见：

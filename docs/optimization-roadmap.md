@@ -379,6 +379,8 @@ Verify 是本项目最重要的差异化模块。它要证明模型链路真的�
 - 支持 Gradio 3.x 和 4.x 常见接口。
 - 返回体或日志必须包含当前 trace，或产物必须是本次新生成。
 
+当前状态：已完成第一版 `/config` discovery、`api_name` / `fn_index` 解析、queue `/call/<api_name>` + `event_id` follow-up 验证。
+
 ### 4.2 FastAPI / Flask OpenAPI Verify
 
 需要支持：
@@ -411,6 +413,8 @@ Streamlit 通常没有稳定 API，需要浏览器验证。
 - 至少能区分“页面打开但报错”和“页面完成一次交互”。
 - 截图、DOM、日志都写入 evidence。
 
+当前状态：已完成可选 Playwright backend、DOM trace / error marker 判定，并补充真实浏览器 smoke test 文档和手动 CI workflow。
+
 ### 4.4 文件产物 Verify
 
 适用于：
@@ -433,6 +437,8 @@ Streamlit 通常没有稳定 API，需要浏览器验证。
 
 - 历史产物不能误判为本次成功。
 - 空文件不能通过。
+
+当前状态：已完成第一版 `artifact_download_validation`，会校验本次新增/修改文件的可读性、非空、size 和 sha256。
 
 ### 4.5 长耗时 Verify
 
@@ -738,7 +744,7 @@ tests/fixtures/
 5. 缓存清理策略。已完成第一版，支持 dry-run / apply、按 source/repo id 过滤和 keep-list。
 6. memory promotion 命令。
 7. 自动生成部署产物包。
-8. CI benchmark。
+8. CI benchmark。已完成第一版 benchmark CLI；Playwright browser smoke 已提供手动 GitHub Actions workflow，后续再扩展为完整 CI matrix。
 
 验收：
 
