@@ -16,6 +16,12 @@
   - verify 只有在初始响应或 follow-up 响应包含当前 trace id 时才判定 `http_trace_response=pass`，不会因为 event_id 存在就误判成功。
   - Benchmark cases 从 21 个扩展到 22 个，新增 `gradio_queue_call_followup`。
   - 定向单测与 benchmark 已通过，覆盖 `/call/predict` 和 follow-up trace 证据。
+- 五阶段优化任务 - 阶段 3：
+  - `VerifyModule` 新增 `artifact_download_validation` check，对本次 trace 后新增或修改的文件产物做可读性、非空、size 和 sha256 校验。
+  - `artifact_freshness` 仍记录本次文件变化，但不再单独作为强通过证据；真正的 artifact 强证据必须来自 `artifact_download_validation=pass`。
+  - 空文件、不可读文件或非文件变化会记录为 invalid artifact，并阻止 verify 误判成功。
+  - Benchmark cases 从 22 个扩展到 23 个，新增 `artifact_download_validation`。
+  - 定向单测与 benchmark 已通过，覆盖非空产物通过和空产物拒绝。
 - 继续执行 P0/P1 优化任务：
   - `ModelCache.reserve` 会为缓存目录写入 `.auto_harness_asset.json`，记录 source、repo id、revision、origin、asset id 和 cache key。
   - `ModelCache.entries()` 会读取缓存元数据，返回 repo id、revision、origin，便于后续审计和精细清理。
@@ -102,8 +108,7 @@
 ### 下一步
 
 1. 增加真实 Playwright smoke test 文档和可选 CI job，在安装 Playwright 的环境中验证浏览器 backend。
-2. 增加文件产物下载验证。
-3. 增加 Git LFS 检测和下载准备，覆盖权重在 Git 仓库/LFS 中的项目。
+2. 增加 Git LFS 检测和下载准备，覆盖权重在 Git 仓库/LFS 中的项目。
 
 ## 2026-07-03
 

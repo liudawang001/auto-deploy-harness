@@ -969,6 +969,50 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(result.status, "uncertain")
             self.assertEqual(checks["artifact_freshness"]["status"], "uncertain")
 
+    def test_verify_validates_new_download_artifact(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            repo = run_dir / "workspace" / "repo"
+            repo.mkdir(parents=True)
+
+            def fake_urlopen(req, timeout):
+                (repo / "outputs" / "image.png").parent.mkdir(parents=True, exist_ok=True)
+                (repo / "outputs" / "image.png").write_bytes(b"fake image bytes")
+                return FakeHttpResponse("ok without trace")
+
+            result = VerifyModule(urlopen=fake_urlopen).verify(
+                run_dir,
+                analysis={"verify_hint": {"endpoint": "http://127.0.0.1:8000/generate"}},
+                runner_result={"pid": 1234, "expected_port": 8000, "service_ready": True},
+            )
+            checks = {check["name"]: check for check in result.data["checks"]}
+            self.assertEqual(result.status, "passed")
+            self.assertEqual(checks["artifact_download_validation"]["status"], "pass")
+            validated = checks["artifact_download_validation"]["evidence"]["validated"]
+            self.assertEqual(validated[0]["path"], "outputs/image.png")
+            self.assertEqual(validated[0]["size_bytes"], len(b"fake image bytes"))
+            self.assertEqual(len(validated[0]["sha256"]), 64)
+
+    def test_verify_rejects_empty_new_artifact(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            repo = run_dir / "workspace" / "repo"
+            repo.mkdir(parents=True)
+
+            def fake_urlopen(req, timeout):
+                (repo / "outputs").mkdir(exist_ok=True)
+                (repo / "outputs" / "empty.txt").write_bytes(b"")
+                return FakeHttpResponse("ok without trace")
+
+            result = VerifyModule(urlopen=fake_urlopen).verify(
+                run_dir,
+                analysis={"verify_hint": {"endpoint": "http://127.0.0.1:8000/generate"}},
+                runner_result={"pid": 1234, "expected_port": 8000, "service_ready": True},
+            )
+            checks = {check["name"]: check for check in result.data["checks"]}
+            self.assertEqual(result.status, "uncertain")
+            self.assertEqual(checks["artifact_download_validation"]["status"], "fail")
+
     def test_verify_browser_dom_probe_can_pass_with_trace(self):
         def fake_urlopen(req, timeout):
             return FakeHttpResponse("http response without trace")
@@ -1048,6 +1092,7 @@ class CoreTests(unittest.TestCase):
         self.assertIn("operator_repair_approval", ids)
         self.assertIn("service_exits_after_start", ids)
         self.assertIn("stale_artifact_ignored", ids)
+        self.assertIn("artifact_download_validation", ids)
         self.assertIn("gradio_api_shape_variation", ids)
         self.assertIn("gradio_queue_call_followup", ids)
         self.assertIn("token_missing_diagnosis", ids)
@@ -1058,7 +1103,7 @@ class CoreTests(unittest.TestCase):
     def test_benchmark_runner_executes_all_fixture_cases(self):
         report = BenchmarkRunner().run(Path("tests/fixtures/benchmarks/manifest.json"))
         self.assertEqual(report["status"], "passed")
-        self.assertEqual(len(report["cases"]), 22)
+        self.assertEqual(len(report["cases"]), 23)
         self.assertTrue(all(case["status"] == "passed" for case in report["cases"]))
 
     def test_benchmark_cli_writes_output(self):

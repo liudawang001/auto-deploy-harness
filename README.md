@@ -19,7 +19,7 @@ AI-Auto-Harness 是一个面向 AI 开源 demo 项目的自动部署与验证 Ag
 - 安全默认的 `env_deploy`、`runner`、`verify`、report 模块。
 - Mock LLM provider 和讯飞 Anthropic-compatible provider。
 - Claude Code executor wrapper。
-- HTTP trace evidence：`verify` 支持 GET 和 POST JSON；响应必须证明当前 trace 被处理，HTTP 200 本身不算成功。
+- HTTP trace evidence：`verify` 支持 GET 和 POST JSON；响应必须证明当前 trace 被处理，HTTP 200 本身不算成功；文件产物证据必须可读、非空并记录 size/sha256。
 - 可选 Claude Code analyzer advisor：通过 `AUTO_HARNESS_USE_AGENT_ANALYZER=1` 启用。
 - 仓库内置 skill：位于 `skills/*/SKILL.md`，按阶段选择并记录 hash。
 - 结构化问题记忆：位于 `memory/deployment_issues.jsonl`，用于检索历史相似失败。
@@ -226,6 +226,7 @@ PYTHONPATH=src python3 -m auto_harness.cli benchmark --manifest tests/fixtures/b
 - Streamlit HTTP 200 错误页面不能通过 verify。
 - HTTP 200 但无当前 trace 不能判定成功。
 - 历史 artifact 不能作为本次 verify 的新鲜证据。
+- 本次 trace 后产生的新文件产物必须可读、非空并记录 sha256 后，才能作为 artifact 强证据。
 - 服务进程启动后快速退出不能判定为启动成功。
 - token 缺失或 401 日志会被诊断为 `auth_required`。
 - token 缺失时 report 只展示 `HF_TOKEN` / `MODELSCOPE_TOKEN` 等变量名，不记录密钥值。

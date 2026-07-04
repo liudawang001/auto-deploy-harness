@@ -1,4 +1,5 @@
 import json
+import hashlib
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -25,11 +26,12 @@ class VerifyModule:
         evidence_dir = run_dir / "evidence"
         evidence_dir.mkdir(parents=True, exist_ok=True)
         verify_workspace = run_dir / "workspace" / "verify_workspace"
-        before = snapshot_files(run_dir / "workspace" / "repo")
+        repo_dir = run_dir / "workspace" / "repo"
+        before = snapshot_files(repo_dir)
         http_evidence = self._execute_http_trace(trace_id, service, analysis, evidence_dir)
-        after = snapshot_files(run_dir / "workspace" / "repo")
+        after = snapshot_files(repo_dir)
         changed = diff_snapshot(before, after)
-        checks = self._artifact_checks(changed)
+        checks = self._artifact_checks(repo_dir, changed)
         if http_evidence:
             checks.append(http_evidence["check"])
         streamlit_evidence = self._execute_streamlit_probe(trace_id, service, analysis, evidence_dir)
@@ -372,22 +374,66 @@ class VerifyModule:
         candidates = service.get("endpoint_candidates") or []
         return candidates[0] if candidates else None
 
-    def _artifact_checks(self, changed_files: List[str]) -> List[Dict]:
+    def _artifact_checks(self, repo_dir: Path, changed_files: List[str]) -> List[Dict]:
+        validated = []
+        invalid = []
+        for rel_path in changed_files:
+            path = repo_dir / rel_path
+            try:
+                if not path.is_file():
+                    invalid.append({"path": rel_path, "reason": "not a file"})
+                    continue
+                size = path.stat().st_size
+                if size <= 0:
+                    invalid.append({"path": rel_path, "reason": "empty file"})
+                    continue
+                validated.append({
+                    "path": rel_path,
+                    "size_bytes": size,
+                    "sha256": self._sha256_file(path),
+                })
+            except OSError as exc:
+                invalid.append({"path": rel_path, "reason": str(exc)})
+        if validated:
+            validation_status = "pass"
+            validation_reason = "new artifact files are readable and non-empty"
+        elif changed_files:
+            validation_status = "fail"
+            validation_reason = "changed artifact files were empty, missing, or unreadable"
+        else:
+            validation_status = "uncertain"
+            validation_reason = "no new artifact files were observed"
         return [
             {
                 "name": "artifact_freshness",
                 "status": "pass" if changed_files else "uncertain",
                 "evidence": changed_files,
                 "reason": "new or changed files after trace execution are required for strong pass",
+            },
+            {
+                "name": "artifact_download_validation",
+                "status": validation_status,
+                "evidence": {
+                    "validated": validated,
+                    "invalid": invalid,
+                },
+                "reason": validation_reason,
             }
         ]
+
+    def _sha256_file(self, path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as file:
+            for chunk in iter(lambda: file.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
 
     def _can_pass(self, service: Dict, checks: List[Dict]) -> bool:
         if not service.get("process_alive"):
             return False
         if any(check.get("status") == "fail" for check in checks):
             return False
-        strong_pass_names = {"artifact_freshness", "http_trace_response", "browser_dom_probe"}
+        strong_pass_names = {"artifact_download_validation", "http_trace_response", "browser_dom_probe"}
         return any(
             check.get("name") in strong_pass_names and check.get("status") == "pass"
             for check in checks

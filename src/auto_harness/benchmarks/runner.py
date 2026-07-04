@@ -100,6 +100,8 @@ class BenchmarkRunner:
                 return self._case_service_exits_after_start(case)
             if case_id == "stale_artifact_ignored":
                 return self._case_stale_artifact_ignored(case)
+            if case_id == "artifact_download_validation":
+                return self._case_artifact_download_validation(case)
             if case_id == "gradio_api_shape_variation":
                 return self._case_gradio_api_shape_variation(case)
             if case_id == "gradio_queue_call_followup":
@@ -400,6 +402,33 @@ class BenchmarkRunner:
         checks = {check["name"]: check for check in result.data["checks"]}
         ok = result.status == "uncertain" and checks["artifact_freshness"]["status"] == "uncertain"
         return self._result(case, "passed" if ok else "failed", "stale artifact did not pass verify")
+
+    def _case_artifact_download_validation(self, case: Dict) -> Dict:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            repo = run_dir / "workspace" / "repo"
+            repo.mkdir(parents=True)
+
+            def fake_urlopen(req, timeout):
+                (repo / "outputs").mkdir(exist_ok=True)
+                (repo / "outputs" / "result.bin").write_bytes(b"generated artifact")
+                return _FakeResponse("ok without current trace")
+
+            result = VerifyModule(urlopen=fake_urlopen).verify(
+                run_dir,
+                analysis={"verify_hint": {"endpoint": "http://127.0.0.1:8000/generate"}},
+                runner_result={"pid": 1234, "expected_port": 8000, "service_ready": True},
+            )
+        checks = {check["name"]: check for check in result.data["checks"]}
+        validation = checks.get("artifact_download_validation", {})
+        evidence = validation.get("evidence", {})
+        ok = (
+            result.status == "passed"
+            and validation.get("status") == "pass"
+            and evidence.get("validated", [{}])[0].get("path") == "outputs/result.bin"
+            and len(evidence.get("validated", [{}])[0].get("sha256", "")) == 64
+        )
+        return self._result(case, "passed" if ok else "failed", "artifact download validation verified")
 
     def _case_gradio_api_shape_variation(self, case: Dict) -> Dict:
         captured = {}

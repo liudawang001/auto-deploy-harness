@@ -835,5 +835,6 @@ src/auto_harness/
 完成缓存式模型准备，
 启动服务，
 通过 Gradio API 发送 trace，
+验证 trace 响应或可读非空文件产物，
 并生成完整 evidence/report。
 ```
