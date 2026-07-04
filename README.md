@@ -27,8 +27,8 @@ AI-Auto-Harness 是一个面向 AI 开源 demo 项目的自动部署与验证 Ag
 - `model_prepare` 阶段：生成模型资产 manifest、缓存 key 和 `model_cache` 路径；执行模式下支持 Hugging Face / ModelScope 文件清单解析、断点续传、sha256 校验字段和缓存写入。
 - `verify` 增强：支持 Gradio `/config` discovery 和 Streamlit DOM/HTML 证据探测。
 - 日志规则分类器：对缺依赖、CUDA OOM、磁盘不足、token 权限、wheel 构建失败等常见错误生成结构化诊断。
-- Repair plan：失败或 uncertain 阶段会生成结构化修复建议，经过 policy 校验后写入受控 repair artifacts；当前不会直接执行 shell 或修改源码。
-- Benchmark fixtures：`tests/fixtures/benchmarks` 覆盖下载续传、缓存命中、Streamlit 错误页面和 HTTP 200 false-positive 防护。
+- Repair plan：失败或 uncertain 阶段会生成结构化修复建议，经过 policy 校验后写入受控 repair artifacts；下一次 `resume` 会在 policy 允许时把安装建议和 verify hint 回灌到 pipeline 输入，但仍不会绕过 `--execute`、命令白名单或源码修改限制。
+- Benchmark fixtures：`tests/fixtures/benchmarks` 覆盖下载续传、缓存命中、Gradio `/config` discovery、Streamlit 错误页面、HTTP 200 false-positive 防护、repair policy 拒绝和 checksum 失败。
 - 开发进度报告：`docs/progress.md`。
 
 ## 快速开始
@@ -153,8 +153,25 @@ PYTHONPATH=src python3 -m auto_harness.cli benchmark --manifest tests/fixtures/b
 
 - 模型下载断点续传。
 - 缓存命中避免重复下载。
+- Gradio `/config` discovery 构造 `/api/predict` trace 请求。
 - Streamlit HTTP 200 错误页面不能通过 verify。
 - HTTP 200 但无当前 trace 不能判定成功。
+- 权限不足时 repair action 被 policy 拒绝。
+- 模型文件 checksum 不一致时下载失败，不写入成功缓存态。
+
+## Repair Overlay
+
+失败或不确定阶段会写入：
+
+```text
+runs/<task-id>/repairs/
+```
+
+其中可能包含 `repair_install_plan.json`、`repair_verify_hints.json`、`required_env_vars.json` 和 `repair_apply_result.json`。下一次 `resume` 时，`RepairOverlay` 只消费 policy 已允许的非执行型 artifact：
+
+- 将 `repair_install_plan.json` 中的命令追加到 `env_deploy` 的 install plan，真正执行仍需要 `--execute --allow-install` 和命令白名单通过。
+- 将 `repair_verify_hints.json` 合并到 `verify_hint`，用于修正 endpoint、请求路径或 POST JSON 模板。
+- 如果 repair 被拒绝，overlay 不会生效，只保留审计记录。
 
 ## 安全默认值
 

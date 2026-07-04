@@ -7,6 +7,8 @@ from auto_harness.assets import HuggingFaceDownloader, ModelCache
 from auto_harness.assets.manifest import ModelAsset
 from auto_harness.models.base import write_json
 from auto_harness.modules.verify import VerifyModule
+from auto_harness.models.task import RuntimePolicy
+from auto_harness.repair import RepairPolicy
 from auto_harness.verify import StreamlitVerifier
 
 
@@ -57,6 +59,12 @@ class BenchmarkRunner:
                 return self._case_streamlit_error_page(case, fixture_dir)
             if case_id == "verify_false_positive_http_200":
                 return self._case_verify_false_positive(case, fixture_dir)
+            if case_id == "gradio_config_discovery":
+                return self._case_gradio_config_discovery(case)
+            if case_id == "repair_policy_reject":
+                return self._case_repair_policy_reject(case)
+            if case_id == "checksum_failure":
+                return self._case_checksum_failure(case)
             return self._result(case, "skipped", "unknown benchmark case")
         except Exception as exc:  # noqa: BLE001 - benchmark report should continue
             return self._result(case, "failed", str(exc))
@@ -124,6 +132,68 @@ class BenchmarkRunner:
             )
         ok = result.status == "uncertain"
         return self._result(case, "passed" if ok else "failed", "HTTP 200 without trace did not pass")
+
+    def _case_gradio_config_discovery(self, case: Dict) -> Dict:
+        captured = {}
+
+        def fake_urlopen(req, timeout):
+            if req.full_url.endswith("/config"):
+                return _FakeResponse(json.dumps({
+                    "dependencies": [
+                        {"id": 2, "api_name": "predict", "backend_fn": True}
+                    ]
+                }))
+            captured["url"] = req.full_url
+            captured["body"] = req.data.decode("utf-8")
+            trace = json.loads(captured["body"])["data"][0]
+            return _FakeResponse("handled %s" % trace)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / "workspace" / "repo").mkdir(parents=True)
+            result = VerifyModule(urlopen=fake_urlopen).verify(
+                run_dir,
+                analysis={"frameworks": ["gradio"], "verify_hint": {"endpoint": "http://127.0.0.1:7860"}},
+                runner_result={"pid": 1234, "expected_port": 7860, "service_ready": True},
+            )
+        ok = (
+            result.status == "passed"
+            and captured.get("url") == "http://127.0.0.1:7860/api/predict"
+            and json.loads(captured.get("body", "{}")).get("fn_index") == 2
+        )
+        return self._result(case, "passed" if ok else "failed", "Gradio /config request discovery verified")
+
+    def _case_repair_policy_reject(self, case: Dict) -> Dict:
+        policy = RepairPolicy().check(
+            {
+                "actions": [
+                    {
+                        "type": "install_package",
+                        "requires": {"dependency_install": True},
+                        "payload": {"package": "gradio"},
+                    }
+                ]
+            },
+            RuntimePolicy(workspace_root="/tmp/auto-harness-benchmark", allow_dependency_install=False),
+        )
+        ok = not policy["allowed"] and policy["decisions"][0]["reasons"]
+        return self._result(case, "passed" if ok else "failed", "repair policy rejected dependency install")
+
+    def _case_checksum_failure(self, case: Dict) -> Dict:
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = ModelCache(Path(tmp) / "model_cache")
+            asset = cache.reserve(ModelAsset(asset_id="huggingface:org/demo", source="huggingface", repo_id="org/demo"))
+
+            def fake_urlopen(req, timeout):
+                if "/api/models/" in req.full_url:
+                    return _FakeResponse(json.dumps([
+                        {"type": "file", "path": "config.json", "size": 3, "sha256": "0" * 64}
+                    ]))
+                return _FakeResponse(b"abc", status=200)
+
+            result = HuggingFaceDownloader(urlopen=fake_urlopen, token="", chunk_size=1).download(asset)
+        ok = result.status == "failed" and "sha256 mismatch" in (result.last_error or "")
+        return self._result(case, "passed" if ok else "failed", "checksum mismatch failed the download")
 
     def _result(self, case: Dict, status: str, reason: str) -> Dict:
         return {

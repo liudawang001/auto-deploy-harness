@@ -19,6 +19,21 @@
       "id": "verify_false_positive_http_200",
       "purpose": "验证 HTTP 200 但没有当前 trace 时不能判定成功",
       "expected_signal": "verify status remains uncertain"
+    },
+    {
+      "id": "gradio_config_discovery",
+      "purpose": "验证 Gradio /config discovery 能构造正确 POST trace 请求",
+      "expected_signal": "request is sent to /api/predict with fn_index"
+    },
+    {
+      "id": "repair_policy_reject",
+      "purpose": "验证权限不足时 repair action 会被 policy 拒绝",
+      "expected_signal": "policy allowed is false"
+    },
+    {
+      "id": "checksum_failure",
+      "purpose": "验证模型文件 checksum 不一致时不会进入缓存成功态",
+      "expected_signal": "download status becomes failed with sha256 mismatch"
     }
   ]
 }

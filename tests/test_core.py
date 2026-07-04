@@ -26,7 +26,7 @@ from auto_harness.providers import Message, MockLLMProvider
 from auto_harness.skills import SkillRegistry
 from auto_harness.state import StateStore
 from auto_harness.orchestrator import TaskRunner
-from auto_harness.repair import RepairPlanner
+from auto_harness.repair import RepairApplier, RepairOverlay, RepairPlanner, RepairPolicy
 from auto_harness.utils.time import utc_now_iso
 
 
@@ -430,6 +430,54 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(plan["actions"][0]["type"], "install_package")
         self.assertEqual(plan["actions"][0]["payload"]["package"], "gradio")
 
+    def test_repair_policy_rejects_dependency_install_without_permission(self):
+        result = RepairPolicy().check(
+            {
+                "actions": [
+                    {
+                        "type": "install_package",
+                        "requires": {"dependency_install": True},
+                        "payload": {"package": "gradio"},
+                    }
+                ]
+            },
+            RuntimePolicy(workspace_root="/tmp/demo", allow_dependency_install=False),
+        )
+        self.assertFalse(result["allowed"])
+        self.assertIn("dependency install is not allowed", result["decisions"][0]["reasons"])
+
+    def test_repair_overlay_merges_allowed_artifacts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            plan = {
+                "actions": [
+                    {
+                        "type": "install_package",
+                        "requires": {"dependency_install": True},
+                        "payload": {"package": "gradio"},
+                    },
+                    {
+                        "type": "update_verify_hint",
+                        "requires": {"source_edit": False},
+                        "payload": {
+                            "endpoint": "http://127.0.0.1:7860",
+                            "request": {"method": "POST", "path": "/api/predict", "json": {"data": ["{{trace_id}}"]}},
+                        },
+                    },
+                ]
+            }
+            policy = {"allowed": True, "decisions": [{"allowed": True}, {"allowed": True}]}
+            RepairApplier().apply(run_dir, plan, policy)
+            overlay = RepairOverlay().load(run_dir)
+            merged = RepairOverlay().merge_analysis(
+                {"install_plan": [["python3", "-m", "venv", ".venv"]], "verify_hint": {}},
+                overlay,
+            )
+            self.assertTrue(overlay["active"])
+            self.assertIn([".venv/bin/python", "-m", "pip", "install", "gradio"], merged["install_plan"])
+            self.assertEqual(merged["verify_hint"]["endpoint"], "http://127.0.0.1:7860")
+            self.assertEqual(merged["verify_hint"]["request"]["path"], "/api/predict")
+
     def test_verify_streamlit_dom_probe_can_pass_with_trace(self):
         def fake_urlopen(req, timeout):
             if "_auto_harness_trace=" in req.full_url:
@@ -506,11 +554,14 @@ class CoreTests(unittest.TestCase):
         ids = {case["id"] for case in manifest["cases"]}
         self.assertIn("model_download_resume", ids)
         self.assertIn("verify_false_positive_http_200", ids)
+        self.assertIn("gradio_config_discovery", ids)
+        self.assertIn("repair_policy_reject", ids)
+        self.assertIn("checksum_failure", ids)
 
     def test_benchmark_runner_executes_all_fixture_cases(self):
         report = BenchmarkRunner().run(Path("tests/fixtures/benchmarks/manifest.json"))
         self.assertEqual(report["status"], "passed")
-        self.assertEqual(len(report["cases"]), 4)
+        self.assertEqual(len(report["cases"]), 7)
         self.assertTrue(all(case["status"] == "passed" for case in report["cases"]))
 
     def test_benchmark_cli_writes_output(self):

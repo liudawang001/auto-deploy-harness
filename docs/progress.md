@@ -4,6 +4,12 @@
 
 ### 已完成
 
+- 继续执行 P0/P1 优化任务：
+  - 新增 `RepairOverlay`，可读取 policy 允许后生成的 repair artifacts。
+  - 下一次 `run_existing` / `resume` 会把 `repair_install_plan.json` 合并到 `env_deploy` 的 install plan，把 `repair_verify_hints.json` 合并到 `verify_hint`。
+  - Overlay 只改变阶段输入，不直接执行 shell，不绕过 `--execute`、RuntimePolicy 或命令白名单；被拒绝的 repair artifact 不会生效。
+  - Benchmark cases 从 4 个扩展到 7 个，新增 Gradio `/config` discovery、repair policy reject、checksum failure。
+  - 单测扩展到 31 个，覆盖 repair overlay 合并、policy reject 和新增 benchmark cases。
 - 继续执行 P0 优化任务：
   - 新增 `BenchmarkRunner`，可读取 `tests/fixtures/benchmarks/manifest.json` 并执行本地 benchmark cases。
   - 新增 CLI 子命令 `benchmark`，支持 `--manifest` 和 `--output`。
@@ -27,9 +33,9 @@
 ### 下一步
 
 1. 增加 Playwright 或其他 browser backend，用于 Streamlit/Gradio 的真实交互验证。
-2. 实现 repair apply 的下一阶段：在 policy 允许时，把 repair artifact 合并进 rerun pipeline。
-3. 增强下载器并发、etag 强一致校验和缓存清理策略。
-4. 扩展 benchmark cases，加入 Gradio `/config`、repair policy 拒绝、模型 checksum 失败等场景。
+2. 增强下载器并发、etag 强一致校验和缓存清理策略。
+3. 增加 repair loop 的受控重试次数、rerun_from 安全回退和人工审批入口。
+4. 扩展 benchmark cases：服务启动后退出、历史 artifact 干扰、Gradio API shape 变化、token 缺失。
 
 ## 2026-07-03
 
