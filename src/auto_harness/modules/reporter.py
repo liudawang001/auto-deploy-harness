@@ -6,7 +6,7 @@ from auto_harness.models.result import StageResult
 
 
 class ReportGenerator:
-    def generate(self, run_dir: Path, task: Dict, results: Dict[str, Dict]) -> StageResult:
+    def generate(self, run_dir: Path, task: Dict, results: Dict[str, Dict], execution_audit: Dict = None) -> StageResult:
         report_path = run_dir / "reports" / "report.md"
         report_path.parent.mkdir(parents=True, exist_ok=True)
         lines = [
@@ -43,6 +43,18 @@ class ReportGenerator:
                 "- Next action: `%s`" % verify.get("next_action", ""),
                 "",
             ])
+        execution_audit = execution_audit or self._read_optional(run_dir / "reports" / "execution_audit.json")
+        if isinstance(execution_audit, dict) and execution_audit:
+            lines.extend([
+                "## Execution Audit",
+                "",
+                "- Requested start stage: `%s`" % execution_audit.get("requested_start_stage", ""),
+                "- Effective start stage: `%s`" % execution_audit.get("effective_start_stage", ""),
+                "- Fallback applied: `%s`" % str(bool(execution_audit.get("fallback_applied"))).lower(),
+                "- Reused stages: %s" % self._format_stage_list(execution_audit.get("reused_stages") or []),
+                "- Rerun stages: %s" % self._format_stage_list(execution_audit.get("rerun_stages") or []),
+                "",
+            ])
         required_env = self._required_env_vars(run_dir, results)
         if required_env:
             lines.extend([
@@ -56,6 +68,10 @@ class ReportGenerator:
             lines.append("")
         report_path.write_text("\n".join(lines), encoding="utf-8")
         return StageResult("report", "passed", "report generated", {"report_path": str(report_path)}, evidence=[str(report_path)])
+
+    def _format_stage_list(self, stages) -> str:
+        names = [stage for stage in stages if isinstance(stage, str) and stage]
+        return ", ".join("`%s`" % stage for stage in names) or "`none`"
 
     def _required_env_vars(self, run_dir: Path, results: Dict[str, Dict]) -> List[str]:
         names = set()

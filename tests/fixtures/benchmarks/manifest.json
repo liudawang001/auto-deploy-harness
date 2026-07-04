@@ -96,6 +96,11 @@
       "expected_signal": "only verify and report are rerun when rerun_from_effective is verify"
     },
     {
+      "id": "repair_resume_audit_report",
+      "purpose": "验证 resume 阶段跳转会生成执行审计摘要并写入 report",
+      "expected_signal": "report lists reused stages and rerun stages"
+    },
+    {
       "id": "token_report_required_env",
       "purpose": "验证 token 缺失时 report 只展示所需变量名，不记录密钥值",
       "expected_signal": "report includes HF_TOKEN name and excludes token values"

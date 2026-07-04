@@ -7,7 +7,7 @@ from auto_harness.assets import HuggingFaceDownloader, ModelCache
 from auto_harness.assets.manifest import ModelAsset
 from auto_harness.config import HarnessConfig
 from auto_harness.diagnostics import LogClassifier
-from auto_harness.models.base import write_json
+from auto_harness.models.base import read_json, write_json
 from auto_harness.modules.reporter import ReportGenerator
 from auto_harness.modules.runner import RunnerModule
 from auto_harness.modules.verify import VerifyModule
@@ -106,6 +106,8 @@ class BenchmarkRunner:
                 return self._case_token_missing_diagnosis(case)
             if case_id == "repair_resume_stage_jump":
                 return self._case_repair_resume_stage_jump(case)
+            if case_id == "repair_resume_audit_report":
+                return self._case_repair_resume_audit_report(case)
             if case_id == "token_report_required_env":
                 return self._case_token_report_required_env(case)
             return self._result(case, "skipped", "unknown benchmark case")
@@ -461,6 +463,40 @@ class BenchmarkRunner:
                 and all(after.get(stage, 0) == before.get(stage, 0) for stage in ("analyze", "resource_plan", "env_deploy", "model_prepare", "runner"))
             )
         return self._result(case, "passed" if ok else "failed", "repair resume stage jump verified")
+
+    def _case_repair_resume_audit_report(self, case: Dict) -> Dict:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            (repo / "app.py").write_text("import gradio as gr\n", encoding="utf-8")
+            runner = TaskRunner(HarnessConfig(
+                runs_dir=str(root / "runs"),
+                memory_dir=str(root / "memory"),
+                model_cache_dir=str(root / "model_cache"),
+            ))
+            task_id = runner.deploy(str(repo), "demo", dry_run=True)
+            run_dir = root / "runs" / task_id
+            repair_dir = run_dir / "repairs"
+            repair_dir.mkdir(exist_ok=True)
+            write_json(repair_dir / "repair_apply_result.json", {
+                "status": "applied",
+                "policy": {"allowed": True, "loop": {"rerun_from_effective": "verify"}},
+            })
+            write_json(repair_dir / "repair_verify_hints.json", {
+                "verify_hints": [{"endpoint": "http://127.0.0.1:9"}],
+            })
+            runner.resume(task_id, dry_run=True)
+            audit = read_json(run_dir / "reports" / "execution_audit.json")
+            report = (run_dir / "reports" / "report.md").read_text(encoding="utf-8")
+            ok = (
+                audit.get("effective_start_stage") == "verify"
+                and audit.get("reused_stages") == ["analyze", "resource_plan", "env_deploy", "model_prepare", "runner"]
+                and audit.get("rerun_stages") == ["verify", "report"]
+                and "## Execution Audit" in report
+                and "- Rerun stages: `verify`, `report`" in report
+            )
+        return self._result(case, "passed" if ok else "failed", "repair resume audit report verified")
 
     def _case_token_report_required_env(self, case: Dict) -> Dict:
         with tempfile.TemporaryDirectory() as tmp:

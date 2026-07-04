@@ -1016,12 +1016,13 @@ class CoreTests(unittest.TestCase):
         self.assertIn("gradio_api_shape_variation", ids)
         self.assertIn("token_missing_diagnosis", ids)
         self.assertIn("repair_resume_stage_jump", ids)
+        self.assertIn("repair_resume_audit_report", ids)
         self.assertIn("token_report_required_env", ids)
 
     def test_benchmark_runner_executes_all_fixture_cases(self):
         report = BenchmarkRunner().run(Path("tests/fixtures/benchmarks/manifest.json"))
         self.assertEqual(report["status"], "passed")
-        self.assertEqual(len(report["cases"]), 20)
+        self.assertEqual(len(report["cases"]), 21)
         self.assertTrue(all(case["status"] == "passed" for case in report["cases"]))
 
     def test_benchmark_cli_writes_output(self):
@@ -1188,6 +1189,14 @@ class CoreTests(unittest.TestCase):
             self.assertTrue(any(stage == "report" for stage, _ in new_events))
             pipeline = json.loads((run_dir / "reports" / "pipeline_results.json").read_text(encoding="utf-8"))
             self.assertEqual(pipeline["verify"]["data"]["repair_overlay"]["verify_hint_count"], 1)
+            audit = json.loads((run_dir / "reports" / "execution_audit.json").read_text(encoding="utf-8"))
+            self.assertEqual(audit["effective_start_stage"], "verify")
+            self.assertIn("runner", audit["reused_stages"])
+            self.assertEqual(audit["rerun_stages"], ["verify", "report"])
+            report = (run_dir / "reports" / "report.md").read_text(encoding="utf-8")
+            self.assertIn("## Execution Audit", report)
+            self.assertIn("- Reused stages: `analyze`, `resource_plan`, `env_deploy`, `model_prepare`, `runner`", report)
+            self.assertIn("- Rerun stages: `verify`, `report`", report)
 
     def test_resume_falls_back_when_previous_stage_results_are_missing(self):
         with tempfile.TemporaryDirectory() as tmp:

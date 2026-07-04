@@ -29,6 +29,7 @@ AI-Auto-Harness 是一个面向 AI 开源 demo 项目的自动部署与验证 Ag
 - 日志规则分类器：对缺依赖、CUDA OOM、磁盘不足、token 权限、wheel 构建失败等常见错误生成结构化诊断；token 权限问题只提取所需环境变量名，不记录密钥值。
 - Report 会汇总 `resource_plan`、diagnosis 和 repair plan 中的 token 变量名，提示 operator/secret manager 注入，报告中不保存任何 token value。
 - Repair loop：失败或 uncertain 阶段会生成结构化修复建议，经过 policy 和 loop gate 校验后写入受控 repair artifacts；同一问题有最大尝试次数，不安全的 `rerun_from` 会回退到安全阶段，`resume` 会按 `rerun_from_effective` 从安全阶段重跑，需要人工确认的 action 可通过 `repair-approve` 批准。
+- Resume execution audit：当 repair resume 从中间阶段恢复时，会生成 `reports/execution_audit.json`，并在报告中展示复用阶段、重跑阶段和 fallback 信息。
 - Benchmark fixtures：`tests/fixtures/benchmarks` 覆盖下载续传、缓存命中、并发下载、etag 缓存失效、缓存清理、按来源/repo/keep-list 清理、服务启动后退出、历史 artifact 干扰、Gradio API shape 变化、token 缺失、token report 提示、Gradio `/config` discovery、浏览器 DOM trace、Streamlit 错误页面、HTTP 200 false-positive 防护、repair policy 拒绝、repair loop 限流、repair resume 阶段跳转、人工审批和 checksum 失败。
 - 开发进度报告：`docs/progress.md`。
 
@@ -248,6 +249,7 @@ runs/<task-id>/repairs/
 - 如果 repair 被 policy、attempt limit 或人工审批要求拒绝，overlay 不会生效，只保留审计记录。
 - 如果 plan 中的 `rerun_from` 不在安全阶段集合中，loop 会记录 `rerun_from_requested`，并生成 `rerun_from_effective` 作为安全回退阶段。
 - `resume` 会读取已允许的 `repair_apply_result.json`，从 `rerun_from_effective` 开始重跑，并复用该阶段之前的 `reports/*_result.json` / `pipeline_results.json`。如果前置结果缺失或损坏，会记录 `resume_stage_fallback` 事件并回退到 `analyze`。
+- 中间阶段恢复会额外写入 `reports/execution_audit.json` 和 `resume_execution_plan` 事件，最终报告的 `Execution Audit` 小节会列出 reused stages、rerun stages、requested/effective start stage，便于面试或生产复盘解释本次恢复执行为什么没有全量重跑。
 
 人工审批入口：
 

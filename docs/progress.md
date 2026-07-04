@@ -4,6 +4,12 @@
 
 ### 已完成
 
+- 五阶段优化任务 - 阶段 1：
+  - `TaskRunner.run_existing` 在 repair resume 中间阶段恢复时生成 `reports/execution_audit.json`，记录 requested/effective start stage、dry-run 标记、复用阶段、重跑阶段和 fallback 状态。
+  - 新增 `resume_execution_plan` 事件，便于后续从 `events.jsonl` 审计本次恢复执行为什么从某个阶段开始。
+  - `ReportGenerator` 新增 `Execution Audit` 小节，展示 reused stages / rerun stages，避免 report 只给阶段结果而无法解释 resume 行为。
+  - Benchmark cases 从 20 个扩展到 21 个，新增 `repair_resume_audit_report`。
+  - 定向单测与 benchmark 已通过，覆盖 report 审计摘要和阶段跳转审计文件。
 - 继续执行 P0/P1 优化任务：
   - `ModelCache.reserve` 会为缓存目录写入 `.auto_harness_asset.json`，记录 source、repo id、revision、origin、asset id 和 cache key。
   - `ModelCache.entries()` 会读取缓存元数据，返回 repo id、revision、origin，便于后续审计和精细清理。
@@ -90,9 +96,8 @@
 ### 下一步
 
 1. 增加真实 Playwright smoke test 文档和可选 CI job，在安装 Playwright 的环境中验证浏览器 backend。
-2. 增加 repair resume 的执行审计摘要，在 report 中展示本次 resume 复用了哪些 stage、重跑了哪些 stage。
-3. 扩展 Gradio verify 对 queue `/call/<api_name>` 的支持，并增加文件产物下载验证。
-4. 增加 Git LFS 检测和下载准备，覆盖权重在 Git 仓库/LFS 中的项目。
+2. 扩展 Gradio verify 对 queue `/call/<api_name>` 的支持，并增加文件产物下载验证。
+3. 增加 Git LFS 检测和下载准备，覆盖权重在 Git 仓库/LFS 中的项目。
 
 ## 2026-07-03
 

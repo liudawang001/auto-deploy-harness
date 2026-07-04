@@ -117,9 +117,14 @@ class TaskRunner:
         task = self.store.load_task(task_id)
         run_dir = self.store.run_dir(task_id)
         repo_dir = run_dir / "workspace" / "repo"
+        requested_start_stage = start_stage
         start_stage = self._normalize_start_stage(task_id, start_stage)
         start_index = self.PIPELINE_STAGES.index(start_stage)
         results: Dict[str, Dict] = {} if start_stage == "analyze" else self._load_previous_results(run_dir)
+        execution_audit = self._execution_audit(requested_start_stage, start_stage, dry_run)
+        if execution_audit:
+            write_json(run_dir / "reports" / "execution_audit.json", execution_audit)
+            self.store.events(task_id).append("task", "resume_execution_plan", execution_audit)
 
         def should_run(stage: str) -> bool:
             return self.PIPELINE_STAGES.index(stage) >= start_index
@@ -204,7 +209,7 @@ class TaskRunner:
         self._remember(task_id, "verify", verify_result, effective_analysis)
 
         task_data = read_json(run_dir / "task.json")
-        report_result = ReportGenerator().generate(run_dir, task_data, results)
+        report_result = ReportGenerator().generate(run_dir, task_data, results, execution_audit=execution_audit)
         results["report"] = to_plain(report_result)
         self._save_stage(task_id, "report", report_result)
         state = self.store.load_state(task_id)
@@ -302,6 +307,20 @@ class TaskRunner:
             if isinstance(result, dict):
                 results[stage] = result
         return results
+
+    def _execution_audit(self, requested_start_stage: str, effective_start_stage: str, dry_run: bool) -> Dict:
+        if requested_start_stage == "analyze" and effective_start_stage == "analyze":
+            return {}
+        start_index = self.PIPELINE_STAGES.index(effective_start_stage)
+        return {
+            "requested_start_stage": requested_start_stage,
+            "effective_start_stage": effective_start_stage,
+            "dry_run": dry_run,
+            "reused_stages": list(self.PIPELINE_STAGES[:start_index]),
+            "rerun_stages": list(self.PIPELINE_STAGES[start_index:]),
+            "fallback_applied": requested_start_stage != effective_start_stage,
+            "generated_at": utc_now_iso(),
+        }
 
     def _read_optional(self, path: Path):
         if not path.exists():
