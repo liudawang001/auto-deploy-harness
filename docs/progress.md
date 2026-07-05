@@ -5,6 +5,11 @@
 ### 已完成
 
 - 下一阶段优化任务：
+  - 新增 `DeploymentPackageExporter`，可为单个 run 导出 tar.gz 审计产物包，并生成同名 `.manifest.json`。
+  - CLI 新增 `package --task-id <id> --output <path> --include-logs`；默认输出到 `dist/packages/<task-id>.tar.gz`。
+  - 产物包默认包含 `task.json`、`state.json`、`events.jsonl`、`reports/`、`evidence/` 和 `repairs/`，记录每个文件 size/sha256，默认排除 `workspace/`、模型缓存和日志，避免大文件或环境敏感信息进入交付物。
+  - Benchmark cases 从 43 个扩展到 44 个，新增 `deployment_package_export`。
+- 下一阶段优化任务：
   - 新增 `DeploymentQueue` 本地持久化任务队列，队列项写入 `queue/items/*.json`，记录 repo、dry-run/execute 策略、GPU 需求、优先级、attempt、task_id、错误和时间戳。
   - CLI 新增 `queue submit/list/run`：submit 只入队，run 由显式前台 worker 消费任务；默认仍是 dry-run，不会安装依赖或启动服务。
   - `queue run --max-jobs` 支持一次消费多个队列项；`--require-gpu` 与 `--gpu-slots` 支持在无 GPU slot 时跳过 GPU 任务，避免普通 Mac 开发机误跑 GPU 部署。
@@ -141,13 +146,13 @@
 4. Git LFS 检测：识别 LFS pointer 和 `.gitattributes`，缺 `git-lfs` 时进入诊断态，并给出准备命令。
 5. Playwright smoke 治理：补齐真实浏览器 backend 的本地 smoke 文档和手动 CI workflow。
 
-按 `docs/optimization-roadmap.md` 的“全自动开源模型部署 Agent”目标估算，当前总项目进度约为 **93%**。
+按 `docs/optimization-roadmap.md` 的“全自动开源模型部署 Agent”目标估算，当前总项目进度约为 **94%**。
 
 估算依据：
 
 - 已完成约 95% 的 P0/P1 核心控制链路：下载缓存、断点续传、verify 防误判、OpenAPI/OpenAI-compatible verify、repair plan/policy/resume、memory promotion 审批与回归、benchmark 回归体系已经成型。
-- 已完成约 90% 的真实开源模型部署能力：Hugging Face / ModelScope 下载、Git LFS / submodule 检测与受控准备、Gradio/Streamlit/browser verify、PyTorch CPU/CUDA wheel 求解、GPU 包兼容矩阵、本地 E2E fixture matrix、Docker GPU/cache backend、静态 dashboard 和本地持久化队列已具备，但真实联网/真实大模型端到端矩阵仍需扩大。
-- 尚未完成的关键 7% 主要是：真实联网长耗时 E2E、真实 Docker/GPU smoke、真实 vLLM 服务 smoke、更多模型仓库源、真正并发 worker pool、真实 GPU 资源探测与分配、自动部署产物包和常驻 Web dashboard。
+- 已完成约 91% 的真实开源模型部署能力：Hugging Face / ModelScope 下载、Git LFS / submodule 检测与受控准备、Gradio/Streamlit/browser verify、PyTorch CPU/CUDA wheel 求解、GPU 包兼容矩阵、本地 E2E fixture matrix、Docker GPU/cache backend、静态 dashboard、本地持久化队列和部署产物包已具备，但真实联网/真实大模型端到端矩阵仍需扩大。
+- 尚未完成的关键 6% 主要是：真实联网长耗时 E2E、真实 Docker/GPU smoke、真实 vLLM 服务 smoke、更多模型仓库源、真正并发 worker pool、真实 GPU 资源探测与分配和常驻 Web dashboard。
 - 继续执行 P0/P1 优化任务：
   - `ModelCache.reserve` 会为缓存目录写入 `.auto_harness_asset.json`，记录 source、repo id、revision、origin、asset id 和 cache key。
   - `ModelCache.entries()` 会读取缓存元数据，返回 repo id、revision、origin，便于后续审计和精细清理。

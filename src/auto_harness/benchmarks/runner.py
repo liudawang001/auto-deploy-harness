@@ -1,8 +1,10 @@
 import json
+import tarfile
 import tempfile
 from pathlib import Path
 from typing import Dict, List
 
+from auto_harness.artifacts import DeploymentPackageExporter
 from auto_harness.assets import GitLFSDetector, GitSubmoduleDetector, HuggingFaceDownloader, ModelCache
 from auto_harness.assets.manifest import ModelAsset
 from auto_harness.config import HarnessConfig
@@ -186,6 +188,8 @@ class BenchmarkRunner:
                 return self._case_static_dashboard_export(case)
             if case_id == "deployment_queue_dry_run":
                 return self._case_deployment_queue_dry_run(case)
+            if case_id == "deployment_package_export":
+                return self._case_deployment_package_export(case)
             return self._result(case, "skipped", "unknown benchmark case")
         except Exception as exc:  # noqa: BLE001 - benchmark report should continue
             return self._result(case, "failed", str(exc))
@@ -1419,6 +1423,37 @@ class BenchmarkRunner:
                 and (config.runs_path / task_id / "reports" / "pipeline_results.json").exists()
             )
         return self._result(case, "passed" if ok else "failed", "deployment queue dry-run scheduling verified")
+
+    def _case_deployment_package_export(self, case: Dict) -> Dict:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            (repo / "README.md").write_text("FastAPI package demo", encoding="utf-8")
+            (repo / "app.py").write_text("print('package')\n", encoding="utf-8")
+            config = HarnessConfig(
+                runs_dir=str(root / "runs"),
+                memory_dir=str(root / "memory"),
+                model_cache_dir=str(root / "model_cache"),
+                task_queue_dir=str(root / "queue"),
+            )
+            task_id = TaskRunner(config).deploy(str(repo), "package-demo", dry_run=True)
+            output = root / "deployment-package.tar.gz"
+            result = DeploymentPackageExporter().export(config.runs_path / task_id, output)
+            with tarfile.open(output, "r:gz") as tar:
+                names = tar.getnames()
+            manifest = read_json(Path(result["manifest_path"]))
+            ok = (
+                result.get("status") == "generated"
+                and output.exists()
+                and manifest.get("package_sha256") == result.get("package_sha256")
+                and ("%s/task.json" % task_id) in names
+                and ("%s/state.json" % task_id) in names
+                and ("%s/deployment_package_manifest.json" % task_id) in names
+                and any(name.startswith("%s/reports/" % task_id) for name in names)
+                and not any("/workspace/" in name for name in names)
+            )
+        return self._result(case, "passed" if ok else "failed", "deployment package export verified")
 
     def _stage_update_count(self, run_dir: Path) -> Dict[str, int]:
         counts: Dict[str, int] = {}

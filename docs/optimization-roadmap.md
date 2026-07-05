@@ -783,7 +783,7 @@ PYTHONPATH=src python3 -m auto_harness.cli live-smoke-plan --execution-backend d
 4. GPU 调度。已完成 `--require-gpu` 标记和 `--gpu-slots` 跳过策略；后续接入真实 GPU 资源探测与分配。
 5. 缓存清理策略。已完成第一版，支持 dry-run / apply、按 source/repo id 过滤和 keep-list。
 6. memory promotion 命令。已完成第二版，支持生成 human-review proposal、显式 apply 到目标 skill，并在 apply 后自动运行绑定 benchmark 子集。
-7. 自动生成部署产物包。
+7. 自动生成部署产物包。已完成第一版 `package --task-id`，生成 tar.gz 审计包和 sidecar manifest，默认包含 task/state/events/reports/evidence/repairs，排除 workspace、模型缓存和日志。
 8. CI benchmark。已完成第一版 benchmark CLI；Playwright browser smoke 已提供手动 GitHub Actions workflow，后续再扩展为完整 CI matrix。
 
 验收：

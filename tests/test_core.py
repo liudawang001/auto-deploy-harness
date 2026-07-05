@@ -2,6 +2,7 @@ import json
 import hashlib
 import io
 import os
+import tarfile
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -1803,11 +1804,12 @@ class CoreTests(unittest.TestCase):
         self.assertIn("token_report_required_env", ids)
         self.assertIn("static_dashboard_export", ids)
         self.assertIn("deployment_queue_dry_run", ids)
+        self.assertIn("deployment_package_export", ids)
 
     def test_benchmark_runner_executes_all_fixture_cases(self):
         report = BenchmarkRunner().run(Path("tests/fixtures/benchmarks/manifest.json"))
         self.assertEqual(report["status"], "passed")
-        self.assertEqual(len(report["cases"]), 43)
+        self.assertEqual(len(report["cases"]), 44)
         self.assertTrue(all(case["status"] == "passed" for case in report["cases"]))
 
     def test_benchmark_cli_writes_output(self):
@@ -1929,6 +1931,50 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(run["started"], 1)
             self.assertEqual(run["results"][0]["status"], "completed")
             self.assertTrue((root / "runs" / run["results"][0]["task_id"] / "reports" / "pipeline_results.json").exists())
+
+    def test_package_cli_exports_deployment_audit_bundle(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            (repo / "README.md").write_text("FastAPI demo", encoding="utf-8")
+            (repo / "app.py").write_text("print('package')\n", encoding="utf-8")
+            config_path = root / "config.json"
+            config_path.write_text(json.dumps({
+                "runs_dir": str(root / "runs"),
+                "memory_dir": str(root / "memory"),
+                "model_cache_dir": str(root / "model_cache"),
+                "task_queue_dir": str(root / "queue"),
+            }), encoding="utf-8")
+            old_config = os.environ.get("AUTO_HARNESS_CONFIG")
+            os.environ["AUTO_HARNESS_CONFIG"] = str(config_path)
+            try:
+                deploy_out = io.StringIO()
+                with redirect_stdout(deploy_out):
+                    deploy_code = cli_main(["deploy", "--repo", str(repo), "--name", "package-demo", "--dry-run"])
+                task_id = deploy_out.getvalue().strip().splitlines()[-1]
+                output_path = root / "package.tar.gz"
+                package_out = io.StringIO()
+                with redirect_stdout(package_out):
+                    package_code = cli_main(["package", "--task-id", task_id, "--output", str(output_path)])
+                package_result = json.loads(package_out.getvalue())
+            finally:
+                if old_config is None:
+                    os.environ.pop("AUTO_HARNESS_CONFIG", None)
+                else:
+                    os.environ["AUTO_HARNESS_CONFIG"] = old_config
+            self.assertEqual(deploy_code, 0)
+            self.assertEqual(package_code, 0)
+            self.assertEqual(package_result["status"], "generated")
+            self.assertTrue(output_path.exists())
+            self.assertTrue(Path(package_result["manifest_path"]).exists())
+            with tarfile.open(output_path, "r:gz") as tar:
+                names = tar.getnames()
+            self.assertIn("%s/task.json" % task_id, names)
+            self.assertIn("%s/state.json" % task_id, names)
+            self.assertIn("%s/deployment_package_manifest.json" % task_id, names)
+            self.assertTrue(any(name.startswith("%s/reports/" % task_id) for name in names))
+            self.assertFalse(any("/workspace/" in name for name in names))
 
     def test_live_smoke_planner_generates_optional_network_matrix(self):
         plan = LiveSmokePlanner().plan(include_long_running=True, execution_backend="docker")

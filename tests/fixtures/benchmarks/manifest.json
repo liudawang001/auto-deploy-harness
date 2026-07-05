@@ -214,6 +214,11 @@
       "id": "deployment_queue_dry_run",
       "purpose": "验证本地持久化任务队列可以入队、列出并前台消费 dry-run 部署任务",
       "expected_signal": "queued job becomes completed and writes pipeline_results"
+    },
+    {
+      "id": "deployment_package_export",
+      "purpose": "验证部署任务可以导出不包含 workspace 的审计产物包和 manifest",
+      "expected_signal": "tar.gz contains task/state/reports/evidence manifest and excludes workspace"
     }
   ]
 }

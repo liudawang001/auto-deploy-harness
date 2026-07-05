@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 
 from auto_harness.config import HarnessConfig
+from auto_harness.artifacts import DeploymentPackageExporter
 from auto_harness.benchmarks import BenchmarkRunner, LiveSmokePlanner
 from auto_harness.dashboard import DashboardGenerator
 from auto_harness.memory import MemoryPromoter
@@ -53,6 +54,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     report = sub.add_parser("report", help="print report path")
     report.add_argument("--task-id", required=True)
+
+    package = sub.add_parser("package", help="export a deployment audit package for one task")
+    package.add_argument("--task-id", required=True)
+    package.add_argument("--output", default="")
+    package.add_argument("--include-logs", action="store_true", default=False)
 
     repair_approve = sub.add_parser("repair-approve", help="approve the latest repair plan for a task")
     repair_approve.add_argument("--task-id", required=True)
@@ -183,6 +189,16 @@ def main(argv=None) -> int:
         if state.report_path and Path(state.report_path).exists():
             print(Path(state.report_path).read_text(encoding="utf-8"))
         return 0
+
+    if args.command == "package":
+        output = Path(args.output) if args.output else Path("dist") / "packages" / ("%s.tar.gz" % args.task_id)
+        result = DeploymentPackageExporter().export(
+            runner.store.run_dir(args.task_id),
+            output,
+            include_logs=args.include_logs,
+        )
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0 if result.get("status") == "generated" else 2
 
     if args.command == "repair-approve":
         approval = runner.approve_repair(args.task_id, note=args.note)
