@@ -1,4 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import os
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -17,6 +18,7 @@ class DeploymentQueue:
     def __init__(self, queue_dir: Path, runner: TaskRunner, gpu_probe: GpuResourceProbe = None) -> None:
         self.queue_dir = ensure_dir(Path(queue_dir))
         self.items_dir = ensure_dir(self.queue_dir / "items")
+        self.locks_dir = ensure_dir(self.queue_dir / "locks")
         self.runner = runner
         self.gpu_probe = gpu_probe or GpuResourceProbe()
 
@@ -80,7 +82,11 @@ class DeploymentQueue:
             if item.get("require_gpu") and used_gpu >= effective_gpu_slots:
                 skipped.append({"job_id": item["job_id"], "reason": "gpu slot unavailable"})
                 continue
-            selected.append(item)
+            claimed = self._claim_item(item)
+            if not claimed:
+                skipped.append({"job_id": item["job_id"], "reason": "job already claimed"})
+                continue
+            selected.append(claimed)
             if item.get("require_gpu"):
                 used_gpu += 1
             if len(selected) >= max(1, max_jobs):
@@ -110,11 +116,6 @@ class DeploymentQueue:
         return [indexed_results[index] for index in range(len(items))]
 
     def _run_item(self, item: Dict) -> Dict:
-        item["status"] = "running"
-        item["attempts"] = int(item.get("attempts") or 0) + 1
-        item["started_at"] = utc_now_iso()
-        item["updated_at"] = item["started_at"]
-        self._write(item)
         try:
             task_id = self.runner.deploy(
                 item["repo_url"],
@@ -134,7 +135,9 @@ class DeploymentQueue:
             item["error"] = str(exc)
             item["failed_at"] = utc_now_iso()
             item["updated_at"] = item["failed_at"]
-        self._write(item)
+        finally:
+            self._write(item)
+            self._release_lock(item)
         return {
             "job_id": item["job_id"],
             "status": item["status"],
@@ -142,6 +145,30 @@ class DeploymentQueue:
             "attempts": item.get("attempts", 0),
             "error": item.get("error", ""),
         }
+
+    def _claim_item(self, item: Dict) -> Optional[Dict]:
+        lock_path = self._lock_path(item["job_id"])
+        try:
+            fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            return None
+        try:
+            os.write(fd, ("pid=%s\nclaimed_at=%s\n" % (os.getpid(), utc_now_iso())).encode("utf-8"))
+        finally:
+            os.close(fd)
+        current = self._read_item(item["job_id"])
+        if not current or current.get("status") != "queued":
+            self._release_lock({"job_id": item["job_id"]})
+            return None
+        now = utc_now_iso()
+        current["status"] = "running"
+        current["attempts"] = int(current.get("attempts") or 0) + 1
+        current["started_at"] = now
+        current["updated_at"] = now
+        current["claim"] = {"pid": os.getpid(), "claimed_at": now, "lock_path": str(lock_path)}
+        current["_lock_path"] = str(lock_path)
+        self._write(current)
+        return current
 
     def _queued_items(self) -> List[Dict]:
         return [item for item in self._items() if item.get("status") == "queued"]
@@ -158,7 +185,30 @@ class DeploymentQueue:
         return sorted(items, key=lambda item: (int(item.get("priority") or 100), item.get("created_at") or ""))
 
     def _write(self, item: Dict) -> None:
-        write_json(self.items_dir / ("%s.json" % item["job_id"]), item)
+        public_item = {key: value for key, value in item.items() if not key.startswith("_")}
+        write_json(self._item_path(item["job_id"]), public_item)
+
+    def _read_item(self, job_id: str) -> Optional[Dict]:
+        path = self._item_path(job_id)
+        if not path.exists():
+            return None
+        try:
+            return read_json(path)
+        except (OSError, ValueError):
+            return None
+
+    def _item_path(self, job_id: str) -> Path:
+        return self.items_dir / ("%s.json" % job_id)
+
+    def _lock_path(self, job_id: str) -> Path:
+        return self.locks_dir / ("%s.lock" % job_id)
+
+    def _release_lock(self, item: Dict) -> None:
+        lock_path = Path(item.get("_lock_path") or self._lock_path(item["job_id"]))
+        try:
+            lock_path.unlink()
+        except FileNotFoundError:
+            pass
 
     def _status_counts(self, items: List[Dict]) -> Dict[str, int]:
         counts: Dict[str, int] = {}

@@ -195,6 +195,8 @@ class BenchmarkRunner:
                 return self._case_queue_parallel_worker_pool(case)
             if case_id == "queue_gpu_probe_scheduling":
                 return self._case_queue_gpu_probe_scheduling(case)
+            if case_id == "queue_claim_lock_prevents_duplicate":
+                return self._case_queue_claim_lock_prevents_duplicate(case)
             return self._result(case, "skipped", "unknown benchmark case")
         except Exception as exc:  # noqa: BLE001 - benchmark report should continue
             return self._result(case, "failed", str(exc))
@@ -1513,6 +1515,30 @@ class BenchmarkRunner:
                 and listed.get("status_counts", {}).get("queued") == 1
             )
         return self._result(case, "passed" if ok else "failed", "queue GPU probe scheduling verified")
+
+    def _case_queue_claim_lock_prevents_duplicate(self, case: Dict) -> Dict:
+        class FakeRunner:
+            def __init__(self):
+                self.calls = []
+
+            def deploy(self, repo_url, name, dry_run=True, skip_clone=False, allow_install=False, allow_start=False):
+                self.calls.append(name)
+                return "task_%s" % name
+
+        with tempfile.TemporaryDirectory() as tmp:
+            runner = FakeRunner()
+            queue = DeploymentQueue(Path(tmp) / "queue", runner)
+            submitted = queue.submit("local://locked", name="locked")
+            queue._lock_path(submitted["job_id"]).write_text("pid=other\n", encoding="utf-8")
+            result = queue.run_next(max_jobs=1)
+            listed = queue.list()
+            ok = (
+                result.get("started") == 0
+                and result.get("skipped", [{}])[0].get("reason") == "job already claimed"
+                and listed.get("status_counts", {}).get("queued") == 1
+                and runner.calls == []
+            )
+        return self._result(case, "passed" if ok else "failed", "queue claim lock duplicate prevention verified")
 
     def _stage_update_count(self, run_dir: Path) -> Dict[str, int]:
         counts: Dict[str, int] = {}

@@ -229,6 +229,11 @@
       "id": "queue_gpu_probe_scheduling",
       "purpose": "验证队列 worker 未显式传入 gpu-slots 时可以使用 GPU 资源探测结果调度 GPU 任务",
       "expected_signal": "one GPU slot runs one GPU job and leaves the next GPU job queued"
+    },
+    {
+      "id": "queue_claim_lock_prevents_duplicate",
+      "purpose": "验证多 worker 场景下队列 claim lock 能阻止同一个 queued job 被重复执行",
+      "expected_signal": "locked queued job is skipped and remains queued without runner calls"
     }
   ]
 }

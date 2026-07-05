@@ -1809,11 +1809,12 @@ class CoreTests(unittest.TestCase):
         self.assertIn("deployment_package_export", ids)
         self.assertIn("queue_parallel_worker_pool", ids)
         self.assertIn("queue_gpu_probe_scheduling", ids)
+        self.assertIn("queue_claim_lock_prevents_duplicate", ids)
 
     def test_benchmark_runner_executes_all_fixture_cases(self):
         report = BenchmarkRunner().run(Path("tests/fixtures/benchmarks/manifest.json"))
         self.assertEqual(report["status"], "passed")
-        self.assertEqual(len(report["cases"]), 46)
+        self.assertEqual(len(report["cases"]), 47)
         self.assertTrue(all(case["status"] == "passed" for case in report["cases"]))
 
     def test_benchmark_cli_writes_output(self):
@@ -1998,6 +1999,27 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(result["started"], 1)
             self.assertEqual(result["skipped"][0]["reason"], "gpu slot unavailable")
             self.assertEqual(result["results"][0]["task_id"], "task_gpu-one")
+
+    def test_deployment_queue_claim_lock_prevents_duplicate_run(self):
+        class FakeRunner:
+            def __init__(self):
+                self.calls = []
+
+            def deploy(self, repo_url, name, dry_run=True, skip_clone=False, allow_install=False, allow_start=False):
+                self.calls.append(name)
+                return "task_%s" % name
+
+        with tempfile.TemporaryDirectory() as tmp:
+            runner = FakeRunner()
+            queue = DeploymentQueue(Path(tmp) / "queue", runner)
+            submitted = queue.submit("local://locked", name="locked")
+            queue._lock_path(submitted["job_id"]).write_text("pid=other\n", encoding="utf-8")
+            result = queue.run_next(max_jobs=1)
+            listed = queue.list()
+            self.assertEqual(result["started"], 0)
+            self.assertEqual(result["skipped"][0]["reason"], "job already claimed")
+            self.assertEqual(listed["status_counts"]["queued"], 1)
+            self.assertEqual(runner.calls, [])
 
     def test_package_cli_exports_deployment_audit_bundle(self):
         with tempfile.TemporaryDirectory() as tmp:
