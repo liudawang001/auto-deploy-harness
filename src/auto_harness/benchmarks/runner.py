@@ -3,7 +3,7 @@ import tempfile
 from pathlib import Path
 from typing import Dict, List
 
-from auto_harness.assets import GitLFSDetector, HuggingFaceDownloader, ModelCache
+from auto_harness.assets import GitLFSDetector, GitSubmoduleDetector, HuggingFaceDownloader, ModelCache
 from auto_harness.assets.manifest import ModelAsset
 from auto_harness.config import HarnessConfig
 from auto_harness.diagnostics import LogClassifier
@@ -114,6 +114,8 @@ class BenchmarkRunner:
                 return self._case_git_lfs_prepare_execute(case)
             if case_id == "git_lfs_progress_parse":
                 return self._case_git_lfs_progress_parse(case)
+            if case_id == "git_submodule_prepare_execute":
+                return self._case_git_submodule_prepare_execute(case)
             if case_id == "docker_backend_plan":
                 return self._case_docker_backend_plan(case)
             if case_id == "env_solve_legacy_gradio_constraints":
@@ -569,6 +571,45 @@ class BenchmarkRunner:
             and result.data.get("git_lfs", {}).get("progress", {}).get("percent") == 100
         )
         return self._result(case, "passed" if ok else "failed", "Git LFS progress parsing verified")
+
+    def _case_git_submodule_prepare_execute(self, case: Dict) -> Dict:
+        calls = []
+
+        def fake_runner(cmd, cwd, timeout_seconds=900):
+            calls.append(cmd)
+            return CommandResult(cmd, str(cwd), 0, "ok", "", False)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            repo.mkdir()
+            (repo / ".gitmodules").write_text(
+                '[submodule "extensions/foo"]\n'
+                "\tpath = extensions/foo\n"
+                "\turl = https://github.com/example/foo.git\n",
+                encoding="utf-8",
+            )
+            resource = ResourcePlanner(git_submodule_detector=GitSubmoduleDetector(available=True)).plan(repo, {"frameworks": []})
+            run_dir = Path(tmp) / "run"
+            (run_dir / "reports").mkdir(parents=True)
+            result = ModelPrepareModule(ModelCache(Path(tmp) / "cache"), command_runner=fake_runner).prepare(
+                run_dir,
+                resource.data,
+                execute=True,
+                repo_dir=repo,
+                allowed_commands=["git"],
+            )
+        submodules = result.data.get("git_submodules", {})
+        ok = (
+            resource.status == "passed"
+            and resource.data.get("git_submodules", {}).get("submodule_count") == 1
+            and result.status == "passed"
+            and submodules.get("status") == "ready"
+            and calls == [
+                ["git", "submodule", "sync", "--recursive"],
+                ["git", "submodule", "update", "--init", "--recursive"],
+            ]
+        )
+        return self._result(case, "passed" if ok else "failed", "Git submodule controlled preparation verified")
 
     def _case_docker_backend_plan(self, case: Dict) -> Dict:
         with tempfile.TemporaryDirectory() as tmp:

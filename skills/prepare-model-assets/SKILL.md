@@ -15,7 +15,8 @@ description: 规划和准备开源模型资产。用于 resource_plan 和 model_
 2. Python 代码中的 `from_pretrained("org/model")`。
 3. `snapshot_download(repo_id="org/model")`。
 4. Git LFS 权重文件，例如 `.safetensors`、`.bin`、`.ckpt`。
-5. 配置文件中的 model id、checkpoint path、revision。
+5. `.gitmodules` 中的外部子仓库，例如 webui extension、模型资产索引或 vendor 代码。
+6. 配置文件中的 model id、checkpoint path、revision。
 
 ## 资源判断
 
@@ -28,6 +29,7 @@ description: 规划和准备开源模型资产。用于 resource_plan 和 model_
 - 是否可能需要 GPU/CUDA。
 - 是否支持 resume。
 - 缓存路径和 cache key。
+- 是否依赖 Git LFS 或 Git submodule，以及对应准备命令。
 
 ## 安全边界
 
@@ -46,5 +48,6 @@ description: 规划和准备开源模型资产。用于 resource_plan 和 model_
 - 文件清单包含 `sha256` 时，下载后必须校验 sha256。
 - 进度写入 stage result 和 `state.json`。
 - Git LFS 执行阶段应解析 `git lfs pull` 输出中的百分比、文件数和字节数，写入 `git_lfs.progress` 与 stage progress，便于长耗时拉取期间恢复和审计。
+- Git submodule 应在 `resource_plan.git_submodules` 中记录 name、path、url、branch、initialized 和准备命令；真实执行只能在 `model_prepare` 且 `git` 通过命令白名单后运行 `git submodule sync --recursive` 与 `git submodule update --init --recursive`。
 
 当前已支持并发下载、etag 缓存失效和受控缓存清理。sha256 只在远端清单提供该字段时可用，不要假定所有模型文件都有 checksum。

@@ -101,6 +101,11 @@
       "expected_signal": "git_lfs progress includes percent, files_done, files_total and bytes"
     },
     {
+      "id": "git_submodule_prepare_execute",
+      "purpose": "验证 .gitmodules 会被资源规划识别，执行模式下子模块初始化必须通过 git 白名单并写入 model_prepare 证据",
+      "expected_signal": "git submodule sync/update are executed only when git is allowed"
+    },
+    {
       "id": "docker_backend_plan",
       "purpose": "验证 Docker backend 会为 env_deploy 和 runner 生成受控 docker run 命令，且执行仍受白名单保护",
       "expected_signal": "effective commands start with docker and execution is rejected when docker is not allowed"

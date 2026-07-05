@@ -17,7 +17,7 @@ from auto_harness.diagnostics import LogClassifier
 from auto_harness.models.task import ProjectSpec, RuntimePolicy, TaskSpec
 from auto_harness.agents.base import AgentResult
 from auto_harness.memory import MemoryPromoter, MemoryStore
-from auto_harness.assets import GitLFSDetector, GitLFSProgressParser, ModelCache, ModelAssetDetector, ModelFileSelector
+from auto_harness.assets import GitLFSDetector, GitLFSProgressParser, GitSubmoduleDetector, ModelCache, ModelAssetDetector, ModelFileSelector
 from auto_harness.modules.analyzer import ProjectAnalyzer
 from auto_harness.modules.env_deploy import EnvDeployModule
 from auto_harness.modules.env_solve import EnvSolveModule
@@ -755,6 +755,37 @@ class CoreTests(unittest.TestCase):
             self.assertTrue(result.data["git_lfs"]["prepare_commands"])
             self.assertIn("Git LFS model files detected", result.data["risk_reasons"])
 
+    def test_git_submodule_detector_reads_gitmodules(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / ".gitmodules").write_text(
+                '[submodule "extensions/foo"]\n'
+                "\tpath = extensions/foo\n"
+                "\turl = https://github.com/example/foo.git\n"
+                "\tbranch = main\n",
+                encoding="utf-8",
+            )
+            result = GitSubmoduleDetector(available=True).detect(repo)
+            self.assertTrue(result["required"])
+            self.assertEqual(result["submodule_count"], 1)
+            self.assertEqual(result["submodules"][0]["path"], "extensions/foo")
+            self.assertEqual(result["submodules"][0]["url"], "https://github.com/example/foo.git")
+            self.assertFalse(result["submodules"][0]["initialized"])
+            self.assertEqual(result["prepare_commands"][1], ["git", "submodule", "update", "--init", "--recursive"])
+
+    def test_resource_planner_includes_git_submodules(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / ".gitmodules").write_text(
+                '[submodule "webui"]\n\tpath = vendor/webui\n\turl = https://github.com/example/webui.git\n',
+                encoding="utf-8",
+            )
+            result = ResourcePlanner(git_submodule_detector=GitSubmoduleDetector(available=True)).plan(repo, {"frameworks": []})
+            self.assertEqual(result.status, "passed")
+            self.assertEqual(result.data["risk_level"], "medium")
+            self.assertEqual(result.data["git_submodules"]["submodule_count"], 1)
+            self.assertIn("Git submodules detected", result.data["risk_reasons"])
+
     def test_env_solve_adds_legacy_gradio_constraints(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
@@ -957,6 +988,73 @@ class CoreTests(unittest.TestCase):
             )
             self.assertEqual(result.status, "failed")
             self.assertEqual(result.data["git_lfs"]["diagnosis"]["category"], "command_rejected")
+            self.assertIn("disallowed command", result.error)
+
+    def test_model_prepare_executes_git_submodules_when_allowed(self):
+        calls = []
+
+        def fake_runner(cmd, cwd, timeout_seconds=900):
+            calls.append((cmd, str(cwd), timeout_seconds))
+            return CommandResult(cmd, str(cwd), 0, "ok", "", False)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            repo = run_dir / "workspace" / "repo"
+            repo.mkdir(parents=True)
+            (run_dir / "reports").mkdir(parents=True)
+            module = ModelPrepareModule(ModelCache(Path(tmp) / "cache"), command_runner=fake_runner)
+            result = module.prepare(
+                run_dir,
+                {
+                    "model_assets": [],
+                    "git_submodules": {
+                        "required": True,
+                        "available": True,
+                        "submodule_count": 1,
+                        "submodules": [{"path": "vendor/webui", "url": "https://github.com/example/webui.git"}],
+                        "prepare_commands": [
+                            ["git", "submodule", "sync", "--recursive"],
+                            ["git", "submodule", "update", "--init", "--recursive"],
+                        ],
+                    },
+                },
+                execute=True,
+                repo_dir=repo,
+                allowed_commands=["git"],
+                timeout_seconds=11,
+            )
+            self.assertEqual(result.status, "passed")
+            self.assertEqual(result.summary, "git submodule assets prepared")
+            self.assertEqual([call[0] for call in calls], [
+                ["git", "submodule", "sync", "--recursive"],
+                ["git", "submodule", "update", "--init", "--recursive"],
+            ])
+            self.assertEqual(calls[0][2], 11)
+            self.assertEqual(result.data["git_submodules"]["status"], "ready")
+            self.assertEqual(result.data["progress"]["status"], "git_submodule_ready")
+
+    def test_model_prepare_rejects_git_submodules_when_command_not_allowed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            repo = run_dir / "workspace" / "repo"
+            repo.mkdir(parents=True)
+            (run_dir / "reports").mkdir(parents=True)
+            result = ModelPrepareModule(ModelCache(Path(tmp) / "cache")).prepare(
+                run_dir,
+                {
+                    "model_assets": [],
+                    "git_submodules": {
+                        "required": True,
+                        "available": True,
+                        "prepare_commands": [["git", "submodule", "update", "--init", "--recursive"]],
+                    },
+                },
+                execute=True,
+                repo_dir=repo,
+                allowed_commands=["python3"],
+            )
+            self.assertEqual(result.status, "failed")
+            self.assertEqual(result.data["git_submodules"]["diagnosis"]["category"], "command_rejected")
             self.assertIn("disallowed command", result.error)
 
     def test_git_lfs_progress_parser_extracts_percent_and_bytes(self):
@@ -1649,6 +1747,7 @@ class CoreTests(unittest.TestCase):
         self.assertIn("git_lfs_detection", ids)
         self.assertIn("git_lfs_prepare_execute", ids)
         self.assertIn("git_lfs_progress_parse", ids)
+        self.assertIn("git_submodule_prepare_execute", ids)
         self.assertIn("docker_backend_plan", ids)
         self.assertIn("env_solve_legacy_gradio_constraints", ids)
         self.assertIn("env_solve_torch_cuda_wheel", ids)
@@ -1671,7 +1770,7 @@ class CoreTests(unittest.TestCase):
     def test_benchmark_runner_executes_all_fixture_cases(self):
         report = BenchmarkRunner().run(Path("tests/fixtures/benchmarks/manifest.json"))
         self.assertEqual(report["status"], "passed")
-        self.assertEqual(len(report["cases"]), 38)
+        self.assertEqual(len(report["cases"]), 39)
         self.assertTrue(all(case["status"] == "passed" for case in report["cases"]))
 
     def test_benchmark_cli_writes_output(self):

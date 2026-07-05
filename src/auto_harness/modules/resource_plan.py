@@ -1,18 +1,25 @@
 from pathlib import Path
 from typing import Dict, List
 
-from auto_harness.assets import GitLFSDetector, ModelAssetDetector
+from auto_harness.assets import GitLFSDetector, GitSubmoduleDetector, ModelAssetDetector
 from auto_harness.models.result import StageResult
 
 
 class ResourcePlanner:
-    def __init__(self, detector: ModelAssetDetector = None, git_lfs_detector: GitLFSDetector = None) -> None:
+    def __init__(
+        self,
+        detector: ModelAssetDetector = None,
+        git_lfs_detector: GitLFSDetector = None,
+        git_submodule_detector: GitSubmoduleDetector = None,
+    ) -> None:
         self.detector = detector or ModelAssetDetector()
         self.git_lfs_detector = git_lfs_detector or GitLFSDetector()
+        self.git_submodule_detector = git_submodule_detector or GitSubmoduleDetector()
 
     def plan(self, repo_dir: Path, analysis: Dict) -> StageResult:
         assets = self.detector.detect(repo_dir, analysis)
         git_lfs = self.git_lfs_detector.detect(repo_dir)
+        git_submodules = self.git_submodule_detector.detect(repo_dir)
         frameworks = set(analysis.get("frameworks") or [])
         gpu_required = self._gpu_required(repo_dir, frameworks)
         estimated_disk = self._estimate_disk(assets, frameworks, git_lfs)
@@ -24,18 +31,20 @@ class ResourcePlanner:
             "estimated_vram_gb": 16 if gpu_required else 0,
             "estimated_disk_gb": estimated_disk,
             "external_tokens": self._external_tokens(repo_dir, assets),
-            "risk_level": self._risk_level(gpu_required, estimated_disk, assets, git_lfs),
-            "risk_reasons": self._risk_reasons(gpu_required, assets, git_lfs),
+            "risk_level": self._risk_level(gpu_required, estimated_disk, assets, git_lfs, git_submodules),
+            "risk_reasons": self._risk_reasons(gpu_required, assets, git_lfs, git_submodules),
             "model_assets": [asset.__dict__ for asset in assets],
             "git_lfs": git_lfs,
+            "git_submodules": git_submodules,
         }
-        status = "uncertain" if git_lfs.get("diagnosis") else "passed"
-        if git_lfs.get("diagnosis"):
-            data["diagnosis"] = git_lfs["diagnosis"]
+        diagnosis = git_lfs.get("diagnosis") or git_submodules.get("diagnosis")
+        status = "uncertain" if diagnosis else "passed"
+        if diagnosis:
+            data["diagnosis"] = diagnosis
         return StageResult(
             "resource_plan",
             status,
-            "git lfs required but unavailable" if status == "uncertain" else "resource plan generated",
+            self._summary(git_lfs, git_submodules, status),
             data,
             evidence=[],
         )
@@ -78,14 +87,29 @@ class ResourcePlanner:
             tokens.append("MODELSCOPE_TOKEN")
         return sorted(set(tokens))
 
-    def _risk_level(self, gpu_required: bool, estimated_disk: int, assets: List, git_lfs: Dict = None) -> str:
+    def _risk_level(
+        self,
+        gpu_required: bool,
+        estimated_disk: int,
+        assets: List,
+        git_lfs: Dict = None,
+        git_submodules: Dict = None,
+    ) -> str:
         if gpu_required or estimated_disk >= 20 or assets or (git_lfs or {}).get("required"):
             return "high"
+        if (git_submodules or {}).get("required"):
+            return "medium"
         if estimated_disk >= 8:
             return "medium"
         return "low"
 
-    def _risk_reasons(self, gpu_required: bool, assets: List, git_lfs: Dict = None) -> List[str]:
+    def _risk_reasons(
+        self,
+        gpu_required: bool,
+        assets: List,
+        git_lfs: Dict = None,
+        git_submodules: Dict = None,
+    ) -> List[str]:
         reasons = []
         if gpu_required:
             reasons.append("GPU/CUDA signals detected")
@@ -95,7 +119,21 @@ class ResourcePlanner:
             reasons.append("Git LFS model files detected")
         if (git_lfs or {}).get("diagnosis"):
             reasons.append("git-lfs is not available")
+        if (git_submodules or {}).get("required"):
+            reasons.append("Git submodules detected")
+        if (git_submodules or {}).get("diagnosis"):
+            reasons.append("git is not available for submodule preparation")
         return reasons
+
+    def _summary(self, git_lfs: Dict, git_submodules: Dict, status: str) -> str:
+        if status == "uncertain":
+            if git_lfs.get("diagnosis"):
+                return "git lfs required but unavailable"
+            if git_submodules.get("diagnosis"):
+                return "git submodules required but git is unavailable"
+        if git_submodules.get("required"):
+            return "resource plan generated with git submodules"
+        return "resource plan generated"
 
     def _read_key_text(self, repo_dir: Path) -> str:
         text = ""

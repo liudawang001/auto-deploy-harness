@@ -5,6 +5,11 @@
 ### 已完成
 
 - 下一阶段优化任务：
+  - 新增 `GitSubmoduleDetector`，可解析 `.gitmodules` 中的 submodule name、path、url、branch，并记录目标目录是否已初始化。
+  - `ResourcePlanner` 接入 `git_submodules`，会输出 `prepare_commands`、submodule count 和风险原因；缺少 `git` 时进入 `git_missing` 诊断态。
+  - `ModelPrepareModule` 支持 Git submodule 受控执行，执行模式下按白名单运行 `git submodule sync --recursive` 和 `git submodule update --init --recursive`，命令结果写入 `model_prepare.git_submodules`。
+  - Benchmark cases 从 38 个扩展到 39 个，新增 `git_submodule_prepare_execute`。
+- 下一阶段优化任务：
   - OpenAI-compatible verify 新增 `/v1/models` discovery：当 verify hint 未显式提供 `model` / `model_id` 时，会先读取模型列表并选择第一个 model id。
   - `/v1/chat/completions` 支持 `stream=true` 场景，SSE body 中包含当前 trace 即可作为强证据；evidence 会标记 `response.stream_detected=true`。
   - Benchmark cases 从 37 个扩展到 38 个，新增 `openai_model_discovery_stream_verify`。

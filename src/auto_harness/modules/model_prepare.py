@@ -39,6 +39,7 @@ class ModelPrepareModule:
     ) -> StageResult:
         raw_assets = resource_plan.get("model_assets") or []
         git_lfs_plan = resource_plan.get("git_lfs") if isinstance(resource_plan.get("git_lfs"), dict) else {}
+        git_submodule_plan = resource_plan.get("git_submodules") if isinstance(resource_plan.get("git_submodules"), dict) else {}
         assets = []
         progress = {
             "status": "planned" if raw_assets else "empty",
@@ -54,6 +55,14 @@ class ModelPrepareModule:
 
         git_lfs_result = self._prepare_git_lfs(
             git_lfs_plan,
+            execute=execute,
+            repo_dir=repo_dir or run_dir / "workspace" / "repo",
+            allowed_commands=allowed_commands or [],
+            timeout_seconds=timeout_seconds,
+            progress_callback=update_progress,
+        )
+        git_submodule_result = self._prepare_git_submodules(
+            git_submodule_plan,
             execute=execute,
             repo_dir=repo_dir or run_dir / "workspace" / "repo",
             allowed_commands=allowed_commands or [],
@@ -88,11 +97,9 @@ class ModelPrepareModule:
         manifest_path = run_dir / "reports" / "model_assets_manifest.json"
         write_json(manifest_path, manifest)
         if not assets:
-            status = "failed" if git_lfs_result.get("status") == "failed" else "passed"
-            if git_lfs_result.get("required") and execute and status == "passed":
-                summary = "git lfs model assets prepared"
-            elif git_lfs_result.get("required"):
-                summary = "git lfs model assets planned; pull not executed"
+            status = self._combined_status(git_lfs_result, git_submodule_result, assets, execute)
+            if self._git_repo_assets_required(git_lfs_result, git_submodule_result):
+                summary = self._git_repo_assets_summary(git_lfs_result, git_submodule_result, execute and status == "passed")
             else:
                 summary = "no external model assets detected"
             return StageResult(
@@ -105,19 +112,13 @@ class ModelPrepareModule:
                     "cache": self.cache.summary(),
                     "progress": progress,
                     "git_lfs": git_lfs_result,
+                    "git_submodules": git_submodule_result,
                     "executed": execute,
                 },
                 evidence=[str(manifest_path)],
-                error=git_lfs_result.get("error") if status == "failed" else None,
+                error=self._first_git_error(git_lfs_result, git_submodule_result) if status == "failed" else None,
             )
-        if git_lfs_result.get("status") == "failed":
-            status = "failed"
-        elif execute and any(asset.status == "failed" for asset in assets):
-            status = "failed"
-        elif execute and any(asset.status == "unsupported" for asset in assets):
-            status = "uncertain"
-        else:
-            status = "passed"
+        status = self._combined_status(git_lfs_result, git_submodule_result, assets, execute)
         summary = "model assets prepared" if execute and status == "passed" else "model assets planned; download not executed"
         if execute and status != "passed":
             summary = "model asset preparation incomplete"
@@ -132,9 +133,10 @@ class ModelPrepareModule:
                 "executed": execute,
                 "progress": progress,
                 "git_lfs": git_lfs_result,
+                "git_submodules": git_submodule_result,
             },
             evidence=[str(manifest_path)],
-            error=git_lfs_result.get("error") or (self._first_error(assets) if status != "passed" else None),
+            error=self._first_git_error(git_lfs_result, git_submodule_result) or (self._first_error(assets) if status != "passed" else None),
         )
 
     def _prepare_git_lfs(
@@ -207,6 +209,75 @@ class ModelPrepareModule:
         progress_callback(final_progress)
         return result
 
+    def _prepare_git_submodules(
+        self,
+        plan: Dict,
+        execute: bool,
+        repo_dir: Path,
+        allowed_commands: List[str],
+        timeout_seconds: int,
+        progress_callback,
+    ) -> Dict:
+        if not plan or not plan.get("required"):
+            return {"required": False, "executed": False, "commands": []}
+        commands = plan.get("prepare_commands") or [
+            ["git", "submodule", "sync", "--recursive"],
+            ["git", "submodule", "update", "--init", "--recursive"],
+        ]
+        result = {
+            "required": True,
+            "available": plan.get("available"),
+            "executed": False,
+            "commands": [],
+            "status": "planned",
+            "submodule_count": plan.get("submodule_count", 0),
+            "submodules": plan.get("submodules") or [],
+            "progress": {},
+        }
+        if not execute:
+            return result
+        result["executed"] = True
+        for cmd in commands:
+            progress_callback({"status": "git_submodule_running", "current_file": " ".join(cmd)})
+            if not is_allowed_command(cmd, allowed_commands):
+                result.update({
+                    "status": "failed",
+                    "error": "disallowed command: %s" % (cmd[0] if cmd else ""),
+                    "diagnosis": {
+                        "category": "command_rejected",
+                        "signal": cmd[0] if cmd else "",
+                        "suggested_fix": "allow git command before executing git submodule preparation",
+                        "confidence": 0.9,
+                    },
+                })
+                return result
+            command_result = self.command_runner(cmd, repo_dir, timeout_seconds=timeout_seconds)
+            record = {
+                "cmd": command_result.cmd,
+                "exit_code": command_result.exit_code,
+                "stdout_tail": command_result.stdout[-4000:],
+                "stderr_tail": command_result.stderr[-4000:],
+                "timed_out": command_result.timed_out,
+            }
+            result["commands"].append(record)
+            if command_result.exit_code != 0:
+                diagnosis = self.log_classifier.classify(command_result.stderr + "\n" + command_result.stdout)
+                result.update({
+                    "status": "failed",
+                    "error": command_result.stderr[-2000:] or command_result.stdout[-2000:],
+                    "diagnosis": diagnosis,
+                })
+                return result
+        result["status"] = "ready"
+        final_progress = {
+            "status": "git_submodule_ready",
+            "current_file": "",
+            "submodule_count": result.get("submodule_count", 0),
+        }
+        result["progress"] = final_progress
+        progress_callback(final_progress)
+        return result
+
     def _total_size(self, assets):
         sizes = [asset.expected_size_bytes for asset in assets if asset.expected_size_bytes]
         if not sizes:
@@ -235,3 +306,25 @@ class ModelPrepareModule:
             if asset.last_error:
                 return asset.last_error
         return None
+
+    def _combined_status(self, git_lfs_result: Dict, git_submodule_result: Dict, assets, execute: bool) -> str:
+        if git_lfs_result.get("status") == "failed" or git_submodule_result.get("status") == "failed":
+            return "failed"
+        if execute and any(asset.status == "failed" for asset in assets):
+            return "failed"
+        if execute and any(asset.status == "unsupported" for asset in assets):
+            return "uncertain"
+        return "passed"
+
+    def _git_repo_assets_required(self, git_lfs_result: Dict, git_submodule_result: Dict) -> bool:
+        return bool(git_lfs_result.get("required") or git_submodule_result.get("required"))
+
+    def _git_repo_assets_summary(self, git_lfs_result: Dict, git_submodule_result: Dict, prepared: bool) -> str:
+        if git_lfs_result.get("required") and not git_submodule_result.get("required"):
+            return "git lfs model assets prepared" if prepared else "git lfs model assets planned; pull not executed"
+        if git_submodule_result.get("required") and not git_lfs_result.get("required"):
+            return "git submodule assets prepared" if prepared else "git submodule assets planned; preparation not executed"
+        return "git repository assets prepared" if prepared else "git repository assets planned; preparation not executed"
+
+    def _first_git_error(self, git_lfs_result: Dict, git_submodule_result: Dict):
+        return git_lfs_result.get("error") or git_submodule_result.get("error")

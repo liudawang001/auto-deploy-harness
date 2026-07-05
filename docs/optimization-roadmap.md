@@ -79,7 +79,7 @@ LLM 不能直接绕过 Python policy 执行命令或修改源码。
 - Hugging Face Space 仓库。
 - ModelScope 仓库。
 - Git LFS 项目检测。已完成第一版，支持 `.gitattributes` / pointer 识别、size 估算、缺工具诊断、`git lfs install/pull` 准备命令，以及 `model_prepare` 阶段的白名单受控执行。
-- submodule 检测。
+- submodule 检测。已完成第一版，支持 `.gitmodules` 解析、path/url/branch/initialized 记录、缺 `git` 诊断、`git submodule sync/update` 准备命令，以及 `model_prepare` 阶段的白名单受控执行。
 
 输出：
 
@@ -505,6 +505,7 @@ model_cache/
 - Hugging Face 优先使用官方 snapshot_download 能力。
 - ModelScope 使用官方 SDK 或 HTTP fallback。
 - Git LFS 使用 `git lfs pull` 并记录依赖。
+- Git submodule 使用 `git submodule sync --recursive` 和 `git submodule update --init --recursive`，必须记录 `.gitmodules` 元数据和执行证据。
 - 外链下载必须记录来源、大小、文件名和 hash。
 
 ### 5.4 进度展示
@@ -740,7 +741,7 @@ PYTHONPATH=src python3 -m auto_harness.cli live-smoke-plan --execution-backend d
 7. 增强 Gradio API discovery。
 8. 增加 diagnose log classifier。
 9. 增加结构化 repair plan。
-10. 添加基础 fixture 和 benchmark。已完成第一版，提供 `benchmark` CLI 执行入口；已补充本地 E2E fixture matrix，覆盖 Gradio、Streamlit 和 Git LFS 权重仓库 dry-run pipeline。
+10. 添加基础 fixture 和 benchmark。已完成第一版，提供 `benchmark` CLI 执行入口；已补充本地 E2E fixture matrix，覆盖 Gradio、Streamlit 和 Git LFS 权重仓库 dry-run pipeline，并新增 Git submodule 受控准备回归用例。
 
 验收：
 

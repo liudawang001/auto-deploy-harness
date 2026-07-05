@@ -27,8 +27,8 @@ AI-Auto-Harness 是一个面向 AI 开源 demo 项目的自动部署与验证 Ag
 - `resource_plan` 阶段：识别模型资产、GPU/CUDA 信号、磁盘风险和外部 token 需求。
 - `env_solve` 阶段：在安装前生成更稳定的依赖方案，识别老 Gradio 与 `numpy<2` / `pydantic<2` 兼容风险、headless OpenCV 替换建议，并根据本机 CUDA/Python 生成 PyTorch CPU/CUDA wheel 安装方案、fallback 和 `xformers` / `flash-attn` / `bitsandbytes` / `triton` GPU 包兼容矩阵。
 - Docker backend：`env_deploy` 和 `runner` 支持把安装/启动命令包装为 `docker run` 计划，包含 GPU 参数、模型缓存挂载、容器日志命令和清理命令元数据；默认仍是本地 backend，真实执行仍受 `--execute` 和命令白名单保护。
-- Git LFS 检测：识别 `.gitattributes` 和 LFS pointer 文件，估算 pointer size，缺少 `git-lfs` 时给出 `git_lfs_missing` 诊断和 `git lfs install/pull` 准备命令。
-- Git LFS 受控准备：`model_prepare` 在 `--execute` 且 `git` 通过命令白名单时执行 `git lfs install` / `git lfs pull`，并记录命令结果、stderr/stdout tail、文件数/百分比/字节进度和最终状态。
+- Git LFS / submodule 检测：识别 `.gitattributes`、LFS pointer 文件和 `.gitmodules`，估算 pointer size，缺工具时给出诊断，并生成 `git lfs` / `git submodule` 准备命令。
+- Git LFS / submodule 受控准备：`model_prepare` 在 `--execute` 且 `git` 通过命令白名单时执行 `git lfs install/pull` 和 `git submodule sync/update`，并记录命令结果、stderr/stdout tail、进度和最终状态。
 - `model_prepare` 阶段：生成模型资产 manifest、缓存 key 和 `model_cache` 路径；执行模式下支持 Hugging Face / ModelScope 文件清单解析、断点续传、并发下载、sha256/etag 校验元数据和缓存写入。
 - `verify` 增强：支持 Gradio `/config` discovery、Gradio queue `/call/<api_name>` follow-up、FastAPI/Flask `/openapi.json` schema discovery、vLLM/OpenAI-compatible `/v1/models` + `/v1/chat/completions`、streaming SSE trace、Streamlit DOM/HTML 证据探测、可选 Playwright 浏览器 DOM probe，以及长耗时首次推理验证过程中的状态刷新。
 - 日志规则分类器：对缺依赖、CUDA OOM、磁盘不足、token 权限、wheel 构建失败等常见错误生成结构化诊断；token 权限问题只提取所需环境变量名，不记录密钥值。
@@ -211,6 +211,19 @@ PYTHONPATH=src python3 -m auto_harness.cli cache --cleanup --source huggingface 
 - `status`: `planned` / `ready` / `failed`。
 - 每条 LFS 准备命令的 exit code、stdout/stderr tail、timeout 状态和解析出的 progress。
 - `progress`: 从 `git lfs pull` 输出解析出的 `percent`、`files_done`、`files_total`、`downloaded_bytes`、`total_bytes`。
+- 命令被白名单拒绝时的 `command_rejected` diagnosis。
+
+如果项目使用 Git submodule，`resource_plan.git_submodules` 会记录：
+
+- `.gitmodules` 中的 submodule name、path、url、branch 和 initialized 状态。
+- `prepare_commands`: `git submodule sync --recursive` 与 `git submodule update --init --recursive`。
+- 缺少 `git` 时的 `git_missing` diagnosis。
+
+执行模式下，`model_prepare.git_submodules` 会记录：
+
+- `executed`: 是否真实执行。
+- `status`: `planned` / `ready` / `failed`。
+- 每条 submodule 准备命令的 exit code、stdout/stderr tail 和 timeout 状态。
 - 命令被白名单拒绝时的 `command_rejected` diagnosis。
 
 ## Browser Verify
