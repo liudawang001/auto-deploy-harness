@@ -397,6 +397,8 @@ Verify 是本项目最重要的差异化模块。它要证明模型链路真的�
 - OpenAPI 存在时不盲猜 endpoint。
 - 不把 docs 页面 200 当成成功。
 
+当前状态：已完成 vLLM / OpenAI-compatible 第一版识别与 verify。`ProjectAnalyzer` 可根据 `vllm` 依赖、OpenAI-compatible 文档和 `/v1/chat/completions` 信号生成 `openai_compatible` verify hint；`VerifyModule` 会向 `/v1/chat/completions` 发送 chat prompt trace，并且仍要求响应体包含当前 trace 才能通过。FastAPI / Flask 通用 `/openapi.json` schema 自动选 endpoint 仍待补充。
+
 ### 4.3 Streamlit Browser Verify
 
 Streamlit 通常没有稳定 API，需要浏览器验证。
@@ -464,6 +466,8 @@ Streamlit 通常没有稳定 API，需要浏览器验证。
   }
 }
 ```
+
+当前状态：已完成 verify 过程状态刷新，会记录 `service_discovered`、`first_inference_probe_started`、`http_trace_request_sent`、`browser_probe_completed`、`verify_completed` 等进度。后续继续补可配置长等待窗口、日志增量读取、模型加载状态分类和 idle timeout。
 
 ## 5. 模型下载与缓存计划
 
@@ -598,7 +602,7 @@ Docker backend 需要支持：
 - 容器日志收集。
 - 容器清理。
 
-当前状态：已完成 Docker backend 第二版。`env_deploy` 和 `runner` 可通过 `execution_backend=docker` 生成 `docker run` effective command，支持 workspace mount、workdir、网络参数、端口映射、`--gpus` 参数、`model_cache` 挂载、容器日志命令和清理命令元数据；默认不启用，真实执行仍受 `--execute`、权限开关和 `allowed_commands` 中的 `docker` 白名单约束。后续补真实 Docker/GPU smoke、镜像预热和更细粒度网络策略。
+当前状态：已完成 Docker backend 第二版和 Docker/GPU smoke plan/probe。`env_deploy` 和 `runner` 可通过 `execution_backend=docker` 生成 `docker run` effective command，支持 workspace mount、workdir、网络参数、端口映射、`--gpus` 参数、`model_cache` 挂载、容器日志命令和清理命令元数据；默认不启用，真实执行仍受 `--execute`、权限开关和 `allowed_commands` 中的 `docker` 白名单约束。`docker-smoke` CLI 默认只输出检查计划，`--probe` 时才运行 `docker version/info/run`，`--require-gpu` 可强制检查 GPU runtime。后续补真实 GPU 机器上的定期 smoke、镜像预热和更细粒度网络策略。
 
 ### 7.3 secret 保护
 
@@ -663,7 +667,30 @@ tests/fixtures/
   artifact_output/
 ```
 
-当前状态：已新增本地 E2E fixture 第一版，位于 `tests/fixtures/e2e/`，覆盖小型 Gradio demo、Streamlit demo 和 Git LFS pointer 权重仓库；benchmark `local_e2e_fixture_matrix` 会执行完整 dry-run pipeline 并检查阶段证据。后续继续补真实联网模型仓库和长耗时 smoke。
+当前状态：已新增本地 E2E fixture 第一版，位于 `tests/fixtures/e2e/`，覆盖小型 Gradio demo、Streamlit demo 和 Git LFS pointer 权重仓库；benchmark `local_e2e_fixture_matrix` 会执行完整 dry-run pipeline 并检查阶段证据。已新增 `live-smoke-plan` CLI，可生成 Hugging Face、ModelScope、真实 Git LFS 和可选中等 Hugging Face 模型的联网 smoke 执行计划，默认不触发网络下载或服务启动。后续继续补 live smoke 的人工/CI 执行记录和真实长耗时结果归档。
+
+### 9.1.1 可选 Live Smoke
+
+真实联网 E2E 不进入默认 benchmark，避免普通开发和 CI 被大模型下载、token、网络和 GPU 条件阻塞。执行前先生成计划：
+
+```bash
+PYTHONPATH=src python3 -m auto_harness.cli live-smoke-plan --include-long-running
+PYTHONPATH=src python3 -m auto_harness.cli live-smoke-plan --execution-backend docker
+```
+
+计划会输出：
+
+- 目标 repo、模型源和任务名。
+- 建议执行命令。
+- 预计耗时。
+- 所需环境变量名，例如 `HF_TOKEN`。
+- 期望观察到的阶段信号。
+
+验收标准：
+
+- 默认命令只生成计划，不访问网络。
+- 真实执行必须显式选择时间窗口、磁盘预算和 secret 注入方式。
+- secret 只通过环境变量进入，不写入 memory、report 或日志。
 
 ### 9.2 Benchmark 场景
 
@@ -679,6 +706,8 @@ tests/fixtures/
 - 缺 HF token。
 - 磁盘空间不足模拟。
 - CUDA 不匹配。
+- Docker/GPU runtime plan/probe。
+- vLLM/OpenAI-compatible `/v1/chat/completions` trace verify。
 
 ### 9.3 验收指标
 
@@ -727,10 +756,10 @@ tests/fixtures/
 1. CUDA/PyTorch compatibility solver。已完成 env_solve 风险识别、本机 CUDA 探测、Torch wheel index URL、CPU/CUDA fallback，以及 `xformers` / `flash-attn` / `bitsandbytes` / `triton` GPU 包兼容矩阵；后续补真实 CUDA E2E 和更多包版本细分规则。
 2. 磁盘/显存预估。
 3. ModelScope 下载支持。
-4. Git LFS 支持。已完成检测、准备命令、白名单受控执行和 `git lfs pull` 输出进度解析第一版；后续补真实 LFS 大文件 E2E。
-5. Docker backend。已完成命令包装、白名单保护、GPU 参数、model_cache 挂载、日志命令和清理命令元数据；后续补真实 Docker/GPU smoke。
+4. Git LFS 支持。已完成检测、准备命令、白名单受控执行和 `git lfs pull` 输出进度解析第一版；已补充 live smoke plan 中的真实 Git LFS 仓库目标，后续补真实执行记录和大文件 E2E。
+5. Docker backend。已完成命令包装、白名单保护、GPU 参数、model_cache 挂载、日志命令和清理命令元数据；已新增 `docker-smoke` plan/probe，后续补真实 GPU 机器上的定期 smoke。
 6. 长耗时 verify。已完成 verify 过程状态刷新；后续补首次推理超长等待、模型加载日志分类和可配置重试窗口。
-7. vLLM/OpenAI-compatible server 识别与 verify。
+7. vLLM/OpenAI-compatible server 识别与 verify。已完成第一版 analyzer 识别和 `/v1/chat/completions` trace verify；后续补真实 vLLM 服务 smoke、stream response 和 `/v1/models` discovery。
 8. 更多 dependency conflict rules。
 
 验收：
