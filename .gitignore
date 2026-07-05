@@ -6,6 +6,7 @@ __pycache__/
 runs/
 memory/*.jsonl
 model_cache/
+queue/
 dist/
 build/
 *.egg-info/

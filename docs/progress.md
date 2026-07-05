@@ -5,6 +5,11 @@
 ### 已完成
 
 - 下一阶段优化任务：
+  - 新增 `DeploymentQueue` 本地持久化任务队列，队列项写入 `queue/items/*.json`，记录 repo、dry-run/execute 策略、GPU 需求、优先级、attempt、task_id、错误和时间戳。
+  - CLI 新增 `queue submit/list/run`：submit 只入队，run 由显式前台 worker 消费任务；默认仍是 dry-run，不会安装依赖或启动服务。
+  - `queue run --max-jobs` 支持一次消费多个队列项；`--require-gpu` 与 `--gpu-slots` 支持在无 GPU slot 时跳过 GPU 任务，避免普通 Mac 开发机误跑 GPU 部署。
+  - Benchmark cases 从 42 个扩展到 43 个，新增 `deployment_queue_dry_run`。
+- 下一阶段优化任务：
   - 新增 `DashboardGenerator`，可从本地 `runs/`、`state.json`、`task.json` 和可选 benchmark report 生成静态 HTML dashboard 与 JSON 摘要。
   - CLI 新增 `dashboard --output <path> --benchmark-report <path>`，默认写入 `runs/dashboard.html` 和同名 `.json`，不启动 Web 服务。
   - Dashboard 展示 task count、状态统计、benchmark 概览、任务当前阶段、各 stage 状态和 report 路径，适合 mac 开发机与面试演示。
@@ -136,13 +141,13 @@
 4. Git LFS 检测：识别 LFS pointer 和 `.gitattributes`，缺 `git-lfs` 时进入诊断态，并给出准备命令。
 5. Playwright smoke 治理：补齐真实浏览器 backend 的本地 smoke 文档和手动 CI workflow。
 
-按 `docs/optimization-roadmap.md` 的“全自动开源模型部署 Agent”目标估算，当前总项目进度约为 **92%**。
+按 `docs/optimization-roadmap.md` 的“全自动开源模型部署 Agent”目标估算，当前总项目进度约为 **93%**。
 
 估算依据：
 
 - 已完成约 95% 的 P0/P1 核心控制链路：下载缓存、断点续传、verify 防误判、OpenAPI/OpenAI-compatible verify、repair plan/policy/resume、memory promotion 审批与回归、benchmark 回归体系已经成型。
-- 已完成约 88% 的真实开源模型部署能力：Hugging Face / ModelScope 下载、Git LFS / submodule 检测与受控准备、Gradio/Streamlit/browser verify、PyTorch CPU/CUDA wheel 求解、GPU 包兼容矩阵、本地 E2E fixture matrix、Docker GPU/cache backend 和静态 dashboard 已具备，但真实联网/真实大模型端到端矩阵仍需扩大。
-- 尚未完成的关键 8% 主要是：真实联网长耗时 E2E、真实 Docker/GPU smoke、真实 vLLM 服务 smoke、更多模型仓库源、多任务队列/并发/GPU 调度、自动部署产物包和常驻 Web dashboard。
+- 已完成约 90% 的真实开源模型部署能力：Hugging Face / ModelScope 下载、Git LFS / submodule 检测与受控准备、Gradio/Streamlit/browser verify、PyTorch CPU/CUDA wheel 求解、GPU 包兼容矩阵、本地 E2E fixture matrix、Docker GPU/cache backend、静态 dashboard 和本地持久化队列已具备，但真实联网/真实大模型端到端矩阵仍需扩大。
+- 尚未完成的关键 7% 主要是：真实联网长耗时 E2E、真实 Docker/GPU smoke、真实 vLLM 服务 smoke、更多模型仓库源、真正并发 worker pool、真实 GPU 资源探测与分配、自动部署产物包和常驻 Web dashboard。
 - 继续执行 P0/P1 优化任务：
   - `ModelCache.reserve` 会为缓存目录写入 `.auto_harness_asset.json`，记录 source、repo id、revision、origin、asset id 和 cache key。
   - `ModelCache.entries()` 会读取缓存元数据，返回 repo id、revision、origin，便于后续审计和精细清理。

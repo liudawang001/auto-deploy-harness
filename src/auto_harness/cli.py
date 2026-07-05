@@ -8,6 +8,7 @@ from auto_harness.dashboard import DashboardGenerator
 from auto_harness.memory import MemoryPromoter
 from auto_harness.orchestrator import TaskRunner
 from auto_harness.providers import Message, MockLLMProvider, XunfeiSparkProvider
+from auto_harness.queue import DeploymentQueue
 from auto_harness.runtime import DockerSmokeChecker
 
 
@@ -81,6 +82,24 @@ def build_parser() -> argparse.ArgumentParser:
     dashboard = sub.add_parser("dashboard", help="generate a static HTML dashboard from local runs")
     dashboard.add_argument("--output", default="")
     dashboard.add_argument("--benchmark-report", default="")
+
+    queue = sub.add_parser("queue", help="submit and run persistent deployment queue jobs")
+    queue_sub = queue.add_subparsers(dest="queue_command", required=True)
+    queue_submit = queue_sub.add_parser("submit", help="submit a deployment job without running it immediately")
+    queue_submit.add_argument("--repo", required=True)
+    queue_submit.add_argument("--name", default="")
+    queue_submit.add_argument("--dry-run", action="store_true", default=False)
+    queue_submit.add_argument("--execute", action="store_true", default=False)
+    queue_submit.add_argument("--allow-install", action="store_true", default=False)
+    queue_submit.add_argument("--allow-start", action="store_true", default=False)
+    queue_submit.add_argument("--skip-clone", action="store_true", default=False)
+    queue_submit.add_argument("--require-gpu", action="store_true", default=False)
+    queue_submit.add_argument("--priority", type=int, default=100)
+    queue_list = queue_sub.add_parser("list", help="list queued deployment jobs")
+    queue_list.add_argument("--status", default="")
+    queue_run = queue_sub.add_parser("run", help="run queued jobs in this foreground process")
+    queue_run.add_argument("--max-jobs", type=int, default=None)
+    queue_run.add_argument("--gpu-slots", type=int, default=None)
 
     live_smoke = sub.add_parser("live-smoke-plan", help="print optional networked E2E smoke plan")
     live_smoke.add_argument("--include-long-running", action="store_true", default=False)
@@ -212,6 +231,30 @@ def main(argv=None) -> int:
         result = DashboardGenerator().generate(config.runs_path, output, benchmark_report=benchmark_report)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0 if result.get("status") == "generated" else 2
+
+    if args.command == "queue":
+        queue = DeploymentQueue(config.task_queue_path, runner)
+        if args.queue_command == "submit":
+            dry_run = args.dry_run or not args.execute
+            result = queue.submit(
+                args.repo,
+                name=args.name,
+                dry_run=dry_run,
+                skip_clone=args.skip_clone,
+                allow_install=args.allow_install,
+                allow_start=args.allow_start,
+                require_gpu=args.require_gpu,
+                priority=args.priority,
+            )
+        elif args.queue_command == "list":
+            result = queue.list(status=args.status or None)
+        else:
+            result = queue.run_next(
+                max_jobs=args.max_jobs if args.max_jobs is not None else config.queue_max_concurrent_tasks,
+                gpu_slots=args.gpu_slots if args.gpu_slots is not None else config.queue_gpu_slots,
+            )
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0 if result.get("status") not in ("failed",) else 2
 
     if args.command == "live-smoke-plan":
         plan = LiveSmokePlanner(default_execute=args.execute).plan(

@@ -778,9 +778,9 @@ PYTHONPATH=src python3 -m auto_harness.cli live-smoke-plan --execution-backend d
 任务：
 
 1. Web dashboard。已完成静态 dashboard 第一版，可从本地 runs 状态和可选 benchmark report 生成 HTML/JSON；后续可升级为常驻 Web 服务。
-2. 任务队列。
-3. 多任务并发。
-4. GPU 调度。
+2. 任务队列。已完成本地持久化队列第一版，支持 `queue submit/list/run`，入队与执行分离，worker 显式消费任务。
+3. 多任务并发。已完成前台 worker 的 `--max-jobs` 调度入口；后续升级为真正并发 worker pool。
+4. GPU 调度。已完成 `--require-gpu` 标记和 `--gpu-slots` 跳过策略；后续接入真实 GPU 资源探测与分配。
 5. 缓存清理策略。已完成第一版，支持 dry-run / apply、按 source/repo id 过滤和 keep-list。
 6. memory promotion 命令。已完成第二版，支持生成 human-review proposal、显式 apply 到目标 skill，并在 apply 后自动运行绑定 benchmark 子集。
 7. 自动生成部署产物包。

@@ -1802,11 +1802,12 @@ class CoreTests(unittest.TestCase):
         self.assertIn("repair_resume_audit_report", ids)
         self.assertIn("token_report_required_env", ids)
         self.assertIn("static_dashboard_export", ids)
+        self.assertIn("deployment_queue_dry_run", ids)
 
     def test_benchmark_runner_executes_all_fixture_cases(self):
         report = BenchmarkRunner().run(Path("tests/fixtures/benchmarks/manifest.json"))
         self.assertEqual(report["status"], "passed")
-        self.assertEqual(len(report["cases"]), 42)
+        self.assertEqual(len(report["cases"]), 43)
         self.assertTrue(all(case["status"] == "passed" for case in report["cases"]))
 
     def test_benchmark_cli_writes_output(self):
@@ -1883,6 +1884,51 @@ class CoreTests(unittest.TestCase):
             self.assertTrue(output_path.exists())
             self.assertTrue(output_path.with_suffix(".json").exists())
             self.assertIn("dashboard-cli-demo", output_path.read_text(encoding="utf-8"))
+
+    def test_queue_cli_submits_lists_and_runs_dry_run_job(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            (repo / "README.md").write_text("FastAPI demo", encoding="utf-8")
+            (repo / "app.py").write_text("print('hello')\n", encoding="utf-8")
+            config_path = root / "config.json"
+            config_path.write_text(json.dumps({
+                "runs_dir": str(root / "runs"),
+                "memory_dir": str(root / "memory"),
+                "model_cache_dir": str(root / "model_cache"),
+                "task_queue_dir": str(root / "queue"),
+                "queue_max_concurrent_tasks": 1,
+                "queue_gpu_slots": 0,
+            }), encoding="utf-8")
+            old_config = os.environ.get("AUTO_HARNESS_CONFIG")
+            os.environ["AUTO_HARNESS_CONFIG"] = str(config_path)
+            try:
+                submit_out = io.StringIO()
+                with redirect_stdout(submit_out):
+                    submit_code = cli_main(["queue", "submit", "--repo", str(repo), "--name", "queued-demo"])
+                submit = json.loads(submit_out.getvalue())
+                list_out = io.StringIO()
+                with redirect_stdout(list_out):
+                    list_code = cli_main(["queue", "list"])
+                listed = json.loads(list_out.getvalue())
+                run_out = io.StringIO()
+                with redirect_stdout(run_out):
+                    run_code = cli_main(["queue", "run"])
+                run = json.loads(run_out.getvalue())
+            finally:
+                if old_config is None:
+                    os.environ.pop("AUTO_HARNESS_CONFIG", None)
+                else:
+                    os.environ["AUTO_HARNESS_CONFIG"] = old_config
+            self.assertEqual(submit_code, 0)
+            self.assertEqual(list_code, 0)
+            self.assertEqual(run_code, 0)
+            self.assertEqual(submit["status"], "queued")
+            self.assertEqual(listed["status_counts"]["queued"], 1)
+            self.assertEqual(run["started"], 1)
+            self.assertEqual(run["results"][0]["status"], "completed")
+            self.assertTrue((root / "runs" / run["results"][0]["task_id"] / "reports" / "pipeline_results.json").exists())
 
     def test_live_smoke_planner_generates_optional_network_matrix(self):
         plan = LiveSmokePlanner().plan(include_long_running=True, execution_backend="docker")

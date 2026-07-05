@@ -21,6 +21,7 @@ from auto_harness.models.result import StageResult
 from auto_harness.models.task import RuntimePolicy
 from auto_harness.repair import RepairLoopController, RepairPlanner, RepairPolicy
 from auto_harness.orchestrator import TaskRunner
+from auto_harness.queue import DeploymentQueue
 from auto_harness.verify import BrowserVerifier, StreamlitVerifier
 from auto_harness.utils.shell import CommandResult
 
@@ -183,6 +184,8 @@ class BenchmarkRunner:
                 return self._case_token_report_required_env(case)
             if case_id == "static_dashboard_export":
                 return self._case_static_dashboard_export(case)
+            if case_id == "deployment_queue_dry_run":
+                return self._case_deployment_queue_dry_run(case)
             return self._result(case, "skipped", "unknown benchmark case")
         except Exception as exc:  # noqa: BLE001 - benchmark report should continue
             return self._result(case, "failed", str(exc))
@@ -1386,6 +1389,36 @@ class BenchmarkRunner:
                 and "AI-Auto-Harness Dashboard" in html
             )
         return self._result(case, "passed" if ok else "failed", "static dashboard export verified")
+
+    def _case_deployment_queue_dry_run(self, case: Dict) -> Dict:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            (repo / "README.md").write_text("FastAPI local queue demo", encoding="utf-8")
+            (repo / "app.py").write_text("print('queued')\n", encoding="utf-8")
+            config = HarnessConfig(
+                runs_dir=str(root / "runs"),
+                memory_dir=str(root / "memory"),
+                model_cache_dir=str(root / "model_cache"),
+                task_queue_dir=str(root / "queue"),
+            )
+            queue = DeploymentQueue(config.task_queue_path, TaskRunner(config))
+            submitted = queue.submit(str(repo), name="queue-demo", dry_run=True)
+            before = queue.list()
+            run = queue.run_next(max_jobs=1)
+            after = queue.list()
+            task_id = run.get("results", [{}])[0].get("task_id", "")
+            ok = (
+                submitted.get("status") == "queued"
+                and before.get("status_counts", {}).get("queued") == 1
+                and run.get("started") == 1
+                and run.get("results", [{}])[0].get("status") == "completed"
+                and after.get("status_counts", {}).get("completed") == 1
+                and bool(task_id)
+                and (config.runs_path / task_id / "reports" / "pipeline_results.json").exists()
+            )
+        return self._result(case, "passed" if ok else "failed", "deployment queue dry-run scheduling verified")
 
     def _stage_update_count(self, run_dir: Path) -> Dict[str, int]:
         counts: Dict[str, int] = {}
