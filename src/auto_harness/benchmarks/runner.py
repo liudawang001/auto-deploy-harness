@@ -130,6 +130,8 @@ class BenchmarkRunner:
                 return self._case_verify_progress_refresh(case)
             if case_id == "openai_compatible_verify":
                 return self._case_openai_compatible_verify(case)
+            if case_id == "openai_model_discovery_stream_verify":
+                return self._case_openai_model_discovery_stream_verify(case)
             if case_id == "openapi_schema_verify":
                 return self._case_openapi_schema_verify(case)
             if case_id == "local_e2e_fixture_matrix":
@@ -819,6 +821,53 @@ class BenchmarkRunner:
             and captured.get("body", {}).get("model") == "bench-model"
         )
         return self._result(case, "passed" if ok else "failed", "OpenAI-compatible chat completion verify verified")
+
+    def _case_openai_model_discovery_stream_verify(self, case: Dict) -> Dict:
+        captured = {"urls": []}
+
+        def fake_urlopen(req, timeout):
+            captured["urls"].append(req.full_url)
+            if req.full_url.endswith("/v1/models"):
+                return _FakeResponse(json.dumps({"data": [{"id": "bench-served-model"}]}))
+            captured["body"] = json.loads(req.data.decode("utf-8"))
+            trace = captured["body"]["messages"][0]["content"].split("trace ", 1)[1]
+            return _FakeResponse(
+                "data: {\"choices\":[{\"delta\":{\"content\":\"stream %s\"}}]}\n\n"
+                "data: [DONE]\n\n" % trace
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / "workspace" / "repo").mkdir(parents=True)
+            result = VerifyModule(urlopen=fake_urlopen).verify(
+                run_dir,
+                analysis={
+                    "frameworks": ["openai_compatible"],
+                    "verify_hint": {
+                        "service_type": "openai_compatible",
+                        "endpoint": "http://127.0.0.1:8000",
+                        "request": {
+                            "method": "POST",
+                            "path": "/v1/chat/completions",
+                            "json": {
+                                "model": "{{model}}",
+                                "messages": [{"role": "user", "content": "auto harness trace {{trace_id}}"}],
+                                "stream": True,
+                            },
+                        },
+                    },
+                },
+                runner_result={"pid": 1234, "expected_port": 8000, "service_ready": True},
+            )
+            evidence = read_json(Path(result.evidence[1]))
+        ok = (
+            result.status == "passed"
+            and "http://127.0.0.1:8000/v1/models" in captured["urls"]
+            and captured.get("body", {}).get("model") == "bench-served-model"
+            and captured.get("body", {}).get("stream") is True
+            and evidence.get("response", {}).get("stream_detected") is True
+        )
+        return self._result(case, "passed" if ok else "failed", "OpenAI-compatible model discovery and stream verify verified")
 
     def _case_openapi_schema_verify(self, case: Dict) -> Dict:
         captured = {}

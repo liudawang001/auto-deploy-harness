@@ -133,6 +133,7 @@ class VerifyModule:
                 response_record = {
                     "status_code": getattr(resp, "status", None) or getattr(resp, "code", None),
                     "body_tail": body[-4000:],
+                    "stream_detected": self._body_looks_like_sse(body),
                 }
                 if trace_id in body:
                     status = "pass"
@@ -208,6 +209,14 @@ class VerifyModule:
             endpoint = discovered["endpoint"]
         elif self._is_openai_compatible(analysis, verify_hint):
             request_hint = self._openai_compatible_request_hint(verify_hint)
+            model_discovery = self._discover_openai_model(endpoint, verify_hint)
+            discovered = {
+                "type": "openai_compatible",
+                "models_url": model_discovery.get("models_url", ""),
+                "model_id": model_discovery.get("model_id", ""),
+                "model_source": model_discovery.get("source", ""),
+                "stream": bool((request_hint.get("json") or {}).get("stream")),
+            }
         else:
             discovered = self._discover_openapi_request(endpoint, analysis)
             if discovered:
@@ -230,7 +239,7 @@ class VerifyModule:
             if template is None:
                 template = {"trace_id": "{{trace_id}}", "prompt": "auto harness trace {{trace_id}}"}
             body_json = self._replace_trace(template, trace_id)
-            body_json = self._replace_model_placeholder(body_json, verify_hint)
+            body_json = self._replace_model_placeholder(body_json, verify_hint, (discovered or {}).get("model_id", ""))
             body = json.dumps(body_json).encode("utf-8")
             headers["Content-Type"] = "application/json"
         else:
@@ -269,6 +278,32 @@ class VerifyModule:
                 "max_tokens": 16,
             },
         }
+
+    def _discover_openai_model(self, endpoint: str, verify_hint: Dict) -> Dict:
+        hinted = verify_hint.get("model") or verify_hint.get("model_id")
+        if hinted:
+            return {"model_id": hinted, "source": "verify_hint"}
+        models_url = urllib.parse.urljoin(endpoint.rstrip("/") + "/", "v1/models")
+        try:
+            req = urllib.request.Request(models_url, method="GET")
+            with self.urlopen(req, timeout=5) as resp:
+                raw = resp.read().decode("utf-8", errors="replace")
+            data = json.loads(raw)
+        except Exception:  # noqa: BLE001 - optional discovery
+            return {"model_id": "auto-harness-smoke-model", "source": "fallback", "models_url": models_url}
+        discovered = self._first_openai_model_id(data)
+        if discovered:
+            return {"model_id": discovered, "source": "v1/models", "models_url": models_url}
+        return {"model_id": "auto-harness-smoke-model", "source": "fallback", "models_url": models_url}
+
+    def _first_openai_model_id(self, data) -> str:
+        items = data.get("data") if isinstance(data, dict) else None
+        if not isinstance(items, list):
+            return ""
+        for item in items:
+            if isinstance(item, dict) and isinstance(item.get("id"), str) and item["id"]:
+                return item["id"]
+        return ""
 
     def _discover_openapi_request(self, endpoint: str, analysis: Dict) -> Optional[Dict]:
         frameworks = set(analysis.get("frameworks") or []) if isinstance(analysis, dict) else set()
@@ -529,15 +564,18 @@ class VerifyModule:
             return {key: self._replace_trace(item, trace_id) for key, item in value.items()}
         return value
 
-    def _replace_model_placeholder(self, value, verify_hint: Dict):
-        model = verify_hint.get("model") or verify_hint.get("model_id") or "auto-harness-smoke-model"
+    def _replace_model_placeholder(self, value, verify_hint: Dict, discovered_model: str = ""):
+        model = verify_hint.get("model") or verify_hint.get("model_id") or discovered_model or "auto-harness-smoke-model"
         if isinstance(value, str):
             return value.replace("{{model}}", model)
         if isinstance(value, list):
-            return [self._replace_model_placeholder(item, verify_hint) for item in value]
+            return [self._replace_model_placeholder(item, verify_hint, discovered_model) for item in value]
         if isinstance(value, dict):
-            return {key: self._replace_model_placeholder(item, verify_hint) for key, item in value.items()}
+            return {key: self._replace_model_placeholder(item, verify_hint, discovered_model) for key, item in value.items()}
         return value
+
+    def _body_looks_like_sse(self, body: str) -> bool:
+        return any(line.startswith("data:") for line in body.splitlines())
 
     def _select_endpoint(self, service: Dict, analysis: Dict) -> Optional[str]:
         verify_hint = analysis.get("verify_hint", {}) if isinstance(analysis, dict) else {}

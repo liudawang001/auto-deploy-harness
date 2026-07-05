@@ -141,6 +141,11 @@
       "expected_signal": "POST /v1/chat/completions includes trace prompt and response trace passes verify"
     },
     {
+      "id": "openai_model_discovery_stream_verify",
+      "purpose": "验证 OpenAI-compatible 服务可通过 /v1/models 发现模型，并用 stream 响应中的 trace 作为强证据",
+      "expected_signal": "GET /v1/models selects model id and SSE response body contains current trace"
+    },
+    {
       "id": "openapi_schema_verify",
       "purpose": "验证 FastAPI/Flask OpenAPI schema 可自动选择 POST endpoint 并构造 trace JSON 请求",
       "expected_signal": "POST endpoint from /openapi.json echoes current trace and verify passes"

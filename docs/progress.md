@@ -5,6 +5,10 @@
 ### 已完成
 
 - 下一阶段优化任务：
+  - OpenAI-compatible verify 新增 `/v1/models` discovery：当 verify hint 未显式提供 `model` / `model_id` 时，会先读取模型列表并选择第一个 model id。
+  - `/v1/chat/completions` 支持 `stream=true` 场景，SSE body 中包含当前 trace 即可作为强证据；evidence 会标记 `response.stream_detected=true`。
+  - Benchmark cases 从 37 个扩展到 38 个，新增 `openai_model_discovery_stream_verify`。
+- 下一阶段优化任务：
   - `VerifyModule` 新增 FastAPI/Flask `/openapi.json` discovery，可选择不含 path parameter、带 JSON requestBody 的 POST endpoint。
   - OpenAPI schema 请求体支持 `$ref` 解析、object required 字段、string/number/boolean/array 最小值生成，并自动注入当前 `trace_id`。
   - HTTP 证据仍要求响应体包含当前 trace 才能通过，不会因为 OpenAPI 文档或 POST 200 本身误判成功。

@@ -397,7 +397,7 @@ Verify 是本项目最重要的差异化模块。它要证明模型链路真的�
 - OpenAPI 存在时不盲猜 endpoint。
 - 不把 docs 页面 200 当成成功。
 
-当前状态：已完成 FastAPI / Flask OpenAPI verify 第一版，以及 vLLM / OpenAI-compatible 第一版识别与 verify。`VerifyModule` 会读取 `/openapi.json`，选择不含 path parameter、带 JSON requestBody 的 POST endpoint，根据 schema 构造最小 trace JSON 请求，并且仍要求响应体包含当前 trace 才能通过。`ProjectAnalyzer` 可根据 `vllm` 依赖、OpenAI-compatible 文档和 `/v1/chat/completions` 信号生成 `openai_compatible` verify hint；OpenAI-compatible 路径会向 `/v1/chat/completions` 发送 chat prompt trace。后续补更复杂 schema、multipart/form-data、stream response 和 `/v1/models` discovery。
+当前状态：已完成 FastAPI / Flask OpenAPI verify 第一版，以及 vLLM / OpenAI-compatible verify 第二版。`VerifyModule` 会读取 `/openapi.json`，选择不含 path parameter、带 JSON requestBody 的 POST endpoint，根据 schema 构造最小 trace JSON 请求，并且仍要求响应体包含当前 trace 才能通过。`ProjectAnalyzer` 可根据 `vllm` 依赖、OpenAI-compatible 文档和 `/v1/chat/completions` 信号生成 `openai_compatible` verify hint；OpenAI-compatible 路径会优先读取 `/v1/models` 发现 model id，再向 `/v1/chat/completions` 发送 chat prompt trace，普通 JSON 或 streaming SSE response body 中包含当前 trace 才通过。后续补更复杂 schema、multipart/form-data、真实 vLLM smoke 和更多 streaming 边界。
 
 ### 4.3 Streamlit Browser Verify
 
@@ -708,6 +708,7 @@ PYTHONPATH=src python3 -m auto_harness.cli live-smoke-plan --execution-backend d
 - CUDA 不匹配。
 - Docker/GPU runtime plan/probe。
 - vLLM/OpenAI-compatible `/v1/chat/completions` trace verify。
+- OpenAI-compatible `/v1/models` discovery 和 streaming SSE trace verify。
 - FastAPI/Flask `/openapi.json` schema trace verify。
 
 ### 9.3 验收指标
