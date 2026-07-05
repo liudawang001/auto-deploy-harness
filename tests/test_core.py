@@ -32,6 +32,7 @@ from auto_harness.skills import SkillRegistry
 from auto_harness.state import StateStore
 from auto_harness.orchestrator import TaskRunner
 from auto_harness.repair import RepairApplier, RepairLoopController, RepairOverlay, RepairPlanner, RepairPolicy
+from auto_harness.runtime import DockerSmokeChecker
 from auto_harness.verify import BrowserVerifier
 from auto_harness.utils.shell import CommandResult
 from auto_harness.utils.time import utc_now_iso
@@ -1559,6 +1560,37 @@ class CoreTests(unittest.TestCase):
         plan = json.loads(output.getvalue())
         self.assertEqual(plan["kind"], "optional_live_e2e_smoke")
         self.assertFalse(plan["runs_commands"])
+
+    def test_docker_smoke_checker_plans_without_running_commands(self):
+        calls = []
+        checker = DockerSmokeChecker(command_runner=lambda cmd, timeout: calls.append(cmd) or {"exit_code": 0})
+        result = checker.check(probe=False, image="python:3.11-slim", require_gpu=True)
+        self.assertEqual(result["status"], "planned")
+        self.assertEqual(calls, [])
+        self.assertEqual(len(result["checks"]), 4)
+        self.assertTrue(any(check["id"] == "docker_gpu_runtime" and "--gpus" in check["command"] for check in result["checks"]))
+
+    def test_docker_smoke_checker_probe_can_skip_optional_gpu(self):
+        calls = []
+
+        def fake_runner(cmd, timeout):
+            calls.append(cmd)
+            return {"exit_code": 0, "stdout": "ok", "stderr": ""}
+
+        result = DockerSmokeChecker(command_runner=fake_runner).check(probe=True, image="python:3.11-slim", require_gpu=False)
+        self.assertEqual(result["status"], "passed")
+        self.assertEqual(len(calls), 3)
+        gpu = [check for check in result["checks"] if check["id"] == "docker_gpu_runtime"][0]
+        self.assertEqual(gpu["status"], "skipped")
+
+    def test_docker_smoke_cli_outputs_plan_by_default(self):
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = cli_main(["docker-smoke", "--image", "python:3.11-slim"])
+        self.assertEqual(code, 0)
+        result = json.loads(output.getvalue())
+        self.assertEqual(result["status"], "planned")
+        self.assertFalse(result["probe"])
 
     def test_cache_cli_cleanup_defaults_to_dry_run(self):
         with tempfile.TemporaryDirectory() as tmp:

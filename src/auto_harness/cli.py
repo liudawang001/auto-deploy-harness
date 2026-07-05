@@ -7,6 +7,7 @@ from auto_harness.benchmarks import BenchmarkRunner, LiveSmokePlanner
 from auto_harness.memory import MemoryPromoter
 from auto_harness.orchestrator import TaskRunner
 from auto_harness.providers import Message, MockLLMProvider, XunfeiSparkProvider
+from auto_harness.runtime import DockerSmokeChecker
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -78,6 +79,11 @@ def build_parser() -> argparse.ArgumentParser:
     live_smoke.add_argument("--include-long-running", action="store_true", default=False)
     live_smoke.add_argument("--execution-backend", choices=["local", "docker"], default="local")
     live_smoke.add_argument("--execute", action="store_true", default=False)
+
+    docker_smoke = sub.add_parser("docker-smoke", help="plan or probe Docker/GPU runtime readiness")
+    docker_smoke.add_argument("--probe", action="store_true", default=False)
+    docker_smoke.add_argument("--image", default=None)
+    docker_smoke.add_argument("--require-gpu", action="store_true", default=False)
 
     cache = sub.add_parser("cache", help="inspect or clean model cache")
     cache.add_argument("--cleanup", action="store_true", default=False)
@@ -199,6 +205,15 @@ def main(argv=None) -> int:
         )
         print(json.dumps(plan, ensure_ascii=False, indent=2))
         return 0
+
+    if args.command == "docker-smoke":
+        result = DockerSmokeChecker().check(
+            probe=args.probe,
+            image=args.image or config.docker_image,
+            require_gpu=args.require_gpu,
+        )
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0 if result.get("status") in ("planned", "passed") else 2
 
     if args.command == "cache":
         if args.cleanup:

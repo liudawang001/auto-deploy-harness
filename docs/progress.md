@@ -4,6 +4,10 @@
 
 ### 已完成
 
+- 继续执行 90% 后三阶段开发 - 阶段 2：
+  - 新增 `DockerSmokeChecker`，可生成 Docker/GPU runtime smoke 检查计划，默认不执行任何 Docker 命令。
+  - 新增 CLI `docker-smoke`，支持默认 plan 模式和 `--probe` 本机探测模式；探测项包括 `docker version`、`docker info`、Python 镜像运行和可选 `--gpus all`。
+  - GPU 检查在 `require_gpu=false` 时可跳过，避免普通开发机没有 GPU 导致 smoke 失败；需要真实 GPU 时用 `--require-gpu` 强制检查。
 - 继续执行 90% 后三阶段开发 - 阶段 1：
   - 新增 `LiveSmokePlanner`，生成可选真实联网 E2E smoke 矩阵，覆盖 Hugging Face tiny model、ModelScope public model、真实 Git LFS 仓库和可选中等 Hugging Face 模型。
   - 新增 CLI `live-smoke-plan`，只输出可审计计划，不触发网络下载或服务启动；计划包含目标 repo、命令、预计耗时、所需环境变量和期望验证信号。

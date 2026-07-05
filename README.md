@@ -13,7 +13,7 @@ AI-Auto-Harness 是一个面向 AI 开源 demo 项目的自动部署与验证 Ag
 
 当前仓库已经包含：
 
-- CLI：`init`、`deploy`、`resume`、`status`、`report`、`llm-test`、`benchmark`、`live-smoke-plan`、`repair-approve`、`memory-promote`。
+- CLI：`init`、`deploy`、`resume`、`status`、`report`、`llm-test`、`benchmark`、`live-smoke-plan`、`docker-smoke`、`repair-approve`、`memory-promote`。
 - 任务状态存储：`task.json`、`state.json`、`events.jsonl`。
 - 确定性项目分析器。
 - 安全默认的 `env_solve`、`env_deploy`、`runner`、`verify`、report 模块。
@@ -172,6 +172,16 @@ PYTHONPATH=src python3 -m auto_harness.cli deploy --repo <repo> --execute --allo
 ```
 
 Docker backend 会生成 `docker run --rm -v <repo>:/workspace/repo -w /workspace/repo ...` 形式的 effective command。可通过 `--docker-gpus all` 添加 GPU 参数，通过 `--docker-model-cache-dir <path>` 挂载模型缓存到容器内 `/workspace/model_cache`。runner 阶段还会记录容器 `log_command` 和 `cleanup_command` 元数据，便于失败后审计和清理。真正执行仍必须让 `docker` 进入 `allowed_commands`，否则会被 policy 拒绝。
+
+Docker/GPU runtime 可先做 smoke 计划或本机探测：
+
+```bash
+PYTHONPATH=src python3 -m auto_harness.cli docker-smoke
+PYTHONPATH=src python3 -m auto_harness.cli docker-smoke --probe --image python:3.11-slim
+PYTHONPATH=src python3 -m auto_harness.cli docker-smoke --probe --require-gpu
+```
+
+默认不执行 Docker 命令；只有 `--probe` 才会运行 `docker version/info/run`。GPU 检查需要 NVIDIA container runtime。
 
 缓存清理由 `ModelCache.cleanup(...)` 提供，默认 `dry_run=True`，会先返回候选列表、候选大小和预计删除项；只有显式传入 `dry_run=False` 才会删除缓存目录。
 
