@@ -1,4 +1,5 @@
 import json
+import os
 import tarfile
 import tempfile
 import threading
@@ -197,6 +198,8 @@ class BenchmarkRunner:
                 return self._case_queue_gpu_probe_scheduling(case)
             if case_id == "queue_claim_lock_prevents_duplicate":
                 return self._case_queue_claim_lock_prevents_duplicate(case)
+            if case_id == "queue_stale_claim_lock_recovery":
+                return self._case_queue_stale_claim_lock_recovery(case)
             return self._result(case, "skipped", "unknown benchmark case")
         except Exception as exc:  # noqa: BLE001 - benchmark report should continue
             return self._result(case, "failed", str(exc))
@@ -1539,6 +1542,29 @@ class BenchmarkRunner:
                 and runner.calls == []
             )
         return self._result(case, "passed" if ok else "failed", "queue claim lock duplicate prevention verified")
+
+    def _case_queue_stale_claim_lock_recovery(self, case: Dict) -> Dict:
+        class FakeRunner:
+            def deploy(self, repo_url, name, dry_run=True, skip_clone=False, allow_install=False, allow_start=False):
+                return "task_%s" % name
+
+        with tempfile.TemporaryDirectory() as tmp:
+            queue = DeploymentQueue(Path(tmp) / "queue", FakeRunner(), claim_ttl_seconds=1)
+            submitted = queue.submit("local://stale", name="stale")
+            lock_path = queue._lock_path(submitted["job_id"])
+            lock_path.write_text("pid=dead\n", encoding="utf-8")
+            old = 1
+            os.utime(lock_path, (old, old))
+            result = queue.run_next(max_jobs=1)
+            listed = queue.list()
+            ok = (
+                result.get("started") == 1
+                and result.get("results", [{}])[0].get("task_id") == "task_stale"
+                and result.get("recovered_locks", [{}])[0].get("job_id") == submitted["job_id"]
+                and not lock_path.exists()
+                and listed.get("status_counts", {}).get("completed") == 1
+            )
+        return self._result(case, "passed" if ok else "failed", "queue stale claim lock recovery verified")
 
     def _stage_update_count(self, run_dir: Path) -> Dict[str, int]:
         counts: Dict[str, int] = {}

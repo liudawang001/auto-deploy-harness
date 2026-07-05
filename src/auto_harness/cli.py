@@ -249,7 +249,7 @@ def main(argv=None) -> int:
         return 0 if result.get("status") == "generated" else 2
 
     if args.command == "queue":
-        queue = DeploymentQueue(config.task_queue_path, runner)
+        queue = DeploymentQueue(config.task_queue_path, runner, claim_ttl_seconds=config.queue_claim_ttl_seconds)
         if args.queue_command == "submit":
             dry_run = args.dry_run or not args.execute
             result = queue.submit(

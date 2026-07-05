@@ -1,5 +1,6 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import os
+import time
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -15,12 +16,13 @@ class DeploymentQueue:
 
     TERMINAL_STATUSES = ("completed", "failed", "cancelled")
 
-    def __init__(self, queue_dir: Path, runner: TaskRunner, gpu_probe: GpuResourceProbe = None) -> None:
+    def __init__(self, queue_dir: Path, runner: TaskRunner, gpu_probe: GpuResourceProbe = None, claim_ttl_seconds: int = 3600) -> None:
         self.queue_dir = ensure_dir(Path(queue_dir))
         self.items_dir = ensure_dir(self.queue_dir / "items")
         self.locks_dir = ensure_dir(self.queue_dir / "locks")
         self.runner = runner
         self.gpu_probe = gpu_probe or GpuResourceProbe()
+        self.claim_ttl_seconds = max(0, int(claim_ttl_seconds))
 
     def submit(
         self,
@@ -77,6 +79,7 @@ class DeploymentQueue:
         effective_gpu_slots = int(gpu_probe.get("available_slots") or 0)
         selected: List[Dict] = []
         skipped: List[Dict] = []
+        recovered_locks: List[Dict] = []
         used_gpu = 0
         for item in self._queued_items():
             if item.get("require_gpu") and used_gpu >= effective_gpu_slots:
@@ -86,6 +89,11 @@ class DeploymentQueue:
             if not claimed:
                 skipped.append({"job_id": item["job_id"], "reason": "job already claimed"})
                 continue
+            if claimed.get("_stale_lock_recovered"):
+                recovered_locks.append({
+                    "job_id": item["job_id"],
+                    "lock_age_seconds": claimed.get("_stale_lock_age_seconds"),
+                })
             selected.append(claimed)
             if item.get("require_gpu"):
                 used_gpu += 1
@@ -101,6 +109,7 @@ class DeploymentQueue:
             "started": len(results),
             "results": results,
             "skipped": skipped,
+            "recovered_locks": recovered_locks,
         }
 
     def _run_items(self, items: List[Dict], max_workers: int) -> List[Dict]:
@@ -148,6 +157,7 @@ class DeploymentQueue:
 
     def _claim_item(self, item: Dict) -> Optional[Dict]:
         lock_path = self._lock_path(item["job_id"])
+        recovered = self._recover_stale_lock(lock_path)
         try:
             fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
         except FileExistsError:
@@ -167,8 +177,29 @@ class DeploymentQueue:
         current["updated_at"] = now
         current["claim"] = {"pid": os.getpid(), "claimed_at": now, "lock_path": str(lock_path)}
         current["_lock_path"] = str(lock_path)
+        if recovered:
+            current["claim"]["stale_lock_recovered"] = True
+            current["claim"]["stale_lock_age_seconds"] = recovered.get("age_seconds")
+            current["_stale_lock_recovered"] = True
+            current["_stale_lock_age_seconds"] = recovered.get("age_seconds")
         self._write(current)
         return current
+
+    def _recover_stale_lock(self, lock_path: Path) -> Optional[Dict]:
+        if not lock_path.exists() or self.claim_ttl_seconds <= 0:
+            return None
+        try:
+            age = max(0.0, os.path.getmtime(str(lock_path)))
+            age_seconds = max(0, int(time.time() - age))
+        except OSError:
+            return None
+        if age_seconds < self.claim_ttl_seconds:
+            return None
+        try:
+            lock_path.unlink()
+        except FileNotFoundError:
+            pass
+        return {"age_seconds": age_seconds}
 
     def _queued_items(self) -> List[Dict]:
         return [item for item in self._items() if item.get("status") == "queued"]

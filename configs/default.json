@@ -19,6 +19,7 @@
   "task_queue_dir": "queue",
   "queue_max_concurrent_tasks": 1,
   "queue_gpu_slots": null,
+  "queue_claim_ttl_seconds": 3600,
   "model_download_max_workers": 1,
   "model_download_retry_count": 2,
   "model_download_retry_backoff_seconds": 1.0,

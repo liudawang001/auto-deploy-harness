@@ -29,6 +29,7 @@ class HarnessConfig:
     task_queue_dir: str = "queue"
     queue_max_concurrent_tasks: int = 1
     queue_gpu_slots: Optional[int] = None
+    queue_claim_ttl_seconds: int = 3600
     model_download_max_workers: int = 1
     model_download_retry_count: int = 2
     model_download_retry_backoff_seconds: float = 1.0
