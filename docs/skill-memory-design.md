@@ -158,15 +158,23 @@ proposal 会记录：
 - 聚类条件：stage、category、frameworks、count、memory ids。
 - 目标 skill，例如 verify 问题默认指向 `skills/verify-evidence/SKILL.md`。
 - 建议追加的 Markdown 规则片段。
+- `approval` 审批元数据，默认 `status=pending`。
+- `regression_binding`，列出 apply 后建议运行的 benchmark manifest 和 case ids。
 - `review_required=true`，表示必须人工确认后才能进入 skill。
 
-只有显式执行下面的命令才会修改 skill：
+必须先审批：
+
+```bash
+PYTHONPATH=src python3 -m auto_harness.cli memory-promote --approve --proposal memory/promotions/<proposal_id>.json --reviewer <name> --note "benchmarks passed"
+```
+
+只有审批后显式执行下面的命令才会修改 skill：
 
 ```bash
 PYTHONPATH=src python3 -m auto_harness.cli memory-promote --apply --proposal memory/promotions/<proposal_id>.json
 ```
 
-这条命令会用 marker 包裹追加内容，避免重复应用。默认 proposal 模式不会改 `skills/*/SKILL.md`，也不会执行 shell。任何从 memory 提升到 skill 的内容都不能包含密钥值、一次性路径或未经验证的临时 workaround。
+这条命令会用 marker 包裹追加内容，避免重复应用。默认 proposal 模式不会改 `skills/*/SKILL.md`，也不会执行 shell。任何从 memory 提升到 skill 的内容都不能包含密钥值、一次性路径或未经验证的临时 workaround。审批前 apply 会返回 `approval_required`，不会修改 skill。
 
 ## Verify 模块为什么要重点设计
 

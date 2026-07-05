@@ -4,6 +4,15 @@
 
 ### 已完成
 
+- 继续执行到 90% 阶段：
+  - `EnvSolveModule` 新增 `gpu_package_matrix`，对 `xformers`、`flash-attn`、`bitsandbytes`、`triton` 按 Python 版本、平台、CPU 架构、CUDA 可用性和已选 Torch wheel 输出 `compatible` / `risky` / `blocked`、原因和建议动作。
+  - GPU 依赖风险不再只是自然语言提示，会写入结构化阶段结果；CPU Torch fallback 下的 `flash-attn` / `xformers` / `bitsandbytes` 会进入 blocked，非 Linux 的 `triton` 会进入 blocked，便于后续 repair/resume 自动换方案。
+  - Docker backend 支持 `--gpus`、`model_cache` 挂载、容器名、`docker logs` 日志命令和 `docker rm -f` 清理命令元数据；CLI 新增 `--docker-gpus` 和 `--docker-model-cache-dir`，配置新增 `docker_gpus` / `docker_model_cache_dir`。
+  - `TaskRunner` 默认会把项目 `model_cache` 作为 Docker 挂载源；真实执行仍受 `--execute`、权限开关和 `allowed_commands` 中的 `docker` 白名单约束。
+  - `memory-promote` proposal 新增 `approval` 审批元数据和 `regression_binding` 回归 case 绑定；审批前 `--apply` 返回 `approval_required`，必须先执行 `memory-promote --approve --proposal <path>`。
+  - `VerifyModule` 支持长耗时 verify 进度回调，写入 `service_discovered`、`first_inference_probe_started`、`http_trace_request_sent`、`browser_probe_completed`、`verify_completed` 等状态，避免首次模型加载期间状态不可见。
+  - Benchmark cases 从 31 个扩展到 35 个，新增 `gpu_package_matrix_rules`、`docker_gpu_cache_backend`、`memory_promotion_approval_regression`、`verify_progress_refresh`。
+  - README、优化路线图、skill memory 设计和相关 skill 控制文档已同步。
 - 五阶段优化任务 - 阶段 1：
   - `TaskRunner.run_existing` 在 repair resume 中间阶段恢复时生成 `reports/execution_audit.json`，记录 requested/effective start stage、dry-run 标记、复用阶段、重跑阶段和 fallback 状态。
   - 新增 `resume_execution_plan` 事件，便于后续从 `events.jsonl` 审计本次恢复执行为什么从某个阶段开始。
@@ -86,13 +95,13 @@
 4. Git LFS 检测：识别 LFS pointer 和 `.gitattributes`，缺 `git-lfs` 时进入诊断态，并给出准备命令。
 5. Playwright smoke 治理：补齐真实浏览器 backend 的本地 smoke 文档和手动 CI workflow。
 
-按 `docs/optimization-roadmap.md` 的“全自动开源模型部署 Agent”目标估算，当前总项目进度约为 **82%**。
+按 `docs/optimization-roadmap.md` 的“全自动开源模型部署 Agent”目标估算，当前总项目进度约为 **90%**。
 
 估算依据：
 
-- 已完成约 85% 的 P0/P1 核心控制链路：下载缓存、断点续传、verify 防误判、repair plan/policy/resume、benchmark 回归体系已经成型。
-- 已完成约 75% 的真实开源模型部署能力：Hugging Face / ModelScope 下载、Git LFS 检测与进度解析、Gradio/Streamlit/browser verify、PyTorch CPU/CUDA wheel 求解、本地 E2E fixture matrix 和 Docker backend 第一版已具备，但真实联网/真实大模型端到端矩阵仍需扩大。
-- 尚未完成的关键 18% 主要是：Docker GPU/model_cache/log cleanup 完整化、真实大模型长耗时 E2E 验证、GPU 包版本矩阵和长耗时 verify。
+- 已完成约 92% 的 P0/P1 核心控制链路：下载缓存、断点续传、verify 防误判、repair plan/policy/resume、memory promotion 审批、benchmark 回归体系已经成型。
+- 已完成约 86% 的真实开源模型部署能力：Hugging Face / ModelScope 下载、Git LFS 检测与进度解析、Gradio/Streamlit/browser verify、PyTorch CPU/CUDA wheel 求解、GPU 包兼容矩阵、本地 E2E fixture matrix 和 Docker GPU/cache backend 已具备，但真实联网/真实大模型端到端矩阵仍需扩大。
+- 尚未完成的关键 10% 主要是：真实联网长耗时 E2E、真实 Docker/GPU smoke、vLLM/OpenAI-compatible server verify、更多模型仓库源和可视化 dashboard。
 - 继续执行 P0/P1 优化任务：
   - `ModelCache.reserve` 会为缓存目录写入 `.auto_harness_asset.json`，记录 source、repo id、revision、origin、asset id 和 cache key。
   - `ModelCache.entries()` 会读取缓存元数据，返回 repo id、revision、origin，便于后续审计和精细清理。
@@ -178,11 +187,11 @@
 
 ### 下一步
 
-1. 扩展 GPU 包版本矩阵：`xformers`、`flash-attn`、`bitsandbytes`、`triton` 与 Python/CUDA/Torch 的组合规则。
-2. 扩展真实联网 E2E：选择小型 Hugging Face / ModelScope demo 和一个真实 Git LFS 权重仓库做可选长耗时 smoke。
-3. 为 memory promotion 增加人工审批元数据和 apply 后的 fixture 回归绑定。
-4. Docker backend 增加 GPU 参数、model_cache 挂载、容器日志收集和容器清理。
-5. 扩展长耗时 verify，包括首次推理加载模型时的持续状态刷新。
+1. 扩展真实联网 E2E：选择小型 Hugging Face / ModelScope demo 和一个真实 Git LFS 权重仓库做可选长耗时 smoke。
+2. 做真实 Docker/GPU smoke：验证 `--gpus all`、模型缓存挂载、容器日志和清理命令在有 Docker/GPU 的机器上可用。
+3. 增加 vLLM / OpenAI-compatible server 识别与 verify。
+4. 扩展 GPU 包矩阵到具体版本：Torch 2.1/2.2/2.3、CUDA 11.8/12.1/12.4、Python 3.10/3.11/3.12。
+5. 为 memory promotion 增加 apply 后自动运行绑定 benchmark case 的执行器和 dashboard。
 
 ## 2026-07-03
 

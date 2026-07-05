@@ -22,11 +22,13 @@ class EnvDeployModule:
         execution_backend: str = "local",
         docker_image: str = "python:3.10-slim",
         docker_network: str = "bridge",
+        docker_gpus: str = "none",
+        docker_model_cache_dir: str = "",
     ) -> StageResult:
         plan: List[List[str]] = analysis.get("install_plan", [])
         if not plan:
             return StageResult("env_deploy", "uncertain", "no install plan detected", {"commands": []})
-        effective_plan, sandbox = self._effective_plan(repo_dir, plan, execution_backend, docker_image, docker_network)
+        effective_plan, sandbox = self._effective_plan(repo_dir, plan, execution_backend, docker_image, docker_network, docker_gpus, docker_model_cache_dir)
         if not execute:
             return StageResult(
                 "env_deploy",
@@ -87,14 +89,30 @@ class EnvDeployModule:
             },
         )
 
-    def _effective_plan(self, repo_dir: Path, plan: List[List[str]], execution_backend: str, docker_image: str, docker_network: str):
+    def _effective_plan(
+        self,
+        repo_dir: Path,
+        plan: List[List[str]],
+        execution_backend: str,
+        docker_image: str,
+        docker_network: str,
+        docker_gpus: str,
+        docker_model_cache_dir: str,
+    ):
         if execution_backend != "docker":
             return [list(cmd) for cmd in plan], {"backend": "local"}
-        backend = DockerSandboxBackend(image=docker_image, network=docker_network)
+        backend = DockerSandboxBackend(
+            image=docker_image,
+            network=docker_network,
+            gpus=docker_gpus,
+            model_cache_dir=Path(docker_model_cache_dir) if docker_model_cache_dir else None,
+        )
         sandbox_commands = [backend.wrap(repo_dir, cmd).to_dict() for cmd in plan]
         return [item["effective_cmd"] for item in sandbox_commands], {
             "backend": "docker",
             "image": docker_image,
             "network": docker_network,
+            "gpus": docker_gpus,
+            "model_cache_dir": docker_model_cache_dir,
             "commands": sandbox_commands,
         }

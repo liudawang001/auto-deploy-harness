@@ -9,6 +9,8 @@
   "execution_backend": "local",
   "docker_image": "python:3.10-slim",
   "docker_network": "bridge",
+  "docker_gpus": "none",
+  "docker_model_cache_dir": "",
   "use_agent_analyzer": false,
   "agent_timeout_seconds": 900,
   "skills_dir": "skills",

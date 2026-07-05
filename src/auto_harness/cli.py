@@ -29,6 +29,8 @@ def build_parser() -> argparse.ArgumentParser:
     deploy.add_argument("--execution-backend", choices=["local", "docker"], default=None)
     deploy.add_argument("--docker-image", default=None)
     deploy.add_argument("--docker-network", default=None)
+    deploy.add_argument("--docker-gpus", default=None)
+    deploy.add_argument("--docker-model-cache-dir", default=None)
 
     resume = sub.add_parser("resume", help="resume an existing task")
     resume.add_argument("--task-id", required=True)
@@ -40,6 +42,8 @@ def build_parser() -> argparse.ArgumentParser:
     resume.add_argument("--execution-backend", choices=["local", "docker"], default=None)
     resume.add_argument("--docker-image", default=None)
     resume.add_argument("--docker-network", default=None)
+    resume.add_argument("--docker-gpus", default=None)
+    resume.add_argument("--docker-model-cache-dir", default=None)
 
     status = sub.add_parser("status", help="show task status")
     status.add_argument("--task-id", required=True)
@@ -57,7 +61,10 @@ def build_parser() -> argparse.ArgumentParser:
     memory_promote.add_argument("--category", default=None)
     memory_promote.add_argument("--output-dir", default="")
     memory_promote.add_argument("--apply", action="store_true", default=False)
+    memory_promote.add_argument("--approve", action="store_true", default=False)
     memory_promote.add_argument("--proposal", default="")
+    memory_promote.add_argument("--reviewer", default="operator")
+    memory_promote.add_argument("--note", default="")
 
     llm = sub.add_parser("llm-test", help="test LLM provider")
     llm.add_argument("--provider", choices=["mock", "xunfei"], default="mock")
@@ -93,6 +100,10 @@ def _apply_cli_overrides(config: HarnessConfig, args) -> None:
         config.docker_image = args.docker_image
     if getattr(args, "docker_network", None):
         config.docker_network = args.docker_network
+    if getattr(args, "docker_gpus", None):
+        config.docker_gpus = args.docker_gpus
+    if getattr(args, "docker_model_cache_dir", None):
+        config.docker_model_cache_dir = args.docker_model_cache_dir
 
 
 def main(argv=None) -> int:
@@ -143,7 +154,12 @@ def main(argv=None) -> int:
 
     if args.command == "memory-promote":
         promoter = MemoryPromoter(config.memory_path, config.skills_path)
-        if args.apply:
+        if args.approve:
+            if not args.proposal:
+                print(json.dumps({"status": "failed", "error": "--proposal is required with --approve"}, ensure_ascii=False, indent=2))
+                return 2
+            result = promoter.approve(Path(args.proposal), reviewer=args.reviewer, note=args.note)
+        elif args.apply:
             if not args.proposal:
                 print(json.dumps({"status": "failed", "error": "--proposal is required with --apply"}, ensure_ascii=False, indent=2))
                 return 2

@@ -25,7 +25,9 @@ description: 求解 Python/CUDA/Torch 依赖环境。用于 env_solve 阶段，�
 - 探测本机 `AUTO_HARNESS_CUDA_VERSION`、`nvidia-smi` 或 `nvcc` 暴露的 CUDA 版本。
 - CUDA 12.1+ 优先选择 PyTorch `cu121` wheel index；CUDA 11.8+ 优先选择 `cu118`；没有兼容 CUDA 时生成 `cpu` 方案。
 - 生成的 Torch 安装命令必须进入 `install_plan`，并在 `torch_solution.fallbacks` 中保留 CPU fallback，便于 repair/resume 改用。
-- 检测到 `flash-attn`、`xformers`、`bitsandbytes`、`triton` 时，标记 CUDA/toolchain 风险。
+- 检测到 `flash-attn`、`xformers`、`bitsandbytes`、`triton` 时，生成结构化 `gpu_package_matrix`，按 Python、平台、架构、CUDA 可用性和已选 Torch wheel 标记 `compatible`、`risky` 或 `blocked`。
+- `flash-attn`、`xformers`、`bitsandbytes` 在 CPU Torch fallback 或无 CUDA 时必须标记为 `blocked`，不能继续假装可安装。
+- `triton` 在非 Linux 平台默认标记为 `blocked`；GPU workload 但 Torch 为 CPU fallback 时标记为 `risky`。
 - 检测到 GPU/CUDA 信号但 Torch 未 pin 时，标记 Torch wheel variant 风险。
 - 只生成计划和风险说明，真正执行仍由 `env_deploy` 根据命令白名单完成。
 
@@ -40,6 +42,7 @@ description: 求解 Python/CUDA/Torch 依赖环境。用于 env_solve 阶段，�
 - `constraint_reasons`: 每条约束的原因
 - `local_environment`: Python、平台、CUDA 探测来源和版本
 - `torch_solution`: selected wheel、index URL、命令、fallbacks 和 notes
+- `gpu_package_matrix`: 每个 GPU 包的 declared requirement、status、requires_cuda、reasons 和 recommended_actions
 - `risk_reasons`: GPU/CUDA/Torch/构建相关风险
 
 ## 安全边界

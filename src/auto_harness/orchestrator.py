@@ -180,6 +180,8 @@ class TaskRunner:
                 execution_backend=self.config.execution_backend,
                 docker_image=self.config.docker_image,
                 docker_network=self.config.docker_network,
+                docker_gpus=self.config.docker_gpus,
+                docker_model_cache_dir=self._docker_model_cache_dir(),
             )
             self._attach_context(env_result, env_context)
             self._attach_repair_overlay(env_result, repair_overlay)
@@ -213,6 +215,8 @@ class TaskRunner:
                 execution_backend=self.config.execution_backend,
                 docker_image=self.config.docker_image,
                 docker_network=self.config.docker_network,
+                docker_gpus=self.config.docker_gpus,
+                docker_model_cache_dir=self._docker_model_cache_dir(),
             )
             self._attach_context(runner_result, runner_context)
             results["runner"] = to_plain(runner_result)
@@ -223,7 +227,10 @@ class TaskRunner:
             runner_data = results["runner"]["data"]
 
         verify_context = self._stage_context("verify", deploy_analysis)
-        verify_result = VerifyModule(stage_context=verify_context).verify(run_dir, deploy_analysis, runner_data)
+        verify_result = VerifyModule(
+            stage_context=verify_context,
+            progress_callback=lambda progress: self.store.update_stage(task_id, "verify", "running_verify", progress=progress),
+        ).verify(run_dir, deploy_analysis, runner_data)
         self._attach_repair_overlay(verify_result, repair_overlay)
         results["verify"] = to_plain(verify_result)
         self._save_stage(task_id, "verify", verify_result)
@@ -278,6 +285,9 @@ class TaskRunner:
                 "verify_hint_count": len(overlay.get("verify_hints") or []),
                 "source_dir": overlay.get("source_dir"),
             })
+
+    def _docker_model_cache_dir(self) -> str:
+        return self.config.docker_model_cache_dir or str(self.config.model_cache_path)
 
     def _normalize_start_stage(self, task_id: str, start_stage: str) -> str:
         requested = start_stage if start_stage in self.RERUN_STAGES else "analyze"

@@ -47,6 +47,14 @@ class MemoryPromoter:
     def apply(self, proposal_path: Path) -> Dict:
         proposal_path = Path(proposal_path)
         proposal = json.loads(proposal_path.read_text(encoding="utf-8"))
+        approval = proposal.get("approval") if isinstance(proposal.get("approval"), dict) else {}
+        if approval.get("status") != "approved":
+            return {
+                "status": "approval_required",
+                "proposal_id": proposal.get("proposal_id"),
+                "approval": approval or {"required": True, "status": "pending"},
+                "error": "memory promotion must be approved before apply",
+            }
         target = self.skills_dir / proposal["target_skill"]
         if not target.exists():
             return {
@@ -78,6 +86,27 @@ class MemoryPromoter:
             "status": "applied",
             "proposal_id": proposal["proposal_id"],
             "target_skill": str(target),
+            "regression_binding": proposal.get("regression_binding", {}),
+        }
+
+    def approve(self, proposal_path: Path, reviewer: str = "operator", note: str = "") -> Dict:
+        proposal_path = Path(proposal_path)
+        proposal = json.loads(proposal_path.read_text(encoding="utf-8"))
+        approval = {
+            "required": True,
+            "status": "approved",
+            "reviewer": reviewer or "operator",
+            "approved_at": utc_now_iso(),
+            "note": note,
+        }
+        proposal["approval"] = approval
+        proposal["status"] = "approved"
+        write_json(proposal_path, proposal)
+        return {
+            "status": "approved",
+            "proposal_id": proposal.get("proposal_id"),
+            "approval": approval,
+            "regression_binding": proposal.get("regression_binding", {}),
         }
 
     def _read_entries(self) -> List[Dict]:
@@ -151,8 +180,35 @@ class MemoryPromoter:
             },
             "target_skill": target_skill,
             "review_required": True,
+            "approval": {
+                "required": True,
+                "status": "pending",
+                "reviewer": "",
+                "approved_at": "",
+                "note": "",
+            },
+            "regression_binding": self._regression_binding(key["stage"], key["category"], key["frameworks"]),
             "apply_command": "PYTHONPATH=src python3 -m auto_harness.cli memory-promote --apply --proposal memory/promotions/%s.json" % proposal_id,
             "suggested_skill_section": section,
+        }
+
+    def _regression_binding(self, stage: str, category: str, frameworks: List[str]) -> Dict:
+        cases = []
+        if stage == "verify" and "gradio" in frameworks:
+            cases.extend(["gradio_config_discovery", "gradio_api_shape_variation", "gradio_queue_call_followup"])
+        if stage == "verify" and "streamlit" in frameworks:
+            cases.extend(["streamlit_error_page", "browser_dom_trace"])
+        if stage in ("resource_plan", "model_prepare") or "model" in category:
+            cases.extend(["model_download_resume", "cache_hit", "git_lfs_detection", "git_lfs_prepare_execute"])
+        if stage == "env_solve" or "dependency" in category:
+            cases.extend(["env_solve_legacy_gradio_constraints", "env_solve_torch_cuda_wheel"])
+        if stage in ("env_deploy", "runner"):
+            cases.extend(["service_exits_after_start", "docker_backend_plan"])
+        return {
+            "manifest": "tests/fixtures/benchmarks/manifest.json",
+            "case_ids": self._unique_head(cases, 8),
+            "required_before_apply": True,
+            "notes": "Apply 后至少运行绑定 benchmark case；若新增规则可复用 fixture，应补充 manifest。",
         }
 
     def _target_skill(self, stage: str, category: str) -> str:
@@ -204,6 +260,8 @@ class MemoryPromoter:
             "- Frameworks: `%s`" % "`, `".join(cluster["frameworks"]),
             "- Count: `%s`" % cluster["count"],
             "- Review required: `%s`" % proposal["review_required"],
+            "- Approval status: `%s`" % proposal["approval"]["status"],
+            "- Regression cases: `%s`" % "`, `".join(proposal["regression_binding"]["case_ids"]),
             "",
             "## Suggested Skill Section",
             "",

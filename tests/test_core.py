@@ -163,6 +163,10 @@ class CoreTests(unittest.TestCase):
             "python:3.11-slim",
             "--docker-network",
             "none",
+            "--docker-gpus",
+            "all",
+            "--docker-model-cache-dir",
+            "/tmp/model-cache",
         ])
         config = HarnessConfig()
         _apply_cli_overrides(config, args)
@@ -172,6 +176,8 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(config.execution_backend, "docker")
         self.assertEqual(config.docker_image, "python:3.11-slim")
         self.assertEqual(config.docker_network, "none")
+        self.assertEqual(config.docker_gpus, "all")
+        self.assertEqual(config.docker_model_cache_dir, "/tmp/model-cache")
 
     def test_analyzer_detects_gradio_requirements(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -351,6 +357,28 @@ class CoreTests(unittest.TestCase):
             self.assertTrue(evidence["request"]["discovery"]["queue_enabled"])
             self.assertTrue(evidence["follow_up_response"]["trace_found"])
 
+    def test_verify_reports_long_running_progress(self):
+        updates = []
+
+        def fake_urlopen(req, timeout):
+            trace = req.full_url.split("_auto_harness_trace=")[1]
+            return FakeHttpResponse("handled trace %s" % trace)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / "workspace" / "repo").mkdir(parents=True)
+            result = VerifyModule(urlopen=fake_urlopen, progress_callback=lambda progress: updates.append(progress)).verify(
+                run_dir,
+                analysis={"verify_hint": {"endpoint": "http://127.0.0.1:8000/echo"}},
+                runner_result={"pid": 1234, "expected_port": 8000, "service_ready": True},
+            )
+            self.assertEqual(result.status, "passed")
+            statuses = [update["status"] for update in updates]
+            self.assertIn("service_discovered", statuses)
+            self.assertIn("first_inference_probe_started", statuses)
+            self.assertIn("http_trace_request_sent", statuses)
+            self.assertEqual(statuses[-1], "verify_completed")
+
     def test_mock_provider(self):
         result = MockLLMProvider().complete([Message(role="user", content="hello")])
         self.assertIn("mock provider response", result.text)
@@ -465,8 +493,17 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(proposal["target_skill"], "verify-evidence/SKILL.md")
             self.assertTrue((memory_dir / "promotions" / ("%s.json" % proposal["proposal_id"])).exists())
             self.assertTrue(proposal["review_required"])
-            apply_result = MemoryPromoter(memory_dir, skills_dir).apply(memory_dir / "promotions" / ("%s.json" % proposal["proposal_id"]))
+            self.assertEqual(proposal["approval"]["status"], "pending")
+            self.assertIn("gradio_config_discovery", proposal["regression_binding"]["case_ids"])
+            promoter = MemoryPromoter(memory_dir, skills_dir)
+            proposal_path = memory_dir / "promotions" / ("%s.json" % proposal["proposal_id"])
+            rejected = promoter.apply(proposal_path)
+            self.assertEqual(rejected["status"], "approval_required")
+            approved = promoter.approve(proposal_path, reviewer="tester", note="fixture passed")
+            self.assertEqual(approved["status"], "approved")
+            apply_result = promoter.apply(proposal_path)
             self.assertEqual(apply_result["status"], "applied")
+            self.assertIn("regression_binding", apply_result)
             self.assertIn("Memory Promotion: verify / trace_not_observed", skill_path.read_text(encoding="utf-8"))
 
     def test_memory_promote_cli_outputs_proposal(self):
@@ -659,6 +696,33 @@ class CoreTests(unittest.TestCase):
             self.assertIn("GPU was requested but no compatible local CUDA wheel was selected; CPU fallback is planned", result.data["risk_reasons"])
             self.assertIn("flash-attn is incompatible with the CPU torch fallback", result.data["risk_reasons"])
 
+    def test_env_solve_gpu_package_matrix_blocks_incompatible_packages(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "requirements.txt").write_text("torch\nxformers\nflash-attn\nbitsandbytes\ntriton\n", encoding="utf-8")
+            result = EnvSolveModule(local_environment={
+                "python_version": "3.11",
+                "platform": "darwin",
+                "machine": "arm64",
+                "cuda": {"available": False, "version": "", "source": "none"},
+            }).solve(
+                repo,
+                {
+                    "frameworks": ["torch"],
+                    "install_plan": [
+                        ["python3", "-m", "venv", ".venv"],
+                        [".venv/bin/python", "-m", "pip", "install", "-r", "requirements.txt"],
+                    ],
+                },
+                {"gpu_required": True, "torch_variant": "cuda_or_cpu"},
+            )
+            matrix = {item["name"]: item for item in result.data["gpu_package_matrix"]["packages"]}
+            self.assertEqual(matrix["flash-attn"]["status"], "blocked")
+            self.assertEqual(matrix["xformers"]["status"], "blocked")
+            self.assertEqual(matrix["bitsandbytes"]["status"], "blocked")
+            self.assertEqual(matrix["triton"]["status"], "blocked")
+            self.assertIn("switch torch_solution to a CUDA wheel", matrix["flash-attn"]["recommended_actions"][0])
+
     def test_model_prepare_writes_manifest_and_cache_paths(self):
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = Path(tmp) / "run"
@@ -760,6 +824,7 @@ class CoreTests(unittest.TestCase):
     def test_env_deploy_docker_backend_wraps_commands(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
+            cache = Path(tmp) / "model_cache"
             result = EnvDeployModule().deploy(
                 repo,
                 {"install_plan": [["python3", "-m", "pip", "install", "-r", "requirements.txt"]]},
@@ -767,16 +832,22 @@ class CoreTests(unittest.TestCase):
                 execution_backend="docker",
                 docker_image="python:3.11-slim",
                 docker_network="none",
+                docker_gpus="all",
+                docker_model_cache_dir=str(cache),
             )
             self.assertEqual(result.status, "passed")
             self.assertEqual(result.data["execution_backend"], "docker")
             self.assertEqual(result.data["effective_commands"][0][0], "docker")
             self.assertIn("python:3.11-slim", result.data["effective_commands"][0])
+            self.assertIn("--gpus", result.data["effective_commands"][0])
+            self.assertIn("%s:/workspace/model_cache" % cache.resolve(), result.data["effective_commands"][0])
             self.assertEqual(result.data["sandbox"]["network"], "none")
+            self.assertEqual(result.data["sandbox"]["gpus"], "all")
 
     def test_runner_docker_backend_requires_docker_allowed(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
+            cache = Path(tmp) / "model_cache"
             result = RunnerModule().run(
                 repo,
                 {"run_candidates": [{"cmd": ["python3", "app.py"], "expected_port": 7860}]},
@@ -784,10 +855,16 @@ class CoreTests(unittest.TestCase):
                 allowed_commands=["python3"],
                 execution_backend="docker",
                 docker_image="python:3.11-slim",
+                docker_gpus="all",
+                docker_model_cache_dir=str(cache),
             )
             self.assertEqual(result.status, "failed")
             self.assertEqual(result.data["cmd"][0], "docker")
             self.assertIn("-p", result.data["cmd"])
+            self.assertIn("--name", result.data["cmd"])
+            self.assertEqual(result.data["sandbox"]["gpus"], "all")
+            self.assertTrue(result.data["sandbox"]["log_command"])
+            self.assertTrue(result.data["sandbox"]["cleanup_command"])
             self.assertIn("disallowed command: docker", result.error)
 
     def test_huggingface_downloader_resumes_partial_file(self):
@@ -1426,6 +1503,10 @@ class CoreTests(unittest.TestCase):
         self.assertIn("docker_backend_plan", ids)
         self.assertIn("env_solve_legacy_gradio_constraints", ids)
         self.assertIn("env_solve_torch_cuda_wheel", ids)
+        self.assertIn("gpu_package_matrix_rules", ids)
+        self.assertIn("docker_gpu_cache_backend", ids)
+        self.assertIn("memory_promotion_approval_regression", ids)
+        self.assertIn("verify_progress_refresh", ids)
         self.assertIn("local_e2e_fixture_matrix", ids)
         self.assertIn("memory_promotion_proposal", ids)
         self.assertIn("gradio_api_shape_variation", ids)
@@ -1438,7 +1519,7 @@ class CoreTests(unittest.TestCase):
     def test_benchmark_runner_executes_all_fixture_cases(self):
         report = BenchmarkRunner().run(Path("tests/fixtures/benchmarks/manifest.json"))
         self.assertEqual(report["status"], "passed")
-        self.assertEqual(len(report["cases"]), 31)
+        self.assertEqual(len(report["cases"]), 35)
         self.assertTrue(all(case["status"] == "passed" for case in report["cases"]))
 
     def test_benchmark_cli_writes_output(self):

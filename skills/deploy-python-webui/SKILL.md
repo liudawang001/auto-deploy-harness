@@ -20,7 +20,7 @@ description: 部署 Python AI WebUI 项目。用于 env_deploy 和 runner 阶段
    - FastAPI：若能明确 `app` 对象，优先使用 `uvicorn module:app --host 127.0.0.1 --port 8000`。
 4. 将 stdout/stderr 写入 run log。
 5. 如果进程在就绪前退出，即使日志中曾打印 URL，也必须判定为失败。
-6. 当 `execution_backend=docker` 时，将安装和启动命令包装为 `docker run` 计划，并记录原始命令与 effective command。Docker 真实执行仍必须经过 `--execute`、权限开关和 `allowed_commands` 中的 `docker` 白名单。
+6. 当 `execution_backend=docker` 时，将安装和启动命令包装为 `docker run` 计划，并记录原始命令与 effective command。Docker 计划应包含 workspace mount、端口映射、网络参数、可选 `--gpus`、`model_cache` 挂载、容器日志命令和清理命令元数据。Docker 真实执行仍必须经过 `--execute`、权限开关和 `allowed_commands` 中的 `docker` 白名单。
 
 ## 常见失败处理
 
@@ -29,6 +29,7 @@ description: 部署 Python AI WebUI 项目。用于 env_deploy 和 runner 阶段
 - GPU 或模型下载失败：记录环境需求；不能用空白 UI 伪造成功。
 - API key 缺失：只记录变量名，不记录密钥值。
 - Docker 未授权：返回 command rejected，不要绕过白名单改成本地执行。
+- Docker 运行失败：优先保留 `docker logs <container>` 和 `docker rm -f <container>` 元数据，不要吞掉容器侧 stdout/stderr。
 
 ## 证据要求
 

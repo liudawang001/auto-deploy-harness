@@ -116,6 +116,26 @@
       "expected_signal": "torch_solution selects cu121 index URL and includes cpu fallback"
     },
     {
+      "id": "gpu_package_matrix_rules",
+      "purpose": "验证 xformers、flash-attn、bitsandbytes、triton 会按 Python/CUDA/Torch/平台生成兼容矩阵",
+      "expected_signal": "incompatible GPU packages are marked blocked with actionable reasons"
+    },
+    {
+      "id": "docker_gpu_cache_backend",
+      "purpose": "验证 Docker backend 支持 GPU 参数、模型缓存挂载、容器日志命令和清理命令元数据",
+      "expected_signal": "docker effective command includes --gpus and model_cache mount"
+    },
+    {
+      "id": "memory_promotion_approval_regression",
+      "purpose": "验证 memory promotion 必须先审批，并绑定 apply 后应运行的 fixture 回归用例",
+      "expected_signal": "apply is rejected before approval and succeeds after approval with regression binding"
+    },
+    {
+      "id": "verify_progress_refresh",
+      "purpose": "验证长耗时 verify 会持续刷新 service discovery、首次推理探针和完成状态",
+      "expected_signal": "progress callback receives first_inference and verify_completed updates"
+    },
+    {
       "id": "local_e2e_fixture_matrix",
       "purpose": "验证本地 Gradio、Streamlit 和 Git LFS 权重 fixture 可以跑完整 dry-run pipeline",
       "expected_signal": "all local fixtures produce pipeline_results with expected stage evidence"

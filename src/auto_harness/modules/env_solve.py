@@ -75,9 +75,10 @@ class EnvSolveModule:
         constraints, reasons = self._constraints(requirements, frameworks)
         local_environment = dict(self.local_environment or self.probe.probe())
         torch_solution = self._torch_solution(requirements, frameworks, resource_plan, local_environment, base_plan)
+        gpu_package_matrix = self._gpu_package_matrix(requirements, frameworks, resource_plan, local_environment, torch_solution)
         install_plan = self._apply_constraints(base_plan, constraints)
         install_plan = self._apply_torch_solution(install_plan, torch_solution)
-        risk_reasons = self._risk_reasons(requirements, frameworks, resource_plan, torch_solution)
+        risk_reasons = self._risk_reasons(requirements, frameworks, resource_plan, torch_solution, gpu_package_matrix)
         solved_analysis = dict(analysis)
         solved_analysis["install_plan"] = install_plan
         solved_analysis["env_solution"] = {
@@ -89,6 +90,7 @@ class EnvSolveModule:
             "constraint_reasons": reasons,
             "torch_variant": torch_solution.get("selected", {}).get("variant") or resource_plan.get("torch_variant", ""),
             "torch_solution": torch_solution,
+            "gpu_package_matrix": gpu_package_matrix,
             "gpu_required": bool(resource_plan.get("gpu_required")),
             "risk_reasons": risk_reasons,
         }
@@ -106,6 +108,7 @@ class EnvSolveModule:
                 "constraint_reasons": reasons,
                 "local_environment": local_environment,
                 "torch_solution": torch_solution,
+                "gpu_package_matrix": gpu_package_matrix,
                 "risk_reasons": risk_reasons,
                 "analysis": solved_analysis,
             },
@@ -177,7 +180,7 @@ class EnvSolveModule:
         plan.insert(insert_at, list(command))
         return plan
 
-    def _risk_reasons(self, requirements: List[str], frameworks: set, resource_plan: Dict, torch_solution: Dict) -> List[str]:
+    def _risk_reasons(self, requirements: List[str], frameworks: set, resource_plan: Dict, torch_solution: Dict, gpu_package_matrix: Dict) -> List[str]:
         reasons = []
         req_text = "\n".join(requirements).lower()
         if resource_plan.get("gpu_required"):
@@ -192,7 +195,94 @@ class EnvSolveModule:
                 reasons.append("flash-attn is incompatible with the CPU torch fallback")
         if "bitsandbytes" in req_text:
             reasons.append("bitsandbytes requires compatible CUDA and platform support")
+        for package in gpu_package_matrix.get("packages", []):
+            if package.get("status") in ("blocked", "risky"):
+                reasons.append("%s: %s" % (package["name"], "; ".join(package.get("reasons") or [])))
         return reasons
+
+    def _gpu_package_matrix(self, requirements: List[str], frameworks: set, resource_plan: Dict, local_environment: Dict, torch_solution: Dict) -> Dict:
+        package_names = ("xformers", "flash-attn", "flash_attn", "bitsandbytes", "triton")
+        declared = self._declared_packages(requirements)
+        normalized_declared = set(declared)
+        if "flash_attn" in normalized_declared:
+            normalized_declared.add("flash-attn")
+        if "torch" in frameworks and resource_plan.get("gpu_required"):
+            normalized_declared.add("triton")
+        packages = []
+        for name in package_names:
+            canonical = "flash-attn" if name == "flash_attn" else name
+            if canonical not in normalized_declared and name not in normalized_declared:
+                continue
+            if canonical == "flash-attn" and any(item["name"] == "flash-attn" for item in packages):
+                continue
+            packages.append(self._gpu_package_rule(canonical, declared, local_environment, torch_solution, resource_plan))
+        return {
+            "python_version": local_environment.get("python_version", ""),
+            "platform": local_environment.get("platform", ""),
+            "machine": local_environment.get("machine", ""),
+            "cuda": local_environment.get("cuda") or {},
+            "torch_variant": torch_solution.get("selected", {}).get("variant", ""),
+            "packages": packages,
+        }
+
+    def _declared_packages(self, requirements: List[str]) -> Dict[str, str]:
+        packages = {}
+        for requirement in requirements:
+            name = re.split(r"[<>=~!;\[]", requirement.strip(), maxsplit=1)[0].strip().lower().replace("_", "-")
+            if name:
+                packages[name] = requirement.strip()
+        return packages
+
+    def _gpu_package_rule(self, name: str, declared: Dict[str, str], local_environment: Dict, torch_solution: Dict, resource_plan: Dict) -> Dict:
+        platform_name = str(local_environment.get("platform") or "")
+        machine = str(local_environment.get("machine") or "")
+        python_version = str(local_environment.get("python_version") or "")
+        cuda = local_environment.get("cuda") or {}
+        cuda_available = bool(cuda.get("available"))
+        torch_variant = str(torch_solution.get("selected", {}).get("variant") or "")
+        reasons = []
+        actions = []
+        status = "compatible"
+        if name in {"xformers", "flash-attn", "bitsandbytes"} and (not cuda_available or torch_variant == "cpu"):
+            status = "blocked"
+            reasons.append("requires CUDA torch runtime; current selected torch variant is %s" % (torch_variant or "unknown"))
+            actions.append("switch torch_solution to a CUDA wheel before installing %s" % name)
+        if name in {"xformers", "flash-attn"} and platform_name not in {"linux"}:
+            status = "blocked"
+            reasons.append("%s is safest on Linux CUDA builds; current platform is %s" % (name, platform_name or "unknown"))
+        if name == "bitsandbytes":
+            if platform_name != "linux":
+                status = "blocked"
+                reasons.append("bitsandbytes production wheels are Linux-first; current platform is %s" % (platform_name or "unknown"))
+            if machine not in {"x86_64", "amd64"}:
+                status = "risky" if status == "compatible" else status
+                reasons.append("bitsandbytes wheel support is limited on architecture %s" % (machine or "unknown"))
+        if name == "flash-attn":
+            if python_version and python_version not in {"3.9", "3.10", "3.11"}:
+                status = "risky" if status == "compatible" else status
+                reasons.append("flash-attn has frequent wheel/build gaps outside Python 3.9-3.11")
+            actions.append("prefer --no-build-isolation only after torch CUDA wheel is installed")
+        if name == "xformers":
+            actions.append("pin xformers to a version matching the selected torch CUDA wheel")
+        if name == "triton":
+            if platform_name not in {"linux"}:
+                status = "blocked"
+                reasons.append("triton is not a stable runtime dependency on %s for this deployment path" % (platform_name or "unknown"))
+            elif torch_variant == "cpu" and resource_plan.get("gpu_required"):
+                status = "risky"
+                reasons.append("triton was inferred for a GPU workload but torch selected CPU fallback")
+            actions.append("let torch install the matching triton dependency unless the project pins it")
+        if not reasons:
+            reasons.append("%s appears compatible with the detected Python/CUDA/Torch envelope" % name)
+        return {
+            "name": name,
+            "declared_requirement": declared.get(name, ""),
+            "status": status,
+            "torch_variant": torch_variant,
+            "requires_cuda": name in {"xformers", "flash-attn", "bitsandbytes"},
+            "reasons": reasons,
+            "recommended_actions": actions,
+        }
 
     def _torch_solution(self, requirements: List[str], frameworks: set, resource_plan: Dict, local_environment: Dict, base_plan: List[List[str]]) -> Dict:
         torch_requirements = self._torch_requirements(requirements)

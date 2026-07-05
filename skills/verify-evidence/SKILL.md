@@ -20,6 +20,7 @@ description: 对 AI 自动部署结果做证据化验证。用于 verify 阶段�
    - trace 执行后生成了新的输出产物；
    - 框架事件或日志能证明当前 trace 被处理。
 5. 保存请求、响应尾部、状态码、body 模板和 evidence 文件路径。
+6. 长耗时首次推理或模型加载期间必须持续刷新阶段进度，至少记录 service discovery、HTTP trace 请求开始/结束、follow-up、browser/Streamlit probe 和最终 verify 状态。
 
 ## 诊断分类
 
@@ -34,3 +35,5 @@ description: 对 AI 自动部署结果做证据化验证。用于 verify 阶段�
 当 verify 为 `uncertain` 时，下一步应检查服务 API 形态和 runner 日志，然后更新 `verify_hint` 或新增框架专用 verify skill。不要为了让 pipeline 变绿而降低验证标准。
 
 当前 Streamlit DOM probe 不是完整浏览器自动化。它可以作为 readiness/DOM evidence，但复杂表单输入、按钮点击、文件上传仍需要后续 browser backend。
+
+对于大模型首次推理，不要因为等待时间长就提前判失败；应通过进度状态和日志证据区分“仍在加载模型”和“已经抛出异常”。

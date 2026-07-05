@@ -178,7 +178,7 @@ LLM 不能直接绕过 Python policy 执行命令或修改源码。
 - 对老项目自动识别 `numpy 2.x`、`pydantic v2`、`gradio v4` 等兼容风险。
 - 安装失败后能把错误分类给 diagnose。
 
-当前状态：已完成第一版 pipeline stage `env_solve`，可生成带约束的 install plan，覆盖老 Gradio 的 `numpy<2` / `pydantic<2`、headless OpenCV 替换建议，以及 GPU/CUDA/Torch 构建风险提示；已补充本机 CUDA 探测、PyTorch `cu121` / `cu118` / `cpu` wheel index 求解和 CPU fallback 生成。后续继续补 Docker backend、更多 GPU 包规则和真实 CUDA E2E。
+当前状态：已完成 pipeline stage `env_solve`，可生成带约束的 install plan，覆盖老 Gradio 的 `numpy<2` / `pydantic<2`、headless OpenCV 替换建议、本机 CUDA 探测、PyTorch `cu121` / `cu118` / `cpu` wheel index 求解和 CPU fallback。已新增 `xformers`、`flash-attn`、`bitsandbytes`、`triton` 的 GPU 包兼容矩阵，会按 Python/CUDA/Torch/平台输出 `compatible` / `risky` / `blocked`、原因和建议动作。后续继续补真实 CUDA E2E 与更多框架包规则。
 
 ### 3.4 model_prepare
 
@@ -598,7 +598,7 @@ Docker backend 需要支持：
 - 容器日志收集。
 - 容器清理。
 
-当前状态：已完成 Docker backend 第一版。`env_deploy` 和 `runner` 可通过 `execution_backend=docker` 生成 `docker run` effective command，支持 workspace mount、workdir、网络参数和端口映射；默认不启用，真实执行仍受 `--execute`、权限开关和 `allowed_commands` 中的 `docker` 白名单约束。后续补 GPU 参数、model_cache mount、容器日志收集和容器清理。
+当前状态：已完成 Docker backend 第二版。`env_deploy` 和 `runner` 可通过 `execution_backend=docker` 生成 `docker run` effective command，支持 workspace mount、workdir、网络参数、端口映射、`--gpus` 参数、`model_cache` 挂载、容器日志命令和清理命令元数据；默认不启用，真实执行仍受 `--execute`、权限开关和 `allowed_commands` 中的 `docker` 白名单约束。后续补真实 Docker/GPU smoke、镜像预热和更细粒度网络策略。
 
 ### 7.3 secret 保护
 
@@ -643,7 +643,7 @@ memory cluster
 - memory 不是无限堆积。
 - 高频问题会沉淀为稳定部署策略。
 
-当前状态：已完成第一版 `memory-promote` CLI。默认读取 `memory/deployment_issues.jsonl` 并按 stage/category/frameworks 聚类，生成 `memory/promotions/<proposal_id>.json` 和 `.md` 审核稿；只有显式 `--apply --proposal <path>` 才会追加到目标 `skills/*/SKILL.md`。后续补审批人元数据、apply 后 fixture 绑定回归和 promotion dashboard。
+当前状态：已完成 `memory-promote` CLI。默认读取 `memory/deployment_issues.jsonl` 并按 stage/category/frameworks 聚类，生成 `memory/promotions/<proposal_id>.json` 和 `.md` 审核稿；proposal 包含审批元数据和 `regression_binding`。`--apply --proposal <path>` 在审批前会返回 `approval_required`，必须先用 `--approve --proposal <path>` 写入审批记录。后续补 promotion dashboard 和更细的 apply 后自动 regression 执行器。
 
 ## 9. 测试与 Benchmark 计划
 
@@ -724,12 +724,12 @@ tests/fixtures/
 
 任务：
 
-1. CUDA/PyTorch compatibility solver。已完成 env_solve 第一版风险识别、本机 CUDA 探测、Torch wheel index URL 和 CPU/CUDA fallback 生成；后续补真实 CUDA E2E、`xformers` / `flash-attn` / `bitsandbytes` 的版本矩阵和 Docker fallback。
+1. CUDA/PyTorch compatibility solver。已完成 env_solve 风险识别、本机 CUDA 探测、Torch wheel index URL、CPU/CUDA fallback，以及 `xformers` / `flash-attn` / `bitsandbytes` / `triton` GPU 包兼容矩阵；后续补真实 CUDA E2E 和更多包版本细分规则。
 2. 磁盘/显存预估。
 3. ModelScope 下载支持。
 4. Git LFS 支持。已完成检测、准备命令、白名单受控执行和 `git lfs pull` 输出进度解析第一版；后续补真实 LFS 大文件 E2E。
-5. Docker backend。已完成第一版命令包装和白名单保护；后续补 GPU/model_cache/log/cleanup。
-6. 长耗时 verify。
+5. Docker backend。已完成命令包装、白名单保护、GPU 参数、model_cache 挂载、日志命令和清理命令元数据；后续补真实 Docker/GPU smoke。
+6. 长耗时 verify。已完成 verify 过程状态刷新；后续补首次推理超长等待、模型加载日志分类和可配置重试窗口。
 7. vLLM/OpenAI-compatible server 识别与 verify。
 8. 更多 dependency conflict rules。
 

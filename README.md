@@ -23,19 +23,19 @@ AI-Auto-Harness 是一个面向 AI 开源 demo 项目的自动部署与验证 Ag
 - 可选 Claude Code analyzer advisor：通过 `AUTO_HARNESS_USE_AGENT_ANALYZER=1` 启用。
 - 仓库内置 skill：位于 `skills/*/SKILL.md`，按阶段选择并记录 hash。
 - 结构化问题记忆：位于 `memory/deployment_issues.jsonl`，用于检索历史相似失败。
-- Memory promotion：`memory-promote` 会把高频 issue memory 聚类为可审核的 skill 更新 proposal；默认只生成 proposal，不直接修改 skill。
+- Memory promotion：`memory-promote` 会把高频 issue memory 聚类为可审核的 skill 更新 proposal；默认只生成 proposal，不直接修改 skill，apply 前必须先审批，并会绑定建议回归 case。
 - `resource_plan` 阶段：识别模型资产、GPU/CUDA 信号、磁盘风险和外部 token 需求。
-- `env_solve` 阶段：在安装前生成更稳定的依赖方案，识别老 Gradio 与 `numpy<2` / `pydantic<2` 兼容风险、headless OpenCV 替换建议，并根据本机 CUDA/Python 生成 PyTorch CPU/CUDA wheel 安装方案和 fallback。
-- Docker backend 第一版：`env_deploy` 和 `runner` 支持把安装/启动命令包装为 `docker run` 计划；默认仍是本地 backend，真实执行仍受 `--execute` 和命令白名单保护。
+- `env_solve` 阶段：在安装前生成更稳定的依赖方案，识别老 Gradio 与 `numpy<2` / `pydantic<2` 兼容风险、headless OpenCV 替换建议，并根据本机 CUDA/Python 生成 PyTorch CPU/CUDA wheel 安装方案、fallback 和 `xformers` / `flash-attn` / `bitsandbytes` / `triton` GPU 包兼容矩阵。
+- Docker backend：`env_deploy` 和 `runner` 支持把安装/启动命令包装为 `docker run` 计划，包含 GPU 参数、模型缓存挂载、容器日志命令和清理命令元数据；默认仍是本地 backend，真实执行仍受 `--execute` 和命令白名单保护。
 - Git LFS 检测：识别 `.gitattributes` 和 LFS pointer 文件，估算 pointer size，缺少 `git-lfs` 时给出 `git_lfs_missing` 诊断和 `git lfs install/pull` 准备命令。
 - Git LFS 受控准备：`model_prepare` 在 `--execute` 且 `git` 通过命令白名单时执行 `git lfs install` / `git lfs pull`，并记录命令结果、stderr/stdout tail、文件数/百分比/字节进度和最终状态。
 - `model_prepare` 阶段：生成模型资产 manifest、缓存 key 和 `model_cache` 路径；执行模式下支持 Hugging Face / ModelScope 文件清单解析、断点续传、并发下载、sha256/etag 校验元数据和缓存写入。
-- `verify` 增强：支持 Gradio `/config` discovery、Gradio queue `/call/<api_name>` follow-up、Streamlit DOM/HTML 证据探测，以及可选 Playwright 浏览器 DOM probe。
+- `verify` 增强：支持 Gradio `/config` discovery、Gradio queue `/call/<api_name>` follow-up、Streamlit DOM/HTML 证据探测、可选 Playwright 浏览器 DOM probe，以及长耗时首次推理验证过程中的状态刷新。
 - 日志规则分类器：对缺依赖、CUDA OOM、磁盘不足、token 权限、wheel 构建失败等常见错误生成结构化诊断；token 权限问题只提取所需环境变量名，不记录密钥值。
 - Report 会汇总 `resource_plan`、diagnosis 和 repair plan 中的 token 变量名，提示 operator/secret manager 注入，报告中不保存任何 token value。
 - Repair loop：失败或 uncertain 阶段会生成结构化修复建议，经过 policy 和 loop gate 校验后写入受控 repair artifacts；同一问题有最大尝试次数，不安全的 `rerun_from` 会回退到安全阶段，`resume` 会按 `rerun_from_effective` 从安全阶段重跑，需要人工确认的 action 可通过 `repair-approve` 批准。
 - Resume execution audit：当 repair resume 从中间阶段恢复时，会生成 `reports/execution_audit.json`，并在报告中展示复用阶段、重跑阶段和 fallback 信息。
-- Benchmark fixtures：`tests/fixtures/benchmarks` 覆盖下载续传、缓存命中、并发下载、etag 缓存失效、缓存清理、按来源/repo/keep-list 清理、服务启动后退出、历史 artifact 干扰、Gradio API shape 变化、token 缺失、token report 提示、Gradio `/config` discovery、浏览器 DOM trace、Streamlit 错误页面、HTTP 200 false-positive 防护、repair policy 拒绝、repair loop 限流、repair resume 阶段跳转、人工审批、checksum 失败、本地 E2E fixture matrix、memory promotion proposal、Docker backend plan 和 Git LFS progress parse。
+- Benchmark fixtures：`tests/fixtures/benchmarks` 覆盖下载续传、缓存命中、并发下载、etag 缓存失效、缓存清理、按来源/repo/keep-list 清理、服务启动后退出、历史 artifact 干扰、Gradio API shape 变化、token 缺失、token report 提示、Gradio `/config` discovery、浏览器 DOM trace、Streamlit 错误页面、HTTP 200 false-positive 防护、repair policy 拒绝、repair loop 限流、repair resume 阶段跳转、人工审批、checksum 失败、本地 E2E fixture matrix、memory promotion proposal/审批/回归绑定、Docker backend plan/GPU/cache/log 元数据、GPU 包矩阵、verify progress 和 Git LFS progress parse。
 - 开发进度报告：`docs/progress.md`。
 
 ## 快速开始
@@ -168,10 +168,10 @@ PYTHONPATH=src python3 -m auto_harness.cli resume --task-id <task-id> --execute 
 执行 backend 默认是 `local`。如果需要把依赖安装和服务启动包装进 Docker，可通过配置或 CLI 指定：
 
 ```bash
-PYTHONPATH=src python3 -m auto_harness.cli deploy --repo <repo> --execute --allow-install --allow-start --execution-backend docker --docker-image python:3.11-slim
+PYTHONPATH=src python3 -m auto_harness.cli deploy --repo <repo> --execute --allow-install --allow-start --execution-backend docker --docker-image python:3.11-slim --docker-gpus all
 ```
 
-Docker backend 会生成 `docker run --rm -v <repo>:/workspace/repo -w /workspace/repo ...` 形式的 effective command。真正执行仍必须让 `docker` 进入 `allowed_commands`，否则会被 policy 拒绝。
+Docker backend 会生成 `docker run --rm -v <repo>:/workspace/repo -w /workspace/repo ...` 形式的 effective command。可通过 `--docker-gpus all` 添加 GPU 参数，通过 `--docker-model-cache-dir <path>` 挂载模型缓存到容器内 `/workspace/model_cache`。runner 阶段还会记录容器 `log_command` 和 `cleanup_command` 元数据，便于失败后审计和清理。真正执行仍必须让 `docker` 进入 `allowed_commands`，否则会被 policy 拒绝。
 
 缓存清理由 `ModelCache.cleanup(...)` 提供，默认 `dry_run=True`，会先返回候选列表、候选大小和预计删除项；只有显式传入 `dry_run=False` 才会删除缓存目录。
 
@@ -186,7 +186,7 @@ PYTHONPATH=src python3 -m auto_harness.cli cache --cleanup --source huggingface 
 
 每个缓存目录会写入 `.auto_harness_asset.json`，记录 source、repo id、revision、origin 和 cache key。清理计划支持 `--source`、`--repo-id`、`--keep-cache-key`、`--keep-repo-id`，用于只清理某个模型源或某个 repo，并保护关键模型。
 
-阶段进度会写入 `state.json` 的 `model_prepare.progress`，包括当前文件、已下载字节、总字节和状态。
+阶段进度会写入 `state.json` 的 `model_prepare.progress`，包括当前文件、已下载字节、总字节和状态。`verify` 阶段也会写入长耗时状态，例如 `service_discovered`、`first_inference_probe_started`、`http_trace_request_sent`、`browser_probe_completed` 和 `verify_completed`，避免首次加载模型时看不到进展。
 
 如果项目使用 Git LFS 保存权重，`resource_plan.git_lfs` 会记录：
 
@@ -266,6 +266,10 @@ PYTHONPATH=src python3 -m auto_harness.cli benchmark --manifest tests/fixtures/b
 - Git LFS pointer 和 `.gitattributes` 会被识别；缺 `git-lfs` 时 resource plan 进入诊断态，并输出 LFS 准备命令；执行阶段仍受命令白名单控制。
 - 老 Gradio / 未 pin 依赖项目会在 `env_solve` 中生成 `numpy<2`、`pydantic<2`、`opencv-python-headless` 等兼容约束，真正安装仍由 `env_deploy` 受控执行。
 - PyTorch 项目会在 `env_solve` 中根据本机 CUDA 版本选择 `cu121` / `cu118` / `cpu` wheel index，并保留 CPU fallback 方案。
+- `xformers`、`flash-attn`、`bitsandbytes`、`triton` 会按 Python/CUDA/Torch/平台生成兼容矩阵，阻塞不兼容组合并给出建议动作。
+- Docker backend 会记录 GPU 参数、模型缓存挂载、容器日志命令和清理命令元数据。
+- Memory promotion 必须先审批，并绑定 apply 后建议运行的 benchmark case。
+- 长耗时 verify 会持续刷新首次推理探针和完成状态。
 - 本地 E2E fixture matrix 会把小型 Gradio demo、Streamlit demo 和 Git LFS 权重仓库跑完整 dry-run pipeline，并检查阶段结果。
 - 服务进程启动后快速退出不能判定为启动成功。
 - token 缺失或 401 日志会被诊断为 `auth_required`。
@@ -316,7 +320,13 @@ memory/promotions/<proposal_id>.json
 memory/promotions/<proposal_id>.md
 ```
 
-proposal 会包含 memory cluster、目标 skill、建议追加的 Markdown 片段和 `review_required=true`。只有人工 review 后显式执行下面的命令，才会修改对应 `skills/*/SKILL.md`：
+proposal 会包含 memory cluster、目标 skill、建议追加的 Markdown 片段、`approval` 审批元数据、`regression_binding` 回归 case 绑定和 `review_required=true`。先审批：
+
+```bash
+PYTHONPATH=src python3 -m auto_harness.cli memory-promote --approve --proposal memory/promotions/<proposal_id>.json --reviewer <name> --note "benchmarks passed"
+```
+
+审批后显式执行下面的命令，才会修改对应 `skills/*/SKILL.md`：
 
 ```bash
 PYTHONPATH=src python3 -m auto_harness.cli memory-promote --apply --proposal memory/promotions/<proposal_id>.json

@@ -120,6 +120,14 @@ class BenchmarkRunner:
                 return self._case_env_solve_legacy_gradio_constraints(case)
             if case_id == "env_solve_torch_cuda_wheel":
                 return self._case_env_solve_torch_cuda_wheel(case)
+            if case_id == "gpu_package_matrix_rules":
+                return self._case_gpu_package_matrix_rules(case)
+            if case_id == "docker_gpu_cache_backend":
+                return self._case_docker_gpu_cache_backend(case)
+            if case_id == "memory_promotion_approval_regression":
+                return self._case_memory_promotion_approval_regression(case)
+            if case_id == "verify_progress_refresh":
+                return self._case_verify_progress_refresh(case)
             if case_id == "local_e2e_fixture_matrix":
                 return self._case_local_e2e_fixture_matrix(case, fixture_dir)
             if case_id == "memory_promotion_proposal":
@@ -641,6 +649,141 @@ class BenchmarkRunner:
             and any(cmd and cmd[0] == ".venv/bin/python" and "https://download.pytorch.org/whl/cu121" in cmd for cmd in result.data.get("install_plan", []))
         )
         return self._result(case, "passed" if ok else "failed", "env_solve torch CUDA wheel verified")
+
+    def _case_gpu_package_matrix_rules(self, case: Dict) -> Dict:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "requirements.txt").write_text("torch\nxformers\nflash-attn\nbitsandbytes\ntriton\n", encoding="utf-8")
+            result = EnvSolveModule(local_environment={
+                "python_version": "3.11",
+                "platform": "darwin",
+                "machine": "arm64",
+                "cuda": {"available": False, "version": "", "source": "benchmark"},
+            }).solve(
+                repo,
+                {"frameworks": ["torch"], "install_plan": [["python3", "-m", "venv", ".venv"]]},
+                {"gpu_required": True, "torch_variant": "cuda_or_cpu"},
+            )
+        matrix = {item["name"]: item for item in result.data.get("gpu_package_matrix", {}).get("packages", [])}
+        ok = (
+            matrix.get("flash-attn", {}).get("status") == "blocked"
+            and matrix.get("xformers", {}).get("status") == "blocked"
+            and matrix.get("bitsandbytes", {}).get("status") == "blocked"
+            and matrix.get("triton", {}).get("status") == "blocked"
+            and any("flash-attn:" in reason for reason in result.data.get("risk_reasons", []))
+        )
+        return self._result(case, "passed" if ok else "failed", "GPU package matrix rules verified")
+
+    def _case_docker_gpu_cache_backend(self, case: Dict) -> Dict:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            cache = Path(tmp) / "model_cache"
+            repo.mkdir()
+            env_result = EnvDeployModule().deploy(
+                repo,
+                {"install_plan": [["python3", "-m", "pip", "install", "-r", "requirements.txt"]]},
+                execute=False,
+                execution_backend="docker",
+                docker_image="python:3.11-slim",
+                docker_network="bridge",
+                docker_gpus="all",
+                docker_model_cache_dir=str(cache),
+            )
+            runner_result = RunnerModule().run(
+                repo,
+                {"run_candidates": [{"cmd": ["python3", "app.py"], "expected_port": 7860}]},
+                execute=True,
+                allowed_commands=["python3"],
+                execution_backend="docker",
+                docker_image="python:3.11-slim",
+                docker_gpus="all",
+                docker_model_cache_dir=str(cache),
+            )
+        env_cmd = env_result.data.get("effective_commands", [[]])[0]
+        sandbox = runner_result.data.get("sandbox", {})
+        ok = (
+            "--gpus" in env_cmd
+            and "%s:/workspace/model_cache" % cache.resolve() in env_cmd
+            and sandbox.get("gpus") == "all"
+            and sandbox.get("model_cache_mount", {}).get("container_path") == "/workspace/model_cache"
+            and sandbox.get("log_command", [None])[0] == "docker"
+            and sandbox.get("cleanup_command", [None])[0] == "docker"
+        )
+        return self._result(case, "passed" if ok else "failed", "Docker GPU/cache/log metadata verified")
+
+    def _case_memory_promotion_approval_regression(self, case: Dict) -> Dict:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            memory_dir = root / "memory"
+            skills_dir = root / "skills"
+            memory_dir.mkdir()
+            (skills_dir / "verify-evidence").mkdir(parents=True)
+            skill_path = skills_dir / "verify-evidence" / "SKILL.md"
+            skill_path.write_text("---\nname: verify-evidence\n---\n# Verify\n", encoding="utf-8")
+            entries = [
+                {
+                    "id": "mem_1",
+                    "stage": "verify",
+                    "category": "trace_not_observed",
+                    "frameworks": ["gradio"],
+                    "symptom": "trace missing",
+                    "root_cause": "api shape changed",
+                    "suggested_next_action": "use config discovery",
+                },
+                {
+                    "id": "mem_2",
+                    "stage": "verify",
+                    "category": "trace_not_observed",
+                    "frameworks": ["gradio"],
+                    "symptom": "trace missing again",
+                    "root_cause": "api shape changed",
+                    "suggested_next_action": "bind gradio regression",
+                },
+            ]
+            (memory_dir / "deployment_issues.jsonl").write_text(
+                "\n".join(json.dumps(item, ensure_ascii=False) for item in entries) + "\n",
+                encoding="utf-8",
+            )
+            promoter = MemoryPromoter(memory_dir, skills_dir)
+            proposal = promoter.propose(min_count=2)["proposals"][0]
+            proposal_path = memory_dir / "promotions" / ("%s.json" % proposal["proposal_id"])
+            rejected = promoter.apply(proposal_path)
+            approved = promoter.approve(proposal_path, reviewer="benchmark", note="regression cases selected")
+            applied = promoter.apply(proposal_path)
+            skill_text = skill_path.read_text(encoding="utf-8")
+            ok = (
+                rejected.get("status") == "approval_required"
+                and approved.get("status") == "approved"
+                and "gradio_config_discovery" in approved.get("regression_binding", {}).get("case_ids", [])
+                and applied.get("status") == "applied"
+                and "Memory Promotion" in skill_text
+            )
+        return self._result(case, "passed" if ok else "failed", "memory promotion approval and regression binding verified")
+
+    def _case_verify_progress_refresh(self, case: Dict) -> Dict:
+        updates = []
+
+        def fake_urlopen(req, timeout):
+            trace = req.full_url.split("_auto_harness_trace=")[1]
+            return _FakeResponse("handled trace %s" % trace)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / "workspace" / "repo").mkdir(parents=True)
+            result = VerifyModule(urlopen=fake_urlopen, progress_callback=lambda progress: updates.append(progress)).verify(
+                run_dir,
+                analysis={"verify_hint": {"endpoint": "http://127.0.0.1:8000/echo"}},
+                runner_result={"pid": 1234, "expected_port": 8000, "service_ready": True},
+            )
+        statuses = [update.get("status") for update in updates]
+        ok = (
+            result.status == "passed"
+            and "service_discovered" in statuses
+            and "first_inference_probe_started" in statuses
+            and "http_trace_request_sent" in statuses
+            and statuses[-1] == "verify_completed"
+        )
+        return self._result(case, "passed" if ok else "failed", "verify progress refresh verified")
 
     def _case_local_e2e_fixture_matrix(self, case: Dict, fixture_dir: Path) -> Dict:
         fixture_root = fixture_dir.parent / "e2e"

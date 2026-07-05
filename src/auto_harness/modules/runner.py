@@ -8,6 +8,7 @@ from auto_harness.diagnostics import LogClassifier
 from auto_harness.runtime import DockerSandboxBackend
 from auto_harness.utils.commands import is_allowed_command
 from auto_harness.utils.ports import is_port_open
+from auto_harness.utils.files import short_hash
 
 
 class RunnerModule:
@@ -24,12 +25,22 @@ class RunnerModule:
         execution_backend: str = "local",
         docker_image: str = "python:3.10-slim",
         docker_network: str = "bridge",
+        docker_gpus: str = "none",
+        docker_model_cache_dir: str = "",
     ) -> StageResult:
         candidates: List[Dict] = analysis.get("run_candidates", [])
         if not candidates:
             return StageResult("runner", "uncertain", "no run candidate detected", {"run_candidates": []})
         candidate = candidates[0]
-        effective_candidate, sandbox = self._effective_candidate(repo_dir, candidate, execution_backend, docker_image, docker_network)
+        effective_candidate, sandbox = self._effective_candidate(
+            repo_dir,
+            candidate,
+            execution_backend,
+            docker_image,
+            docker_network,
+            docker_gpus,
+            docker_model_cache_dir,
+        )
         if not execute:
             return StageResult(
                 "runner",
@@ -92,14 +103,30 @@ class RunnerModule:
                 data["diagnosis"] = self.log_classifier.classify("")
         return StageResult("runner", status, "service process started" if status == "passed" else "service process exited", data)
 
-    def _effective_candidate(self, repo_dir: Path, candidate: Dict, execution_backend: str, docker_image: str, docker_network: str):
+    def _effective_candidate(
+        self,
+        repo_dir: Path,
+        candidate: Dict,
+        execution_backend: str,
+        docker_image: str,
+        docker_network: str,
+        docker_gpus: str,
+        docker_model_cache_dir: str,
+    ):
         if execution_backend != "docker":
             return dict(candidate), {"backend": "local"}
         port = int(candidate.get("expected_port") or 0)
-        sandbox_command = DockerSandboxBackend(image=docker_image, network=docker_network).wrap(
+        container_name = "auto-harness-%s-%s" % (short_hash(str(repo_dir), 8), port or "svc")
+        sandbox_command = DockerSandboxBackend(
+            image=docker_image,
+            network=docker_network,
+            gpus=docker_gpus,
+            model_cache_dir=Path(docker_model_cache_dir) if docker_model_cache_dir else None,
+        ).wrap(
             repo_dir,
             candidate.get("cmd", []),
             ports=[port] if port else [],
+            container_name=container_name,
         )
         effective = dict(candidate)
         effective["cmd"] = sandbox_command.effective_cmd

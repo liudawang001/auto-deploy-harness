@@ -14,33 +14,46 @@ from auto_harness.verify import BrowserVerifier, StreamlitVerifier
 
 
 class VerifyModule:
-    def __init__(self, urlopen=None, stage_context: Optional[Dict] = None, browser_verifier: BrowserVerifier = None) -> None:
+    def __init__(
+        self,
+        urlopen=None,
+        stage_context: Optional[Dict] = None,
+        browser_verifier: BrowserVerifier = None,
+        progress_callback=None,
+    ) -> None:
         self.urlopen = urlopen or urllib.request.urlopen
         self.stage_context = stage_context or {}
         self.streamlit_verifier = StreamlitVerifier(urlopen=self.urlopen)
         self.browser_verifier = browser_verifier or BrowserVerifier()
+        self.progress_callback = progress_callback
 
     def verify(self, run_dir: Path, analysis: Dict, runner_result: Dict) -> StageResult:
         trace_id = "verify_%s_%s" % (compact_timestamp(), short_hash(str(run_dir), 6))
         service = self._service_discovery(runner_result)
+        self._progress("service_discovered", {"service": service})
         evidence_dir = run_dir / "evidence"
         evidence_dir.mkdir(parents=True, exist_ok=True)
         verify_workspace = run_dir / "workspace" / "verify_workspace"
         repo_dir = run_dir / "workspace" / "repo"
         before = snapshot_files(repo_dir)
+        self._progress("first_inference_probe_started", {"probe": "http_trace"})
         http_evidence = self._execute_http_trace(trace_id, service, analysis, evidence_dir)
+        self._progress("first_inference_probe_completed", {"probe": "http_trace", "check": http_evidence["check"] if http_evidence else {}})
         after = snapshot_files(repo_dir)
         changed = diff_snapshot(before, after)
         checks = self._artifact_checks(repo_dir, changed)
         if http_evidence:
             checks.append(http_evidence["check"])
         streamlit_evidence = self._execute_streamlit_probe(trace_id, service, analysis, evidence_dir)
+        self._progress("streamlit_probe_completed", {"check": streamlit_evidence["check"] if streamlit_evidence else {}})
         if streamlit_evidence:
             checks.append(streamlit_evidence["check"])
         browser_evidence = self._execute_browser_probe(trace_id, service, analysis, evidence_dir)
+        self._progress("browser_probe_completed", {"check": browser_evidence["check"] if browser_evidence else {}})
         if browser_evidence:
             checks.append(browser_evidence["check"])
         status = "pass" if self._can_pass(service, checks) else "uncertain"
+        self._progress("verify_completed", {"result_status": status, "trace_id": trace_id})
         diagnosis = {
             "category": "none" if status == "pass" else "unknown",
             "root_cause": "" if status == "pass" else "dry-run or missing end-to-end evidence",
@@ -114,6 +127,7 @@ class VerifyModule:
             req = urllib.request.Request(traced_url, data=body, method=method)
             for name, value in headers.items():
                 req.add_header(name, value)
+            self._progress("http_trace_request_sent", {"method": method, "url": traced_url})
             with self.urlopen(req, timeout=10) as resp:
                 body = resp.read().decode("utf-8", errors="replace")
                 response_record = {
@@ -124,6 +138,7 @@ class VerifyModule:
                     status = "pass"
                     reason = "HTTP response contains trace id"
                 elif request_plan.get("follow_up_url_template"):
+                    self._progress("http_trace_follow_up_started", {"trace_id": trace_id})
                     follow_up_record = self._execute_follow_up_trace(
                         request_plan["follow_up_url_template"],
                         body,
@@ -348,6 +363,17 @@ class VerifyModule:
             if isinstance(parsed, dict) and isinstance(parsed.get("event_id"), str):
                 return parsed["event_id"]
         return None
+
+    def _progress(self, status: str, detail: Optional[Dict] = None) -> None:
+        if not self.progress_callback:
+            return
+        payload = {"status": status}
+        if detail:
+            payload.update(detail)
+        try:
+            self.progress_callback(payload)
+        except Exception:
+            return
 
     def _append_trace_query(self, endpoint: str, trace_id: str) -> str:
         parsed = urllib.parse.urlparse(endpoint)
