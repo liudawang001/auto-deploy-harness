@@ -4,6 +4,10 @@
 
 ### 已完成
 
+- 继续执行 90% 后三阶段开发 - 阶段 1：
+  - 新增 `LiveSmokePlanner`，生成可选真实联网 E2E smoke 矩阵，覆盖 Hugging Face tiny model、ModelScope public model、真实 Git LFS 仓库和可选中等 Hugging Face 模型。
+  - 新增 CLI `live-smoke-plan`，只输出可审计计划，不触发网络下载或服务启动；计划包含目标 repo、命令、预计耗时、所需环境变量和期望验证信号。
+  - README 补充 live smoke 用法，明确默认 benchmark 仍不访问外网。
 - 继续执行到 90% 阶段：
   - `EnvSolveModule` 新增 `gpu_package_matrix`，对 `xformers`、`flash-attn`、`bitsandbytes`、`triton` 按 Python 版本、平台、CPU 架构、CUDA 可用性和已选 Torch wheel 输出 `compatible` / `risky` / `blocked`、原因和建议动作。
   - GPU 依赖风险不再只是自然语言提示，会写入结构化阶段结果；CPU Torch fallback 下的 `flash-attn` / `xformers` / `bitsandbytes` 会进入 blocked，非 Linux 的 `triton` 会进入 blocked，便于后续 repair/resume 自动换方案。

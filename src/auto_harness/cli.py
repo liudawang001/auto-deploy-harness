@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 
 from auto_harness.config import HarnessConfig
-from auto_harness.benchmarks import BenchmarkRunner
+from auto_harness.benchmarks import BenchmarkRunner, LiveSmokePlanner
 from auto_harness.memory import MemoryPromoter
 from auto_harness.orchestrator import TaskRunner
 from auto_harness.providers import Message, MockLLMProvider, XunfeiSparkProvider
@@ -73,6 +73,11 @@ def build_parser() -> argparse.ArgumentParser:
     benchmark = sub.add_parser("benchmark", help="run local benchmark fixtures")
     benchmark.add_argument("--manifest", default="tests/fixtures/benchmarks/manifest.json")
     benchmark.add_argument("--output", default="")
+
+    live_smoke = sub.add_parser("live-smoke-plan", help="print optional networked E2E smoke plan")
+    live_smoke.add_argument("--include-long-running", action="store_true", default=False)
+    live_smoke.add_argument("--execution-backend", choices=["local", "docker"], default="local")
+    live_smoke.add_argument("--execute", action="store_true", default=False)
 
     cache = sub.add_parser("cache", help="inspect or clean model cache")
     cache.add_argument("--cleanup", action="store_true", default=False)
@@ -186,6 +191,14 @@ def main(argv=None) -> int:
         report = BenchmarkRunner().run(Path(args.manifest), output)
         print(json.dumps(report, ensure_ascii=False, indent=2))
         return 0 if report.get("status") == "passed" else 2
+
+    if args.command == "live-smoke-plan":
+        plan = LiveSmokePlanner(default_execute=args.execute).plan(
+            include_long_running=args.include_long_running,
+            execution_backend=args.execution_backend,
+        )
+        print(json.dumps(plan, ensure_ascii=False, indent=2))
+        return 0
 
     if args.command == "cache":
         if args.cleanup:

@@ -8,7 +8,7 @@ from contextlib import redirect_stdout
 from pathlib import Path
 
 from auto_harness.config import HarnessConfig
-from auto_harness.benchmarks import BenchmarkRunner
+from auto_harness.benchmarks import BenchmarkRunner, LiveSmokePlanner
 from auto_harness.cli import _apply_cli_overrides, build_parser, main as cli_main
 from auto_harness.assets.huggingface import HuggingFaceDownloader
 from auto_harness.assets.modelscope import ModelScopeDownloader
@@ -1536,6 +1536,29 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(code, 0)
             data = json.loads(output.read_text(encoding="utf-8"))
             self.assertEqual(data["status"], "passed")
+
+    def test_live_smoke_planner_generates_optional_network_matrix(self):
+        plan = LiveSmokePlanner().plan(include_long_running=True, execution_backend="docker")
+        self.assertEqual(plan["status"], "planned")
+        self.assertTrue(plan["network_required"])
+        self.assertFalse(plan["runs_commands"])
+        self.assertEqual(plan["target_count"], 4)
+        ids = {target["id"] for target in plan["targets"]}
+        self.assertIn("hf_tiny_gradio_space", ids)
+        self.assertIn("modelscope_tiny_model", ids)
+        self.assertIn("git_lfs_small_weight_repo", ids)
+        self.assertIn("hf_medium_transformers_demo", ids)
+        self.assertIn("HF_TOKEN", plan["required_env_vars"])
+        self.assertTrue(all("--execution-backend" in target["command"] for target in plan["targets"]))
+
+    def test_live_smoke_plan_cli_outputs_json_without_running_network(self):
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = cli_main(["live-smoke-plan", "--include-long-running"])
+        self.assertEqual(code, 0)
+        plan = json.loads(output.getvalue())
+        self.assertEqual(plan["kind"], "optional_live_e2e_smoke")
+        self.assertFalse(plan["runs_commands"])
 
     def test_cache_cli_cleanup_defaults_to_dry_run(self):
         with tempfile.TemporaryDirectory() as tmp:
