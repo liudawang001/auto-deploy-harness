@@ -204,6 +204,11 @@
       "id": "token_report_required_env",
       "purpose": "验证 token 缺失时 report 只展示所需变量名，不记录密钥值",
       "expected_signal": "report includes HF_TOKEN name and excludes token values"
+    },
+    {
+      "id": "static_dashboard_export",
+      "purpose": "验证 dashboard 命令可以从 runs 状态和 benchmark report 生成静态 HTML/JSON 摘要",
+      "expected_signal": "dashboard html contains task summary and benchmark status"
     }
   ]
 }

@@ -1801,11 +1801,12 @@ class CoreTests(unittest.TestCase):
         self.assertIn("repair_resume_stage_jump", ids)
         self.assertIn("repair_resume_audit_report", ids)
         self.assertIn("token_report_required_env", ids)
+        self.assertIn("static_dashboard_export", ids)
 
     def test_benchmark_runner_executes_all_fixture_cases(self):
         report = BenchmarkRunner().run(Path("tests/fixtures/benchmarks/manifest.json"))
         self.assertEqual(report["status"], "passed")
-        self.assertEqual(len(report["cases"]), 41)
+        self.assertEqual(len(report["cases"]), 42)
         self.assertTrue(all(case["status"] == "passed" for case in report["cases"]))
 
     def test_benchmark_cli_writes_output(self):
@@ -1841,6 +1842,47 @@ class CoreTests(unittest.TestCase):
             self.assertTrue(data["selected"])
             self.assertEqual(data["selected_case_ids"], ["token_missing_diagnosis"])
             self.assertEqual([case["id"] for case in data["cases"]], ["token_missing_diagnosis"])
+
+    def test_dashboard_cli_generates_static_html(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            runs = root / "runs"
+            task_dir = runs / "task-dashboard-cli"
+            (task_dir / "reports").mkdir(parents=True)
+            (task_dir / "task.json").write_text(json.dumps({
+                "task_id": "task-dashboard-cli",
+                "project": {"name": "dashboard-cli-demo", "repo_url": "local://demo"},
+                "runtime": {"workspace_root": str(task_dir / "workspace")},
+                "created_at": "2026-07-05T00:00:00Z",
+            }), encoding="utf-8")
+            (task_dir / "state.json").write_text(json.dumps({
+                "task_id": "task-dashboard-cli",
+                "status": "completed",
+                "current_stage": "report",
+                "report_path": str(task_dir / "reports" / "report.md"),
+                "stages": {"report": {"status": "passed", "updated_at": "2026-07-05T00:00:01Z"}},
+            }), encoding="utf-8")
+            config_path = root / "config.json"
+            config_path.write_text(json.dumps({
+                "runs_dir": str(runs),
+                "memory_dir": str(root / "memory"),
+                "model_cache_dir": str(root / "model_cache"),
+            }), encoding="utf-8")
+            output_path = root / "dashboard.html"
+            old_config = os.environ.get("AUTO_HARNESS_CONFIG")
+            os.environ["AUTO_HARNESS_CONFIG"] = str(config_path)
+            try:
+                with redirect_stdout(io.StringIO()):
+                    code = cli_main(["dashboard", "--output", str(output_path)])
+            finally:
+                if old_config is None:
+                    os.environ.pop("AUTO_HARNESS_CONFIG", None)
+                else:
+                    os.environ["AUTO_HARNESS_CONFIG"] = old_config
+            self.assertEqual(code, 0)
+            self.assertTrue(output_path.exists())
+            self.assertTrue(output_path.with_suffix(".json").exists())
+            self.assertIn("dashboard-cli-demo", output_path.read_text(encoding="utf-8"))
 
     def test_live_smoke_planner_generates_optional_network_matrix(self):
         plan = LiveSmokePlanner().plan(include_long_running=True, execution_backend="docker")

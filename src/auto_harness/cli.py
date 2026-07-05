@@ -4,6 +4,7 @@ from pathlib import Path
 
 from auto_harness.config import HarnessConfig
 from auto_harness.benchmarks import BenchmarkRunner, LiveSmokePlanner
+from auto_harness.dashboard import DashboardGenerator
 from auto_harness.memory import MemoryPromoter
 from auto_harness.orchestrator import TaskRunner
 from auto_harness.providers import Message, MockLLMProvider, XunfeiSparkProvider
@@ -76,6 +77,10 @@ def build_parser() -> argparse.ArgumentParser:
     benchmark.add_argument("--manifest", default="tests/fixtures/benchmarks/manifest.json")
     benchmark.add_argument("--output", default="")
     benchmark.add_argument("--case-id", action="append", default=None)
+
+    dashboard = sub.add_parser("dashboard", help="generate a static HTML dashboard from local runs")
+    dashboard.add_argument("--output", default="")
+    dashboard.add_argument("--benchmark-report", default="")
 
     live_smoke = sub.add_parser("live-smoke-plan", help="print optional networked E2E smoke plan")
     live_smoke.add_argument("--include-long-running", action="store_true", default=False)
@@ -200,6 +205,13 @@ def main(argv=None) -> int:
         report = BenchmarkRunner().run(Path(args.manifest), output, case_ids=args.case_id)
         print(json.dumps(report, ensure_ascii=False, indent=2))
         return 0 if report.get("status") == "passed" else 2
+
+    if args.command == "dashboard":
+        output = Path(args.output) if args.output else config.runs_path / "dashboard.html"
+        benchmark_report = Path(args.benchmark_report) if args.benchmark_report else None
+        result = DashboardGenerator().generate(config.runs_path, output, benchmark_report=benchmark_report)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0 if result.get("status") == "generated" else 2
 
     if args.command == "live-smoke-plan":
         plan = LiveSmokePlanner(default_execute=args.execute).plan(

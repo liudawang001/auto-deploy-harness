@@ -5,6 +5,11 @@
 ### 已完成
 
 - 下一阶段优化任务：
+  - 新增 `DashboardGenerator`，可从本地 `runs/`、`state.json`、`task.json` 和可选 benchmark report 生成静态 HTML dashboard 与 JSON 摘要。
+  - CLI 新增 `dashboard --output <path> --benchmark-report <path>`，默认写入 `runs/dashboard.html` 和同名 `.json`，不启动 Web 服务。
+  - Dashboard 展示 task count、状态统计、benchmark 概览、任务当前阶段、各 stage 状态和 report 路径，适合 mac 开发机与面试演示。
+  - Benchmark cases 从 41 个扩展到 42 个，新增 `static_dashboard_export`。
+- 下一阶段优化任务：
   - `BenchmarkRunner.run` 支持按 `case_ids` 执行 benchmark 子集，CLI 新增 `benchmark --case-id`。
   - `memory-promote --apply` 审批通过后默认运行 proposal `regression_binding.case_ids` 对应的 benchmark 子集，并写出 `memory/promotions/<proposal_id>.regression.json`。
   - 回归结果会写回 proposal JSON；若回归失败，CLI 返回非 0，避免 skill promotion 变成无验证的规则追加。

@@ -777,7 +777,7 @@ PYTHONPATH=src python3 -m auto_harness.cli live-smoke-plan --execution-backend d
 
 任务：
 
-1. Web dashboard。
+1. Web dashboard。已完成静态 dashboard 第一版，可从本地 runs 状态和可选 benchmark report 生成 HTML/JSON；后续可升级为常驻 Web 服务。
 2. 任务队列。
 3. 多任务并发。
 4. GPU 调度。

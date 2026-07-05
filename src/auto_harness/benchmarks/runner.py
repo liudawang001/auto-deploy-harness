@@ -6,6 +6,7 @@ from typing import Dict, List
 from auto_harness.assets import GitLFSDetector, GitSubmoduleDetector, HuggingFaceDownloader, ModelCache
 from auto_harness.assets.manifest import ModelAsset
 from auto_harness.config import HarnessConfig
+from auto_harness.dashboard import DashboardGenerator
 from auto_harness.diagnostics import LogClassifier
 from auto_harness.memory import MemoryPromoter
 from auto_harness.models.base import read_json, write_json
@@ -180,6 +181,8 @@ class BenchmarkRunner:
                 return self._case_repair_resume_audit_report(case)
             if case_id == "token_report_required_env":
                 return self._case_token_report_required_env(case)
+            if case_id == "static_dashboard_export":
+                return self._case_static_dashboard_export(case)
             return self._result(case, "skipped", "unknown benchmark case")
         except Exception as exc:  # noqa: BLE001 - benchmark report should continue
             return self._result(case, "failed", str(exc))
@@ -1342,6 +1345,47 @@ class BenchmarkRunner:
             report = Path(result.data["report_path"]).read_text(encoding="utf-8")
             ok = "`HF_TOKEN`" in report and "should_not_be_recorded" not in report and "Values are not recorded" in report
         return self._result(case, "passed" if ok else "failed", "token env var report hint verified")
+
+    def _case_static_dashboard_export(self, case: Dict) -> Dict:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            runs = root / "runs"
+            task_dir = runs / "task-dashboard"
+            reports = task_dir / "reports"
+            reports.mkdir(parents=True)
+            write_json(task_dir / "task.json", {
+                "task_id": "task-dashboard",
+                "project": {"name": "dashboard-demo", "repo_url": "local://demo"},
+                "runtime": {"workspace_root": str(task_dir / "workspace")},
+                "created_at": "2026-07-05T00:00:00Z",
+            })
+            write_json(task_dir / "state.json", {
+                "task_id": "task-dashboard",
+                "status": "completed",
+                "current_stage": "report",
+                "last_safe_stage": "report",
+                "report_path": str(reports / "report.md"),
+                "stages": {
+                    "analyze": {"status": "passed", "updated_at": "2026-07-05T00:00:01Z"},
+                    "verify": {"status": "passed", "updated_at": "2026-07-05T00:00:02Z"},
+                    "report": {"status": "passed", "updated_at": "2026-07-05T00:00:03Z"},
+                },
+            })
+            benchmark_path = root / "benchmark.json"
+            write_json(benchmark_path, {"status": "passed", "cases": [{"id": "x", "status": "passed"}]})
+            output = root / "dashboard.html"
+            result = DashboardGenerator().generate(runs, output, benchmark_report=benchmark_path)
+            html = output.read_text(encoding="utf-8")
+            summary = read_json(output.with_suffix(".json"))
+            ok = (
+                result.get("status") == "generated"
+                and output.exists()
+                and summary.get("task_count") == 1
+                and summary.get("benchmark", {}).get("case_count") == 1
+                and "dashboard-demo" in html
+                and "AI-Auto-Harness Dashboard" in html
+            )
+        return self._result(case, "passed" if ok else "failed", "static dashboard export verified")
 
     def _stage_update_count(self, run_dir: Path) -> Dict[str, int]:
         counts: Dict[str, int] = {}

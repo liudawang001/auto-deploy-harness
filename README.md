@@ -13,7 +13,7 @@ AI-Auto-Harness 是一个面向 AI 开源 demo 项目的自动部署与验证 Ag
 
 当前仓库已经包含：
 
-- CLI：`init`、`deploy`、`resume`、`status`、`report`、`llm-test`、`benchmark`、`live-smoke-plan`、`docker-smoke`、`repair-approve`、`memory-promote`。
+- CLI：`init`、`deploy`、`resume`、`status`、`report`、`dashboard`、`llm-test`、`benchmark`、`live-smoke-plan`、`docker-smoke`、`repair-approve`、`memory-promote`。
 - 任务状态存储：`task.json`、`state.json`、`events.jsonl`。
 - 确定性项目分析器。
 - 安全默认的 `env_solve`、`env_deploy`、`runner`、`verify`、report 模块。
@@ -35,7 +35,8 @@ AI-Auto-Harness 是一个面向 AI 开源 demo 项目的自动部署与验证 Ag
 - Report 会汇总 `resource_plan`、diagnosis 和 repair plan 中的 token 变量名，提示 operator/secret manager 注入，报告中不保存任何 token value。
 - Repair loop：失败或 uncertain 阶段会生成结构化修复建议，经过 policy 和 loop gate 校验后写入受控 repair artifacts；同一问题有最大尝试次数，不安全的 `rerun_from` 会回退到安全阶段，`resume` 会按 `rerun_from_effective` 从安全阶段重跑，需要人工确认的 action 可通过 `repair-approve` 批准。
 - Resume execution audit：当 repair resume 从中间阶段恢复时，会生成 `reports/execution_audit.json`，并在报告中展示复用阶段、重跑阶段和 fallback 信息。
-- Benchmark fixtures：`tests/fixtures/benchmarks` 覆盖下载续传、缓存命中、并发下载、etag 缓存失效、缓存清理、按来源/repo/keep-list 清理、服务启动后退出、历史 artifact 干扰、Gradio API shape 变化、token 缺失、token report 提示、Gradio `/config` discovery、OpenAPI schema discovery、OpenAI-compatible model discovery/stream verify、浏览器 DOM trace、Streamlit 错误页面、HTTP 200 false-positive 防护、repair policy 拒绝、repair loop 限流、repair resume 阶段跳转、人工审批、checksum 失败、本地 E2E fixture matrix、memory promotion proposal/审批/回归绑定、Docker backend plan/GPU/cache/log 元数据、GPU 包矩阵、verify progress 和 Git LFS progress parse。
+- Static dashboard：`dashboard` 命令会从本地 `runs/`、任务状态和可选 benchmark report 生成静态 HTML/JSON，用于本机开发和面试演示，不启动服务。
+- Benchmark fixtures：`tests/fixtures/benchmarks` 覆盖下载续传、缓存命中、并发下载、etag 缓存失效、缓存清理、按来源/repo/keep-list 清理、服务启动后退出、历史 artifact 干扰、Gradio API shape 变化、token 缺失、token report 提示、Gradio `/config` discovery、OpenAPI schema discovery、OpenAI-compatible model discovery/stream verify、浏览器 DOM trace、Streamlit 错误页面、HTTP 200 false-positive 防护、repair policy 拒绝、repair loop 限流、repair resume 阶段跳转、人工审批、checksum 失败、本地 E2E fixture matrix、memory promotion proposal/审批/回归绑定、静态 dashboard 导出、Docker backend plan/GPU/cache/log 元数据、GPU 包矩阵、verify progress 和 Git LFS progress parse。
 - 开发进度报告：`docs/progress.md`。
 
 ## 快速开始
@@ -260,6 +261,24 @@ docs/optimization-roadmap.md
 ```
 
 该文档覆盖模型下载与缓存、断点续传、资源预估、CUDA/PyTorch 环境求解、长任务状态机、自动诊断修复、增强 verify、安全沙箱和 benchmark 体系。
+
+## Dashboard
+
+可以从本地 run 状态生成静态 dashboard，不需要启动 Web 服务：
+
+```bash
+PYTHONPATH=src python3 -m auto_harness.cli dashboard --output runs/dashboard.html
+PYTHONPATH=src python3 -m auto_harness.cli dashboard --output runs/dashboard.html --benchmark-report benchmark_report.json
+```
+
+该命令会同时写出：
+
+```text
+runs/dashboard.html
+runs/dashboard.json
+```
+
+HTML 展示任务状态、当前阶段、各阶段状态、报告路径和可选 benchmark 概览；JSON 用于后续接入真正的 Web dashboard 或任务队列。
 
 ## Benchmark
 
