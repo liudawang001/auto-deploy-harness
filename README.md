@@ -31,7 +31,7 @@ AI-Auto-Harness 是一个面向 AI 开源 demo 项目的自动部署与验证 Ag
 - Git LFS / submodule 受控准备：`model_prepare` 在 `--execute` 且 `git` 通过命令白名单时执行 `git lfs install/pull` 和 `git submodule sync/update`，并记录命令结果、stderr/stdout tail、进度和最终状态。
 - `model_prepare` 阶段：生成模型资产 manifest、缓存 key 和 `model_cache` 路径；执行模式下支持 Hugging Face / ModelScope 文件清单解析、断点续传、并发下载、sha256/etag 校验元数据和缓存写入。
 - `verify` 增强：支持 Gradio `/config` discovery、Gradio queue `/call/<api_name>` follow-up、FastAPI/Flask `/openapi.json` schema discovery、vLLM/OpenAI-compatible `/v1/models` + `/v1/chat/completions`、streaming SSE trace、Streamlit DOM/HTML 证据探测、可选 Playwright 浏览器 DOM probe，以及长耗时首次推理验证过程中的状态刷新。
-- 日志规则分类器：对缺依赖、CUDA OOM、磁盘不足、token 权限、wheel 构建失败等常见错误生成结构化诊断；token 权限问题只提取所需环境变量名，不记录密钥值。
+- 日志规则分类器：对缺依赖、CUDA OOM、磁盘不足、token 权限、wheel 构建失败、numpy/pydantic/protobuf 冲突等常见错误生成结构化诊断；诊断会包含 package、constraint、recommended action 和 rerun stage，token 权限问题只提取所需环境变量名，不记录密钥值。
 - Report 会汇总 `resource_plan`、diagnosis 和 repair plan 中的 token 变量名，提示 operator/secret manager 注入，报告中不保存任何 token value。
 - Repair loop：失败或 uncertain 阶段会生成结构化修复建议，经过 policy 和 loop gate 校验后写入受控 repair artifacts；同一问题有最大尝试次数，不安全的 `rerun_from` 会回退到安全阶段，`resume` 会按 `rerun_from_effective` 从安全阶段重跑，需要人工确认的 action 可通过 `repair-approve` 批准。
 - Resume execution audit：当 repair resume 从中间阶段恢复时，会生成 `reports/execution_audit.json`，并在报告中展示复用阶段、重跑阶段和 fallback 信息。

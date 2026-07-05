@@ -20,13 +20,17 @@ class RepairPlanner:
             confidence=confidence,
             actions=actions,
             rollback={"type": "rerun_from_last_safe_stage"},
-            rerun_from=self._rerun_from(stage, category),
+            rerun_from=diagnosis.get("rerun_from") or self._rerun_from(stage, category),
             verification_required=True,
             status="proposed" if actions else "needs_manual_review",
         )
         return to_plain(plan)
 
     def _actions_for(self, stage: str, category: str, data: Dict, analysis: Dict) -> List[RepairAction]:
+        diagnosis = data.get("diagnosis") or {}
+        structured = self._structured_actions(diagnosis)
+        if structured:
+            return structured
         if category == "dependency_missing":
             package = data.get("diagnosis", {}).get("signal") or ""
             return [
@@ -76,6 +80,20 @@ class RepairPlanner:
             ]
         return []
 
+    def _structured_actions(self, diagnosis: Dict) -> List[RepairAction]:
+        actions = []
+        for raw in diagnosis.get("recommended_actions") or []:
+            action_type = raw.get("type")
+            if not action_type:
+                continue
+            actions.append(RepairAction(
+                type=action_type,
+                reason=raw.get("reason") or diagnosis.get("suggested_fix") or "diagnosed repair action",
+                requires=raw.get("requires") or diagnosis.get("requires") or {},
+                payload=raw.get("payload") or {},
+            ))
+        return actions
+
     def _category_from_result(self, plain: Dict) -> str:
         error = str(plain.get("error") or plain.get("summary") or "").lower()
         if "token" in error or "401" in error or "unauthorized" in error:
@@ -89,6 +107,10 @@ class RepairPlanner:
     def _rerun_from(self, stage: str, category: str) -> str:
         if category in ("dependency_missing", "cuda_oom", "torch_cuda_unavailable"):
             return "env_deploy"
+        if category in ("numpy_abi_conflict", "pydantic_conflict", "protobuf_conflict"):
+            return "env_deploy"
+        if category == "wheel_build_failed":
+            return "env_solve"
         if category in ("auth_required", "disk_full"):
             return "model_prepare"
         return stage

@@ -4,6 +4,10 @@ from typing import Dict, List
 
 class LogClassifier:
     TOKEN_ENV_PATTERN = re.compile(r"\b[A-Z][A-Z0-9_]*(?:TOKEN|API_KEY|API_SECRET|ACCESS_KEY|SECRET_KEY)\b")
+    BUILD_PACKAGE_PATTERNS = [
+        re.compile(r"Failed building wheel for ([A-Za-z0-9_.-]+)", re.IGNORECASE),
+        re.compile(r"Could not build wheels for ([A-Za-z0-9_.-]+)", re.IGNORECASE),
+    ]
 
     RULES = [
         ("dependency_missing", re.compile(r"ModuleNotFoundError: No module named ['\"]([^'\"]+)['\"]"), "install missing Python package"),
@@ -38,6 +42,7 @@ class LogClassifier:
             if category == "auth_required":
                 item["required_env_vars"] = self._required_env_vars(text)
                 item["values_recorded"] = False
+            item.update(self._structured_fields(category, signal, text))
             matches.append(item)
         if matches:
             top = matches[0]
@@ -48,6 +53,16 @@ class LogClassifier:
                 "confidence": top["confidence"],
                 "matches": matches,
             }
+            for key in (
+                "root_cause",
+                "package",
+                "package_constraints",
+                "recommended_actions",
+                "requires",
+                "rerun_from",
+            ):
+                if key in top:
+                    result[key] = top[key]
             if top["category"] == "auth_required":
                 result["required_env_vars"] = top.get("required_env_vars") or self._required_env_vars(text)
                 result["values_recorded"] = False
@@ -68,3 +83,87 @@ class LogClassifier:
         if "modelscope" in lower:
             names.add("MODELSCOPE_TOKEN")
         return sorted(names)
+
+    def _structured_fields(self, category: str, signal: str, text: str) -> Dict:
+        if category == "dependency_missing":
+            package = signal.strip()
+            return {
+                "root_cause": "Python dependency is missing: %s" % package,
+                "package": package,
+                "requires": {"dependency_install": True, "network": True, "source_edit": False},
+                "rerun_from": "env_deploy",
+                "recommended_actions": [
+                    {
+                        "type": "install_package",
+                        "reason": "install missing Python package",
+                        "requires": {"dependency_install": True, "network": True, "source_edit": False},
+                        "payload": {"package": package},
+                    }
+                ],
+            }
+        if category == "numpy_abi_conflict":
+            return self._pin_action("numpy<2", "numpy ABI mismatch commonly comes from numpy 2.x with legacy wheels")
+        if category == "pydantic_conflict":
+            return self._pin_action("pydantic<2", "legacy Gradio/FastAPI stacks may require pydantic v1")
+        if category == "protobuf_conflict":
+            return self._pin_action("protobuf<=3.20.3", "generated protobuf descriptors require an older protobuf runtime")
+        if category == "wheel_build_failed":
+            package = self._build_package(text)
+            action = {
+                "type": "install_package",
+                "reason": "wheel build failed; retry with a prebuilt or pinned package when available",
+                "requires": {"dependency_install": True, "network": True},
+                "payload": {"package": package} if package else {},
+            }
+            if package in {"flash-attn", "flash_attn", "xformers", "bitsandbytes"}:
+                action = {
+                    "type": "skip_optional_extension",
+                    "reason": "optional GPU extension failed to build; use a compatible wheel or disable optional extension",
+                    "requires": {"dependency_install": True, "service_restart": True},
+                    "payload": {"package": package},
+                }
+            return {
+                "root_cause": "Python wheel build failed%s" % (": %s" % package if package else ""),
+                "package": package,
+                "requires": action["requires"],
+                "rerun_from": "env_solve",
+                "recommended_actions": [action],
+            }
+        if category == "torch_cuda_unavailable":
+            return {
+                "root_cause": "Installed torch wheel does not include CUDA support",
+                "requires": {"dependency_install": True, "service_restart": True},
+                "rerun_from": "env_solve",
+                "recommended_actions": [
+                    {
+                        "type": "adjust_runtime",
+                        "reason": "select CUDA-enabled torch wheel or CPU fallback",
+                        "requires": {"dependency_install": True, "service_restart": True},
+                        "payload": {"strategy": "select compatible torch wheel or CPU fallback"},
+                    }
+                ],
+            }
+        return {}
+
+    def _pin_action(self, constraint: str, root_cause: str) -> Dict:
+        return {
+            "root_cause": root_cause,
+            "package_constraints": [constraint],
+            "requires": {"dependency_install": True, "network": True, "source_edit": False},
+            "rerun_from": "env_deploy",
+            "recommended_actions": [
+                {
+                    "type": "install_package",
+                    "reason": "install compatible dependency constraint",
+                    "requires": {"dependency_install": True, "network": True, "source_edit": False},
+                    "payload": {"package": constraint},
+                }
+            ],
+        }
+
+    def _build_package(self, text: str) -> str:
+        for pattern in self.BUILD_PACKAGE_PATTERNS:
+            match = pattern.search(text or "")
+            if match:
+                return match.group(1)
+        return ""

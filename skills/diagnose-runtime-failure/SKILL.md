@@ -19,6 +19,10 @@ description: 诊断并沉淀自动部署中的复发问题。用于 env_deploy�
    - 环境变量缺失；
    - 验证链路证据不足。
 4. 优先使用内置 log classifier 的结构化结果；只有规则无法覆盖或置信度较低时，才把裁剪后的日志交给 LLM 进一步分析。
+   - 缺失依赖应提取 package，并生成 `install_package` 建议。
+   - numpy/pydantic/protobuf 冲突应生成兼容 constraint，例如 `numpy<2`、`pydantic<2`、`protobuf<=3.20.3`。
+   - wheel build 失败应提取失败包名；GPU 可选扩展构建失败优先建议兼容 wheel、跳过可选扩展或回到 `env_solve`。
+   - token 权限问题只记录环境变量名和 `values_recorded=false`。
 5. 判断修复是否被当前策略允许：
    - 是否允许安装依赖；
    - 是否允许启动服务；

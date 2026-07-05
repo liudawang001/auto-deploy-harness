@@ -5,6 +5,11 @@
 ### 已完成
 
 - 下一阶段优化任务：
+  - `LogClassifier` 增强结构化诊断字段：缺失依赖会提取 package，numpy/pydantic/protobuf 冲突会输出兼容 constraint，wheel build 失败会提取失败包名。
+  - 诊断结果新增 `root_cause`、`requires`、`rerun_from` 和 `recommended_actions`，便于后续 repair planner 直接消费。
+  - `RepairPlanner` 优先使用诊断中的 recommended action，能把 `numpy.dtype size changed` 转换为受控 `pip install numpy<2` 建议，并从 `env_deploy` 安全重跑。
+  - Benchmark cases 从 39 个扩展到 40 个，新增 `structured_dependency_diagnosis`。
+- 下一阶段优化任务：
   - 新增 `GitSubmoduleDetector`，可解析 `.gitmodules` 中的 submodule name、path、url、branch，并记录目标目录是否已初始化。
   - `ResourcePlanner` 接入 `git_submodules`，会输出 `prepare_commands`、submodule count 和风险原因；缺少 `git` 时进入 `git_missing` 诊断态。
   - `ModelPrepareModule` 支持 Git submodule 受控执行，执行模式下按白名单运行 `git submodule sync --recursive` 和 `git submodule update --init --recursive`，命令结果写入 `model_prepare.git_submodules`。

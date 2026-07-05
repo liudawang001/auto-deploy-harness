@@ -1356,6 +1356,25 @@ class CoreTests(unittest.TestCase):
         result = LogClassifier().classify("ModuleNotFoundError: No module named 'gradio'")
         self.assertEqual(result["category"], "dependency_missing")
         self.assertGreater(result["confidence"], 0.8)
+        self.assertEqual(result["package"], "gradio")
+        self.assertEqual(result["recommended_actions"][0]["type"], "install_package")
+        self.assertEqual(result["recommended_actions"][0]["payload"]["package"], "gradio")
+
+    def test_log_classifier_suggests_dependency_constraints(self):
+        numpy_result = LogClassifier().classify("ValueError: numpy.dtype size changed, may indicate binary incompatibility")
+        protobuf_result = LogClassifier().classify("TypeError: Descriptors cannot be created directly. protobuf runtime mismatch")
+        pydantic_result = LogClassifier().classify("pydantic ValidationError version mismatch while importing gradio")
+        self.assertEqual(numpy_result["package_constraints"], ["numpy<2"])
+        self.assertEqual(protobuf_result["package_constraints"], ["protobuf<=3.20.3"])
+        self.assertEqual(pydantic_result["package_constraints"], ["pydantic<2"])
+        self.assertEqual(numpy_result["recommended_actions"][0]["payload"]["package"], "numpy<2")
+
+    def test_log_classifier_extracts_wheel_build_package(self):
+        result = LogClassifier().classify("subprocess-exited-with-error\nFailed building wheel for flash-attn")
+        self.assertEqual(result["category"], "wheel_build_failed")
+        self.assertEqual(result["package"], "flash-attn")
+        self.assertEqual(result["rerun_from"], "env_solve")
+        self.assertEqual(result["recommended_actions"][0]["type"], "skip_optional_extension")
 
     def test_log_classifier_detects_missing_token(self):
         result = LogClassifier().classify("401 Unauthorized: Repository Not Found. Please set HF_TOKEN=should_not_be_recorded.")
@@ -1443,6 +1462,18 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(plan["rerun_from"], "env_deploy")
         self.assertEqual(plan["actions"][0]["type"], "install_package")
         self.assertEqual(plan["actions"][0]["payload"]["package"], "gradio")
+
+    def test_repair_planner_uses_structured_classifier_actions(self):
+        diagnosis = LogClassifier().classify("ValueError: numpy.dtype size changed, may indicate binary incompatibility")
+        plan = RepairPlanner().propose(
+            "env_deploy",
+            StageResult("env_deploy", "failed", "dependency failed", {"diagnosis": diagnosis}),
+            {"frameworks": ["gradio"]},
+        )
+        self.assertEqual(plan["root_cause"], diagnosis["root_cause"])
+        self.assertEqual(plan["rerun_from"], "env_deploy")
+        self.assertEqual(plan["actions"][0]["type"], "install_package")
+        self.assertEqual(plan["actions"][0]["payload"]["package"], "numpy<2")
 
     def test_repair_policy_rejects_dependency_install_without_permission(self):
         result = RepairPolicy().check(
@@ -1763,6 +1794,7 @@ class CoreTests(unittest.TestCase):
         self.assertIn("gradio_api_shape_variation", ids)
         self.assertIn("gradio_queue_call_followup", ids)
         self.assertIn("token_missing_diagnosis", ids)
+        self.assertIn("structured_dependency_diagnosis", ids)
         self.assertIn("repair_resume_stage_jump", ids)
         self.assertIn("repair_resume_audit_report", ids)
         self.assertIn("token_report_required_env", ids)
@@ -1770,7 +1802,7 @@ class CoreTests(unittest.TestCase):
     def test_benchmark_runner_executes_all_fixture_cases(self):
         report = BenchmarkRunner().run(Path("tests/fixtures/benchmarks/manifest.json"))
         self.assertEqual(report["status"], "passed")
-        self.assertEqual(len(report["cases"]), 39)
+        self.assertEqual(len(report["cases"]), 40)
         self.assertTrue(all(case["status"] == "passed" for case in report["cases"]))
 
     def test_benchmark_cli_writes_output(self):

@@ -16,8 +16,9 @@ from auto_harness.modules.reporter import ReportGenerator
 from auto_harness.modules.resource_plan import ResourcePlanner
 from auto_harness.modules.runner import RunnerModule
 from auto_harness.modules.verify import VerifyModule
+from auto_harness.models.result import StageResult
 from auto_harness.models.task import RuntimePolicy
-from auto_harness.repair import RepairLoopController, RepairPolicy
+from auto_harness.repair import RepairLoopController, RepairPlanner, RepairPolicy
 from auto_harness.orchestrator import TaskRunner
 from auto_harness.verify import BrowserVerifier, StreamlitVerifier
 from auto_harness.utils.shell import CommandResult
@@ -146,6 +147,8 @@ class BenchmarkRunner:
                 return self._case_gradio_queue_call_followup(case)
             if case_id == "token_missing_diagnosis":
                 return self._case_token_missing_diagnosis(case)
+            if case_id == "structured_dependency_diagnosis":
+                return self._case_structured_dependency_diagnosis(case)
             if case_id == "repair_resume_stage_jump":
                 return self._case_repair_resume_stage_jump(case)
             if case_id == "repair_resume_audit_report":
@@ -1156,6 +1159,21 @@ class BenchmarkRunner:
         diagnosis = LogClassifier().classify("401 Unauthorized: Repository Not Found. Please set HF_TOKEN.")
         ok = diagnosis["category"] == "auth_required" and diagnosis["confidence"] >= 0.9
         return self._result(case, "passed" if ok else "failed", "token missing diagnosis verified")
+
+    def _case_structured_dependency_diagnosis(self, case: Dict) -> Dict:
+        diagnosis = LogClassifier().classify("ValueError: numpy.dtype size changed, may indicate binary incompatibility")
+        plan = RepairPlanner().propose(
+            "env_deploy",
+            StageResult("env_deploy", "failed", "dependency failed", {"diagnosis": diagnosis}),
+            {"frameworks": ["gradio"]},
+        )
+        ok = (
+            diagnosis.get("category") == "numpy_abi_conflict"
+            and diagnosis.get("package_constraints") == ["numpy<2"]
+            and plan.get("actions", [{}])[0].get("payload", {}).get("package") == "numpy<2"
+            and plan.get("rerun_from") == "env_deploy"
+        )
+        return self._result(case, "passed" if ok else "failed", "structured dependency diagnosis verified")
 
     def _case_repair_resume_stage_jump(self, case: Dict) -> Dict:
         with tempfile.TemporaryDirectory() as tmp:
