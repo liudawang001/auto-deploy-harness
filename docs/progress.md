@@ -57,6 +57,12 @@
   - GPU 需求但只能选择 CPU wheel 时，会写入明确 risk reason；`flash-attn` 在 CPU fallback 下会额外标记不可兼容风险。
   - Benchmark cases 从 26 个扩展到 27 个，新增 `env_solve_torch_cuda_wheel`。
   - 定向单测已通过，覆盖 CUDA `cu121` 选择、CPU fallback、无 CUDA 风险提示和 benchmark manifest 执行。
+- 下一阶段优化任务：
+  - 新增 `tests/fixtures/e2e/` 本地端到端 fixture，覆盖 `gradio_tiny_model`、`streamlit_tiny_demo` 和 `git_lfs_weight_repo` 三类开源模型项目形态。
+  - `gradio_tiny_model` 模拟小型 Gradio 推理 demo，带本地 `model/config.json` 占位模型资产；`streamlit_tiny_demo` 模拟 Streamlit 推理页面；`git_lfs_weight_repo` 使用标准 Git LFS pointer 模拟 safetensors 权重。
+  - Benchmark 新增 `local_e2e_fixture_matrix`，逐个调用 `TaskRunner.deploy(..., dry_run=True)` 跑完整 pipeline，并检查 `analyze`、`resource_plan`、`env_solve`、`env_deploy`、`model_prepare`、`runner`、`verify`、`report` 阶段结果。
+  - E2E matrix 会断言 framework 识别、run candidate 端口、env_solve 约束、Git LFS pointer/size、Torch solution、manifest 和 report 输出，防止 pipeline 接线回归。
+  - Benchmark cases 从 27 个扩展到 28 个。
 
 ### 五阶段总结与总进度
 
@@ -68,13 +74,13 @@
 4. Git LFS 检测：识别 LFS pointer 和 `.gitattributes`，缺 `git-lfs` 时进入诊断态，并给出准备命令。
 5. Playwright smoke 治理：补齐真实浏览器 backend 的本地 smoke 文档和手动 CI workflow。
 
-按 `docs/optimization-roadmap.md` 的“全自动开源模型部署 Agent”目标估算，当前总项目进度约为 **76%**。
+按 `docs/optimization-roadmap.md` 的“全自动开源模型部署 Agent”目标估算，当前总项目进度约为 **78%**。
 
 估算依据：
 
 - 已完成约 85% 的 P0/P1 核心控制链路：下载缓存、断点续传、verify 防误判、repair plan/policy/resume、benchmark 回归体系已经成型。
-- 已完成约 68% 的真实开源模型部署能力：Hugging Face / ModelScope 下载、Git LFS 检测、Gradio/Streamlit/browser verify、PyTorch CPU/CUDA wheel 求解已具备第一版，但真实端到端部署矩阵仍需扩大。
-- 尚未完成的关键 24% 主要是：Docker/sandbox 隔离、真实大模型长耗时 E2E 验证、GPU 包版本矩阵、memory promotion 到 skill 的人工审核流程。
+- 已完成约 72% 的真实开源模型部署能力：Hugging Face / ModelScope 下载、Git LFS 检测、Gradio/Streamlit/browser verify、PyTorch CPU/CUDA wheel 求解和本地 E2E fixture matrix 已具备第一版，但真实联网/真实大模型端到端矩阵仍需扩大。
+- 尚未完成的关键 22% 主要是：Docker/sandbox 隔离、真实大模型长耗时 E2E 验证、GPU 包版本矩阵、memory promotion 到 skill 的人工审核流程。
 - 继续执行 P0/P1 优化任务：
   - `ModelCache.reserve` 会为缓存目录写入 `.auto_harness_asset.json`，记录 source、repo id、revision、origin、asset id 和 cache key。
   - `ModelCache.entries()` 会读取缓存元数据，返回 repo id、revision、origin，便于后续审计和精细清理。
@@ -160,11 +166,11 @@
 
 ### 下一步
 
-1. 扩展真实 E2E fixture：至少覆盖一个小型 Gradio 模型、一个 Streamlit demo、一个 Git LFS 权重仓库。
-2. 增加 memory promotion 工作流：把高频失败记忆提升为可审核的 skill 更新建议。
-3. 引入更强 sandbox / Docker backend，隔离真实依赖安装和服务启动。
-4. 增加 Git LFS 真实拉取的长耗时进度解析，例如解析 `git lfs pull` 输出中的文件级下载进度。
-5. 扩展 GPU 包版本矩阵：`xformers`、`flash-attn`、`bitsandbytes`、`triton` 与 Python/CUDA/Torch 的组合规则。
+1. 增加 memory promotion 工作流：把高频失败记忆提升为可审核的 skill 更新建议。
+2. 引入更强 sandbox / Docker backend，隔离真实依赖安装和服务启动。
+3. 增加 Git LFS 真实拉取的长耗时进度解析，例如解析 `git lfs pull` 输出中的文件级下载进度。
+4. 扩展 GPU 包版本矩阵：`xformers`、`flash-attn`、`bitsandbytes`、`triton` 与 Python/CUDA/Torch 的组合规则。
+5. 扩展真实联网 E2E：选择小型 Hugging Face / ModelScope demo 和一个真实 Git LFS 权重仓库做可选长耗时 smoke。
 
 ## 2026-07-03
 

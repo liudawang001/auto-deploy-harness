@@ -659,6 +659,8 @@ tests/fixtures/
   artifact_output/
 ```
 
+当前状态：已新增本地 E2E fixture 第一版，位于 `tests/fixtures/e2e/`，覆盖小型 Gradio demo、Streamlit demo 和 Git LFS pointer 权重仓库；benchmark `local_e2e_fixture_matrix` 会执行完整 dry-run pipeline 并检查阶段证据。后续继续补真实联网模型仓库和长耗时 smoke。
+
 ### 9.2 Benchmark 场景
 
 必须覆盖：
@@ -703,7 +705,7 @@ tests/fixtures/
 7. 增强 Gradio API discovery。
 8. 增加 diagnose log classifier。
 9. 增加结构化 repair plan。
-10. 添加基础 fixture 和 benchmark。已完成第一版，提供 `benchmark` CLI 执行入口。
+10. 添加基础 fixture 和 benchmark。已完成第一版，提供 `benchmark` CLI 执行入口；已补充本地 E2E fixture matrix，覆盖 Gradio、Streamlit 和 Git LFS 权重仓库 dry-run pipeline。
 
 验收：
 

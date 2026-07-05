@@ -33,7 +33,7 @@ AI-Auto-Harness 是一个面向 AI 开源 demo 项目的自动部署与验证 Ag
 - Report 会汇总 `resource_plan`、diagnosis 和 repair plan 中的 token 变量名，提示 operator/secret manager 注入，报告中不保存任何 token value。
 - Repair loop：失败或 uncertain 阶段会生成结构化修复建议，经过 policy 和 loop gate 校验后写入受控 repair artifacts；同一问题有最大尝试次数，不安全的 `rerun_from` 会回退到安全阶段，`resume` 会按 `rerun_from_effective` 从安全阶段重跑，需要人工确认的 action 可通过 `repair-approve` 批准。
 - Resume execution audit：当 repair resume 从中间阶段恢复时，会生成 `reports/execution_audit.json`，并在报告中展示复用阶段、重跑阶段和 fallback 信息。
-- Benchmark fixtures：`tests/fixtures/benchmarks` 覆盖下载续传、缓存命中、并发下载、etag 缓存失效、缓存清理、按来源/repo/keep-list 清理、服务启动后退出、历史 artifact 干扰、Gradio API shape 变化、token 缺失、token report 提示、Gradio `/config` discovery、浏览器 DOM trace、Streamlit 错误页面、HTTP 200 false-positive 防护、repair policy 拒绝、repair loop 限流、repair resume 阶段跳转、人工审批和 checksum 失败。
+- Benchmark fixtures：`tests/fixtures/benchmarks` 覆盖下载续传、缓存命中、并发下载、etag 缓存失效、缓存清理、按来源/repo/keep-list 清理、服务启动后退出、历史 artifact 干扰、Gradio API shape 变化、token 缺失、token report 提示、Gradio `/config` discovery、浏览器 DOM trace、Streamlit 错误页面、HTTP 200 false-positive 防护、repair policy 拒绝、repair loop 限流、repair resume 阶段跳转、人工审批、checksum 失败和本地 E2E fixture matrix。
 - 开发进度报告：`docs/progress.md`。
 
 ## 快速开始
@@ -255,6 +255,7 @@ PYTHONPATH=src python3 -m auto_harness.cli benchmark --manifest tests/fixtures/b
 - Git LFS pointer 和 `.gitattributes` 会被识别；缺 `git-lfs` 时 resource plan 进入诊断态，并输出 LFS 准备命令；执行阶段仍受命令白名单控制。
 - 老 Gradio / 未 pin 依赖项目会在 `env_solve` 中生成 `numpy<2`、`pydantic<2`、`opencv-python-headless` 等兼容约束，真正安装仍由 `env_deploy` 受控执行。
 - PyTorch 项目会在 `env_solve` 中根据本机 CUDA 版本选择 `cu121` / `cu118` / `cpu` wheel index，并保留 CPU fallback 方案。
+- 本地 E2E fixture matrix 会把小型 Gradio demo、Streamlit demo 和 Git LFS 权重仓库跑完整 dry-run pipeline，并检查阶段结果。
 - 服务进程启动后快速退出不能判定为启动成功。
 - token 缺失或 401 日志会被诊断为 `auth_required`。
 - token 缺失时 report 只展示 `HF_TOKEN` / `MODELSCOPE_TOKEN` 等变量名，不记录密钥值。

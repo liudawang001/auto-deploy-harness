@@ -114,6 +114,8 @@ class BenchmarkRunner:
                 return self._case_env_solve_legacy_gradio_constraints(case)
             if case_id == "env_solve_torch_cuda_wheel":
                 return self._case_env_solve_torch_cuda_wheel(case)
+            if case_id == "local_e2e_fixture_matrix":
+                return self._case_local_e2e_fixture_matrix(case, fixture_dir)
             if case_id == "gradio_api_shape_variation":
                 return self._case_gradio_api_shape_variation(case)
             if case_id == "gradio_queue_call_followup":
@@ -552,6 +554,85 @@ class BenchmarkRunner:
             and any(cmd and cmd[0] == ".venv/bin/python" and "https://download.pytorch.org/whl/cu121" in cmd for cmd in result.data.get("install_plan", []))
         )
         return self._result(case, "passed" if ok else "failed", "env_solve torch CUDA wheel verified")
+
+    def _case_local_e2e_fixture_matrix(self, case: Dict, fixture_dir: Path) -> Dict:
+        fixture_root = fixture_dir.parent / "e2e"
+        fixture_specs = [
+            {
+                "name": "gradio_tiny_model",
+                "framework": "gradio",
+                "port": 7860,
+                "expect_constraints": {"numpy<2", "pydantic<2"},
+            },
+            {
+                "name": "streamlit_tiny_demo",
+                "framework": "streamlit",
+                "port": 8501,
+            },
+            {
+                "name": "git_lfs_weight_repo",
+                "framework": "gradio",
+                "port": 7860,
+                "expect_git_lfs": True,
+                "expect_torch_solution": True,
+            },
+        ]
+        details = []
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            runner = TaskRunner(HarnessConfig(
+                runs_dir=str(root / "runs"),
+                memory_dir=str(root / "memory"),
+                model_cache_dir=str(root / "model_cache"),
+                skills_dir=str(Path("skills").resolve()),
+            ))
+            for spec in fixture_specs:
+                repo = fixture_root / spec["name"]
+                task_id = runner.deploy(str(repo), spec["name"], dry_run=True)
+                run_dir = root / "runs" / task_id
+                results = read_json(run_dir / "reports" / "pipeline_results.json")
+                ok, detail = self._assert_local_e2e_fixture(results, spec, run_dir)
+                details.append(detail)
+                if not ok:
+                    return self._result(case, "failed", "local E2E fixture failed: %s" % detail)
+        return self._result(case, "passed", "local E2E fixture matrix verified: %s" % ", ".join(details))
+
+    def _assert_local_e2e_fixture(self, results: Dict, spec: Dict, run_dir: Path) -> tuple:
+        stages = ("analyze", "resource_plan", "env_solve", "env_deploy", "model_prepare", "runner", "verify", "report")
+        missing = [stage for stage in stages if stage not in results]
+        if missing:
+            return False, "%s missing stages %s" % (spec["name"], missing)
+        analyze = results["analyze"]["data"]
+        resource_plan = results["resource_plan"]["data"]
+        env_solve = results["env_solve"]["data"]
+        runner = results["runner"]["data"]
+        model_prepare = results["model_prepare"]["data"]
+        if spec["framework"] not in analyze.get("frameworks", []):
+            return False, "%s framework not detected" % spec["name"]
+        if not any(candidate.get("expected_port") == spec["port"] for candidate in analyze.get("run_candidates", [])):
+            return False, "%s runner candidate missing expected port" % spec["name"]
+        if results["env_deploy"]["status"] != "passed":
+            return False, "%s env_deploy did not pass dry-run" % spec["name"]
+        if results["runner"]["status"] != "passed" or runner.get("executed") is not False:
+            return False, "%s runner dry-run did not pass" % spec["name"]
+        if not Path(model_prepare.get("manifest_path", "")).exists():
+            return False, "%s model manifest missing" % spec["name"]
+        expected_constraints = spec.get("expect_constraints")
+        if expected_constraints and not expected_constraints.issubset(set(env_solve.get("constraints", []))):
+            return False, "%s env_solve constraints missing" % spec["name"]
+        if spec.get("expect_git_lfs"):
+            git_lfs = resource_plan.get("git_lfs", {})
+            if not git_lfs.get("required") or not git_lfs.get("pointers"):
+                return False, "%s Git LFS pointer not detected" % spec["name"]
+            if not git_lfs.get("total_pointer_size_bytes"):
+                return False, "%s Git LFS size not counted" % spec["name"]
+        if spec.get("expect_torch_solution"):
+            torch_solution = env_solve.get("torch_solution", {})
+            if not torch_solution.get("required") or not torch_solution.get("selected"):
+                return False, "%s torch solution missing" % spec["name"]
+        if not (run_dir / "reports" / "report.md").exists():
+            return False, "%s report missing" % spec["name"]
+        return True, spec["name"]
 
     def _case_gradio_api_shape_variation(self, case: Dict) -> Dict:
         captured = {}

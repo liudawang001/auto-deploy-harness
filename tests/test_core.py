@@ -1280,6 +1280,7 @@ class CoreTests(unittest.TestCase):
         self.assertIn("git_lfs_prepare_execute", ids)
         self.assertIn("env_solve_legacy_gradio_constraints", ids)
         self.assertIn("env_solve_torch_cuda_wheel", ids)
+        self.assertIn("local_e2e_fixture_matrix", ids)
         self.assertIn("gradio_api_shape_variation", ids)
         self.assertIn("gradio_queue_call_followup", ids)
         self.assertIn("token_missing_diagnosis", ids)
@@ -1290,7 +1291,7 @@ class CoreTests(unittest.TestCase):
     def test_benchmark_runner_executes_all_fixture_cases(self):
         report = BenchmarkRunner().run(Path("tests/fixtures/benchmarks/manifest.json"))
         self.assertEqual(report["status"], "passed")
-        self.assertEqual(len(report["cases"]), 27)
+        self.assertEqual(len(report["cases"]), 28)
         self.assertTrue(all(case["status"] == "passed" for case in report["cases"]))
 
     def test_benchmark_cli_writes_output(self):
