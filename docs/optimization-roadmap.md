@@ -178,7 +178,7 @@ LLM 不能直接绕过 Python policy 执行命令或修改源码。
 - 对老项目自动识别 `numpy 2.x`、`pydantic v2`、`gradio v4` 等兼容风险。
 - 安装失败后能把错误分类给 diagnose。
 
-当前状态：已完成第一版 pipeline stage `env_solve`，可生成带约束的 install plan，覆盖老 Gradio 的 `numpy<2` / `pydantic<2`、headless OpenCV 替换建议，以及 GPU/CUDA/Torch 构建风险提示；后续继续补本机 CUDA 探测与 Torch wheel index 求解。
+当前状态：已完成第一版 pipeline stage `env_solve`，可生成带约束的 install plan，覆盖老 Gradio 的 `numpy<2` / `pydantic<2`、headless OpenCV 替换建议，以及 GPU/CUDA/Torch 构建风险提示；已补充本机 CUDA 探测、PyTorch `cu121` / `cu118` / `cpu` wheel index 求解和 CPU fallback 生成。后续继续补 Docker backend、更多 GPU 包规则和真实 CUDA E2E。
 
 ### 3.4 model_prepare
 
@@ -718,7 +718,7 @@ tests/fixtures/
 
 任务：
 
-1. CUDA/PyTorch compatibility solver。已完成 env_solve 第一版风险识别；后续补本机 CUDA 探测、Torch wheel index URL 和 CPU/CUDA fallback 生成。
+1. CUDA/PyTorch compatibility solver。已完成 env_solve 第一版风险识别、本机 CUDA 探测、Torch wheel index URL 和 CPU/CUDA fallback 生成；后续补真实 CUDA E2E、`xformers` / `flash-attn` / `bitsandbytes` 的版本矩阵和 Docker fallback。
 2. 磁盘/显存预估。
 3. ModelScope 下载支持。
 4. Git LFS 支持。已完成检测、准备命令和白名单受控执行第一版；后续补真实 LFS 大文件 E2E 与下载进度解析。

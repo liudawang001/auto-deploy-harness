@@ -510,6 +510,60 @@ class CoreTests(unittest.TestCase):
             self.assertIn("torch framework detected but requirements do not pin torch", result.data["risk_reasons"])
             self.assertIn("flash-attn may require CUDA toolkit and build isolation tuning", result.data["risk_reasons"])
 
+    def test_env_solve_selects_cuda_torch_wheel_and_cpu_fallback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "requirements.txt").write_text("torch\ntorchvision\ntransformers\n", encoding="utf-8")
+            result = EnvSolveModule(local_environment={
+                "python_version": "3.10",
+                "platform": "linux",
+                "machine": "x86_64",
+                "cuda": {"available": True, "version": "12.1", "source": "test"},
+            }).solve(
+                repo,
+                {
+                    "frameworks": ["torch", "transformers"],
+                    "install_plan": [
+                        ["python3", "-m", "venv", ".venv"],
+                        [".venv/bin/python", "-m", "pip", "install", "--upgrade", "pip"],
+                        [".venv/bin/python", "-m", "pip", "install", "-r", "requirements.txt"],
+                    ],
+                },
+                {"gpu_required": True, "python_range": ">=3.10,<3.12", "torch_variant": "cuda_or_cpu"},
+            )
+            torch_solution = result.data["torch_solution"]
+            self.assertEqual(torch_solution["selected"]["variant"], "cu121")
+            self.assertEqual(torch_solution["selected"]["index_url"], "https://download.pytorch.org/whl/cu121")
+            self.assertIn("https://download.pytorch.org/whl/cpu", [item["index_url"] for item in torch_solution["fallbacks"]])
+            torch_install = [cmd for cmd in result.data["install_plan"] if "https://download.pytorch.org/whl/cu121" in cmd][0]
+            self.assertEqual(torch_install[0], ".venv/bin/python")
+            self.assertIn("--index-url", torch_install)
+
+    def test_env_solve_generates_cpu_torch_fallback_when_cuda_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "requirements.txt").write_text("torch\nflash-attn\n", encoding="utf-8")
+            result = EnvSolveModule(local_environment={
+                "python_version": "3.11",
+                "platform": "linux",
+                "machine": "x86_64",
+                "cuda": {"available": False, "version": "", "source": "none"},
+            }).solve(
+                repo,
+                {
+                    "frameworks": ["torch"],
+                    "install_plan": [
+                        ["python3", "-m", "venv", ".venv"],
+                        [".venv/bin/python", "-m", "pip", "install", "-r", "requirements.txt"],
+                    ],
+                },
+                {"gpu_required": True, "python_range": ">=3.11,<3.12", "torch_variant": "cuda_or_cpu"},
+            )
+            self.assertEqual(result.data["torch_solution"]["selected"]["variant"], "cpu")
+            self.assertEqual(result.data["torch_solution"]["selected"]["index_url"], "https://download.pytorch.org/whl/cpu")
+            self.assertIn("GPU was requested but no compatible local CUDA wheel was selected; CPU fallback is planned", result.data["risk_reasons"])
+            self.assertIn("flash-attn is incompatible with the CPU torch fallback", result.data["risk_reasons"])
+
     def test_model_prepare_writes_manifest_and_cache_paths(self):
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = Path(tmp) / "run"
@@ -1225,6 +1279,7 @@ class CoreTests(unittest.TestCase):
         self.assertIn("git_lfs_detection", ids)
         self.assertIn("git_lfs_prepare_execute", ids)
         self.assertIn("env_solve_legacy_gradio_constraints", ids)
+        self.assertIn("env_solve_torch_cuda_wheel", ids)
         self.assertIn("gradio_api_shape_variation", ids)
         self.assertIn("gradio_queue_call_followup", ids)
         self.assertIn("token_missing_diagnosis", ids)
@@ -1235,7 +1290,7 @@ class CoreTests(unittest.TestCase):
     def test_benchmark_runner_executes_all_fixture_cases(self):
         report = BenchmarkRunner().run(Path("tests/fixtures/benchmarks/manifest.json"))
         self.assertEqual(report["status"], "passed")
-        self.assertEqual(len(report["cases"]), 26)
+        self.assertEqual(len(report["cases"]), 27)
         self.assertTrue(all(case["status"] == "passed" for case in report["cases"]))
 
     def test_benchmark_cli_writes_output(self):

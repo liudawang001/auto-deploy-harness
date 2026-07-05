@@ -112,6 +112,8 @@ class BenchmarkRunner:
                 return self._case_git_lfs_prepare_execute(case)
             if case_id == "env_solve_legacy_gradio_constraints":
                 return self._case_env_solve_legacy_gradio_constraints(case)
+            if case_id == "env_solve_torch_cuda_wheel":
+                return self._case_env_solve_torch_cuda_wheel(case)
             if case_id == "gradio_api_shape_variation":
                 return self._case_gradio_api_shape_variation(case)
             if case_id == "gradio_queue_call_followup":
@@ -518,6 +520,38 @@ class BenchmarkRunner:
             and result.data.get("analysis", {}).get("env_solution", {}).get("python") == "3.10"
         )
         return self._result(case, "passed" if ok else "failed", "env_solve legacy gradio constraints verified")
+
+    def _case_env_solve_torch_cuda_wheel(self, case: Dict) -> Dict:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "requirements.txt").write_text("torch\ntorchvision\ntransformers\n", encoding="utf-8")
+            result = EnvSolveModule(local_environment={
+                "python_version": "3.10",
+                "platform": "linux",
+                "machine": "x86_64",
+                "cuda": {"available": True, "version": "12.1", "source": "benchmark"},
+            }).solve(
+                repo,
+                {
+                    "frameworks": ["torch", "transformers"],
+                    "install_plan": [
+                        ["python3", "-m", "venv", ".venv"],
+                        [".venv/bin/python", "-m", "pip", "install", "--upgrade", "pip"],
+                        [".venv/bin/python", "-m", "pip", "install", "-r", "requirements.txt"],
+                    ],
+                },
+                {"gpu_required": True, "python_range": ">=3.10,<3.12", "torch_variant": "cuda_or_cpu"},
+            )
+        torch_solution = result.data.get("torch_solution", {})
+        fallback_urls = [item.get("index_url") for item in torch_solution.get("fallbacks", [])]
+        ok = (
+            result.status == "passed"
+            and torch_solution.get("selected", {}).get("variant") == "cu121"
+            and torch_solution.get("selected", {}).get("index_url") == "https://download.pytorch.org/whl/cu121"
+            and "https://download.pytorch.org/whl/cpu" in fallback_urls
+            and any(cmd and cmd[0] == ".venv/bin/python" and "https://download.pytorch.org/whl/cu121" in cmd for cmd in result.data.get("install_plan", []))
+        )
+        return self._result(case, "passed" if ok else "failed", "env_solve torch CUDA wheel verified")
 
     def _case_gradio_api_shape_variation(self, case: Dict) -> Dict:
         captured = {}

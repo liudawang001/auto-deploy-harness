@@ -49,6 +49,14 @@
   - `env_deploy` 改为消费 `env_solve` 输出后的 `install_plan`；真正安装仍受 `--execute --allow-install` 和命令白名单控制。
   - Benchmark cases 从 25 个扩展到 26 个，新增 `env_solve_legacy_gradio_constraints`。
   - 定向单测与 benchmark 已通过，覆盖约束生成、CUDA/Torch 风险和 dry-run pipeline 中的 env_solve 结果。
+- 下一阶段优化任务：
+  - `EnvSolveModule` 新增 `LocalEnvironmentProbe`，可读取 `AUTO_HARNESS_CUDA_VERSION`、`nvidia-smi` 或 `nvcc`，记录 Python、平台、架构和 CUDA 探测来源。
+  - `env_solve.torch_solution` 会识别 `torch` / `torchvision` / `torchaudio` 依赖，并根据本机 CUDA 映射 PyTorch wheel index：CUDA 12.1+ -> `cu121`，CUDA 11.8+ -> `cu118`，无兼容 CUDA -> `cpu`。
+  - 安装计划会在 pip upgrade 后插入受控的 Torch 预安装命令，例如 `pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121`；真正执行仍由 `env_deploy` 和命令白名单控制。
+  - `torch_solution.fallbacks` 保留 CPU fallback，CUDA 12.1 场景额外保留 `cu118` fallback，便于后续 repair/resume 自动换方案。
+  - GPU 需求但只能选择 CPU wheel 时，会写入明确 risk reason；`flash-attn` 在 CPU fallback 下会额外标记不可兼容风险。
+  - Benchmark cases 从 26 个扩展到 27 个，新增 `env_solve_torch_cuda_wheel`。
+  - 定向单测已通过，覆盖 CUDA `cu121` 选择、CPU fallback、无 CUDA 风险提示和 benchmark manifest 执行。
 
 ### 五阶段总结与总进度
 
@@ -60,13 +68,13 @@
 4. Git LFS 检测：识别 LFS pointer 和 `.gitattributes`，缺 `git-lfs` 时进入诊断态，并给出准备命令。
 5. Playwright smoke 治理：补齐真实浏览器 backend 的本地 smoke 文档和手动 CI workflow。
 
-按 `docs/optimization-roadmap.md` 的“全自动开源模型部署 Agent”目标估算，当前总项目进度约为 **74%**。
+按 `docs/optimization-roadmap.md` 的“全自动开源模型部署 Agent”目标估算，当前总项目进度约为 **76%**。
 
 估算依据：
 
 - 已完成约 85% 的 P0/P1 核心控制链路：下载缓存、断点续传、verify 防误判、repair plan/policy/resume、benchmark 回归体系已经成型。
-- 已完成约 65% 的真实开源模型部署能力：Hugging Face / ModelScope 下载、Git LFS 检测、Gradio/Streamlit/browser verify 已具备第一版，但真实端到端部署矩阵仍需扩大。
-- 尚未完成的关键 26% 主要是：更完整的 CUDA/PyTorch wheel 求解、Docker/sandbox 隔离、真实大模型长耗时 E2E 验证、memory promotion 到 skill 的人工审核流程。
+- 已完成约 68% 的真实开源模型部署能力：Hugging Face / ModelScope 下载、Git LFS 检测、Gradio/Streamlit/browser verify、PyTorch CPU/CUDA wheel 求解已具备第一版，但真实端到端部署矩阵仍需扩大。
+- 尚未完成的关键 24% 主要是：Docker/sandbox 隔离、真实大模型长耗时 E2E 验证、GPU 包版本矩阵、memory promotion 到 skill 的人工审核流程。
 - 继续执行 P0/P1 优化任务：
   - `ModelCache.reserve` 会为缓存目录写入 `.auto_harness_asset.json`，记录 source、repo id、revision、origin、asset id 和 cache key。
   - `ModelCache.entries()` 会读取缓存元数据，返回 repo id、revision、origin，便于后续审计和精细清理。
@@ -152,11 +160,11 @@
 
 ### 下一步
 
-1. 扩展 `env_solve` 的 Torch/CUDA wheel 求解：识别本机 CUDA、Python 版本和 torch index URL，生成 CPU/CUDA fallback 方案。
-2. 扩展真实 E2E fixture：至少覆盖一个小型 Gradio 模型、一个 Streamlit demo、一个 Git LFS 权重仓库。
-3. 增加 memory promotion 工作流：把高频失败记忆提升为可审核的 skill 更新建议。
-4. 引入更强 sandbox / Docker backend，隔离真实依赖安装和服务启动。
-5. 增加 Git LFS 真实拉取的长耗时进度解析，例如解析 `git lfs pull` 输出中的文件级下载进度。
+1. 扩展真实 E2E fixture：至少覆盖一个小型 Gradio 模型、一个 Streamlit demo、一个 Git LFS 权重仓库。
+2. 增加 memory promotion 工作流：把高频失败记忆提升为可审核的 skill 更新建议。
+3. 引入更强 sandbox / Docker backend，隔离真实依赖安装和服务启动。
+4. 增加 Git LFS 真实拉取的长耗时进度解析，例如解析 `git lfs pull` 输出中的文件级下载进度。
+5. 扩展 GPU 包版本矩阵：`xformers`、`flash-attn`、`bitsandbytes`、`triton` 与 Python/CUDA/Torch 的组合规则。
 
 ## 2026-07-03
 

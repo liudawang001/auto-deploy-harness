@@ -22,6 +22,9 @@ description: 求解 Python/CUDA/Torch 依赖环境。用于 env_solve 阶段，�
 - 不直接盲装依赖。
 - 老 Gradio 或未 pin Gradio 项目优先加 `numpy<2` 和 `pydantic<2` 约束。
 - Headless 部署中出现 `opencv-python` 时，优先建议 `opencv-python-headless`。
+- 探测本机 `AUTO_HARNESS_CUDA_VERSION`、`nvidia-smi` 或 `nvcc` 暴露的 CUDA 版本。
+- CUDA 12.1+ 优先选择 PyTorch `cu121` wheel index；CUDA 11.8+ 优先选择 `cu118`；没有兼容 CUDA 时生成 `cpu` 方案。
+- 生成的 Torch 安装命令必须进入 `install_plan`，并在 `torch_solution.fallbacks` 中保留 CPU fallback，便于 repair/resume 改用。
 - 检测到 `flash-attn`、`xformers`、`bitsandbytes`、`triton` 时，标记 CUDA/toolchain 风险。
 - 检测到 GPU/CUDA 信号但 Torch 未 pin 时，标记 Torch wheel variant 风险。
 - 只生成计划和风险说明，真正执行仍由 `env_deploy` 根据命令白名单完成。
@@ -35,6 +38,8 @@ description: 求解 Python/CUDA/Torch 依赖环境。用于 env_solve 阶段，�
 - `install_plan`: 约束后的安装命令
 - `constraints`: 自动增加的依赖约束
 - `constraint_reasons`: 每条约束的原因
+- `local_environment`: Python、平台、CUDA 探测来源和版本
+- `torch_solution`: selected wheel、index URL、命令、fallbacks 和 notes
 - `risk_reasons`: GPU/CUDA/Torch/构建相关风险
 
 ## 安全边界
