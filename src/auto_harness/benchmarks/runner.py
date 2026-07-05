@@ -193,6 +193,8 @@ class BenchmarkRunner:
                 return self._case_deployment_package_export(case)
             if case_id == "queue_parallel_worker_pool":
                 return self._case_queue_parallel_worker_pool(case)
+            if case_id == "queue_gpu_probe_scheduling":
+                return self._case_queue_gpu_probe_scheduling(case)
             return self._result(case, "skipped", "unknown benchmark case")
         except Exception as exc:  # noqa: BLE001 - benchmark report should continue
             return self._result(case, "failed", str(exc))
@@ -1485,6 +1487,32 @@ class BenchmarkRunner:
                 and sorted(runner.calls) == ["one", "two"]
             )
         return self._result(case, "passed" if ok else "failed", "queue parallel worker pool verified")
+
+    def _case_queue_gpu_probe_scheduling(self, case: Dict) -> Dict:
+        class FakeRunner:
+            def deploy(self, repo_url, name, dry_run=True, skip_clone=False, allow_install=False, allow_start=False):
+                return "task_%s" % name
+
+        class FakeProbe:
+            def probe(self):
+                return {"status": "detected", "source": "fixture", "available_slots": 1, "gpus": [{"index": 0}]}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            queue = DeploymentQueue(Path(tmp) / "queue", FakeRunner(), gpu_probe=FakeProbe())
+            queue.submit("local://gpu-one", name="gpu-one", require_gpu=True)
+            queue.submit("local://gpu-two", name="gpu-two", require_gpu=True)
+            result = queue.run_next(max_jobs=2)
+            listed = queue.list()
+            ok = (
+                result.get("gpu_probe", {}).get("source") == "fixture"
+                and result.get("gpu_slots") == 1
+                and result.get("started") == 1
+                and result.get("results", [{}])[0].get("task_id") == "task_gpu-one"
+                and result.get("skipped", [{}])[0].get("reason") == "gpu slot unavailable"
+                and listed.get("status_counts", {}).get("completed") == 1
+                and listed.get("status_counts", {}).get("queued") == 1
+            )
+        return self._result(case, "passed" if ok else "failed", "queue GPU probe scheduling verified")
 
     def _stage_update_count(self, run_dir: Path) -> Dict[str, int]:
         counts: Dict[str, int] = {}

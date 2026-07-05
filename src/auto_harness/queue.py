@@ -4,6 +4,7 @@ from typing import Dict, List, Optional
 
 from auto_harness.models.base import read_json, write_json
 from auto_harness.orchestrator import TaskRunner
+from auto_harness.runtime import GpuResourceProbe
 from auto_harness.utils.files import ensure_dir, safe_name, short_hash
 from auto_harness.utils.time import compact_timestamp, utc_now_iso
 
@@ -13,10 +14,11 @@ class DeploymentQueue:
 
     TERMINAL_STATUSES = ("completed", "failed", "cancelled")
 
-    def __init__(self, queue_dir: Path, runner: TaskRunner) -> None:
+    def __init__(self, queue_dir: Path, runner: TaskRunner, gpu_probe: GpuResourceProbe = None) -> None:
         self.queue_dir = ensure_dir(Path(queue_dir))
         self.items_dir = ensure_dir(self.queue_dir / "items")
         self.runner = runner
+        self.gpu_probe = gpu_probe or GpuResourceProbe()
 
     def submit(
         self,
@@ -63,12 +65,19 @@ class DeploymentQueue:
             "status_counts": self._status_counts(self._items()),
         }
 
-    def run_next(self, max_jobs: int = 1, gpu_slots: int = 0) -> Dict:
+    def run_next(self, max_jobs: int = 1, gpu_slots: int = None) -> Dict:
+        gpu_probe = self.gpu_probe.probe() if gpu_slots is None else {
+            "status": "manual",
+            "source": "manual",
+            "available_slots": max(0, gpu_slots),
+            "gpus": [],
+        }
+        effective_gpu_slots = int(gpu_probe.get("available_slots") or 0)
         selected: List[Dict] = []
         skipped: List[Dict] = []
         used_gpu = 0
         for item in self._queued_items():
-            if item.get("require_gpu") and used_gpu >= gpu_slots:
+            if item.get("require_gpu") and used_gpu >= effective_gpu_slots:
                 skipped.append({"job_id": item["job_id"], "reason": "gpu slot unavailable"})
                 continue
             selected.append(item)
@@ -81,7 +90,8 @@ class DeploymentQueue:
             "status": "completed" if results else "idle",
             "requested_max_jobs": max_jobs,
             "worker_count": min(len(selected), max(1, max_jobs)),
-            "gpu_slots": gpu_slots,
+            "gpu_slots": effective_gpu_slots,
+            "gpu_probe": gpu_probe,
             "started": len(results),
             "results": results,
             "skipped": skipped,

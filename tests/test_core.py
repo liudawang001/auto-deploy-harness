@@ -35,7 +35,7 @@ from auto_harness.state import StateStore
 from auto_harness.orchestrator import TaskRunner
 from auto_harness.queue import DeploymentQueue
 from auto_harness.repair import RepairApplier, RepairLoopController, RepairOverlay, RepairPlanner, RepairPolicy
-from auto_harness.runtime import DockerSmokeChecker
+from auto_harness.runtime import DockerSmokeChecker, GpuResourceProbe
 from auto_harness.verify import BrowserVerifier
 from auto_harness.utils.shell import CommandResult
 from auto_harness.utils.time import utc_now_iso
@@ -1808,11 +1808,12 @@ class CoreTests(unittest.TestCase):
         self.assertIn("deployment_queue_dry_run", ids)
         self.assertIn("deployment_package_export", ids)
         self.assertIn("queue_parallel_worker_pool", ids)
+        self.assertIn("queue_gpu_probe_scheduling", ids)
 
     def test_benchmark_runner_executes_all_fixture_cases(self):
         report = BenchmarkRunner().run(Path("tests/fixtures/benchmarks/manifest.json"))
         self.assertEqual(report["status"], "passed")
-        self.assertEqual(len(report["cases"]), 45)
+        self.assertEqual(len(report["cases"]), 46)
         self.assertTrue(all(case["status"] == "passed" for case in report["cases"]))
 
     def test_benchmark_cli_writes_output(self):
@@ -1959,6 +1960,44 @@ class CoreTests(unittest.TestCase):
             self.assertEqual([item["task_id"] for item in result["results"]], ["task_one", "task_two"])
             self.assertEqual(listed["status_counts"]["completed"], 2)
             self.assertEqual(sorted(runner.calls), ["one", "two"])
+
+    def test_gpu_resource_probe_supports_env_and_nvidia_smi(self):
+        env_probe = GpuResourceProbe(environ={"AUTO_HARNESS_GPU_SLOTS": "2"}).probe()
+        self.assertEqual(env_probe["source"], "env")
+        self.assertEqual(env_probe["available_slots"], 2)
+
+        class FakeCompleted:
+            returncode = 0
+            stdout = "0, NVIDIA A10, 24564, 20000\n1, NVIDIA A10, 24564, 18000\n"
+            stderr = ""
+
+        def fake_runner(cmd, text=True, capture_output=True, timeout=5):
+            return FakeCompleted()
+
+        smi_probe = GpuResourceProbe(command_runner=fake_runner, environ={}).probe()
+        self.assertEqual(smi_probe["source"], "nvidia-smi")
+        self.assertEqual(smi_probe["available_slots"], 2)
+        self.assertEqual(smi_probe["gpus"][0]["memory_free_mb"], 20000)
+
+    def test_deployment_queue_uses_gpu_probe_for_gpu_jobs(self):
+        class FakeRunner:
+            def deploy(self, repo_url, name, dry_run=True, skip_clone=False, allow_install=False, allow_start=False):
+                return "task_%s" % name
+
+        class FakeProbe:
+            def probe(self):
+                return {"status": "detected", "source": "test", "available_slots": 1, "gpus": [{"index": 0}]}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            queue = DeploymentQueue(Path(tmp) / "queue", FakeRunner(), gpu_probe=FakeProbe())
+            queue.submit("local://gpu-one", name="gpu-one", require_gpu=True)
+            queue.submit("local://gpu-two", name="gpu-two", require_gpu=True)
+            result = queue.run_next(max_jobs=2)
+            self.assertEqual(result["gpu_slots"], 1)
+            self.assertEqual(result["gpu_probe"]["source"], "test")
+            self.assertEqual(result["started"], 1)
+            self.assertEqual(result["skipped"][0]["reason"], "gpu slot unavailable")
+            self.assertEqual(result["results"][0]["task_id"], "task_gpu-one")
 
     def test_package_cli_exports_deployment_audit_bundle(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -28,7 +28,7 @@ class HarnessConfig:
     model_cache_dir: str = "model_cache"
     task_queue_dir: str = "queue"
     queue_max_concurrent_tasks: int = 1
-    queue_gpu_slots: int = 0
+    queue_gpu_slots: Optional[int] = None
     model_download_max_workers: int = 1
     model_download_retry_count: int = 2
     model_download_retry_backoff_seconds: float = 1.0
