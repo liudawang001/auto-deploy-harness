@@ -653,6 +653,8 @@ class CoreTests(unittest.TestCase):
             apply_result = promoter.apply(proposal_path)
             self.assertEqual(apply_result["status"], "applied")
             self.assertIn("regression_binding", apply_result)
+            self.assertEqual(apply_result["regression"]["status"], "passed")
+            self.assertTrue((memory_dir / "promotions" / ("%s.regression.json" % proposal["proposal_id"])).exists())
             self.assertIn("Memory Promotion: verify / trace_not_observed", skill_path.read_text(encoding="utf-8"))
 
     def test_memory_promote_cli_outputs_proposal(self):
@@ -1785,6 +1787,7 @@ class CoreTests(unittest.TestCase):
         self.assertIn("gpu_package_matrix_rules", ids)
         self.assertIn("docker_gpu_cache_backend", ids)
         self.assertIn("memory_promotion_approval_regression", ids)
+        self.assertIn("memory_promotion_apply_regression_run", ids)
         self.assertIn("verify_progress_refresh", ids)
         self.assertIn("openai_compatible_verify", ids)
         self.assertIn("openai_model_discovery_stream_verify", ids)
@@ -1802,7 +1805,7 @@ class CoreTests(unittest.TestCase):
     def test_benchmark_runner_executes_all_fixture_cases(self):
         report = BenchmarkRunner().run(Path("tests/fixtures/benchmarks/manifest.json"))
         self.assertEqual(report["status"], "passed")
-        self.assertEqual(len(report["cases"]), 40)
+        self.assertEqual(len(report["cases"]), 41)
         self.assertTrue(all(case["status"] == "passed" for case in report["cases"]))
 
     def test_benchmark_cli_writes_output(self):
@@ -1819,6 +1822,25 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(code, 0)
             data = json.loads(output.read_text(encoding="utf-8"))
             self.assertEqual(data["status"], "passed")
+
+    def test_benchmark_cli_runs_selected_case_ids(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "benchmark_report.json"
+            with redirect_stdout(io.StringIO()):
+                code = cli_main([
+                    "benchmark",
+                    "--manifest",
+                    "tests/fixtures/benchmarks/manifest.json",
+                    "--case-id",
+                    "token_missing_diagnosis",
+                    "--output",
+                    str(output),
+                ])
+            self.assertEqual(code, 0)
+            data = json.loads(output.read_text(encoding="utf-8"))
+            self.assertTrue(data["selected"])
+            self.assertEqual(data["selected_case_ids"], ["token_missing_diagnosis"])
+            self.assertEqual([case["id"] for case in data["cases"]], ["token_missing_diagnosis"])
 
     def test_live_smoke_planner_generates_optional_network_matrix(self):
         plan = LiveSmokePlanner().plan(include_long_running=True, execution_backend="docker")

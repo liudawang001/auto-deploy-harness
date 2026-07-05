@@ -136,6 +136,11 @@
       "expected_signal": "apply is rejected before approval and succeeds after approval with regression binding"
     },
     {
+      "id": "memory_promotion_apply_regression_run",
+      "purpose": "验证 memory promotion apply 后会自动执行 regression_binding 中的 benchmark case 并写出回归报告",
+      "expected_signal": "apply result contains passed regression report for selected case ids"
+    },
+    {
       "id": "verify_progress_refresh",
       "purpose": "验证长耗时 verify 会持续刷新 service discovery、首次推理探针和完成状态",
       "expected_signal": "progress callback receives first_inference and verify_completed updates"

@@ -648,7 +648,7 @@ memory cluster
 - memory 不是无限堆积。
 - 高频问题会沉淀为稳定部署策略。
 
-当前状态：已完成 `memory-promote` CLI。默认读取 `memory/deployment_issues.jsonl` 并按 stage/category/frameworks 聚类，生成 `memory/promotions/<proposal_id>.json` 和 `.md` 审核稿；proposal 包含审批元数据和 `regression_binding`。`--apply --proposal <path>` 在审批前会返回 `approval_required`，必须先用 `--approve --proposal <path>` 写入审批记录。后续补 promotion dashboard 和更细的 apply 后自动 regression 执行器。
+当前状态：已完成 `memory-promote` CLI。默认读取 `memory/deployment_issues.jsonl` 并按 stage/category/frameworks 聚类，生成 `memory/promotions/<proposal_id>.json` 和 `.md` 审核稿；proposal 包含审批元数据和 `regression_binding`。`--apply --proposal <path>` 在审批前会返回 `approval_required`，必须先用 `--approve --proposal <path>` 写入审批记录。审批后 apply 会默认运行绑定 benchmark 子集，并写出 `<proposal_id>.regression.json`；如回归失败 CLI 返回非 0。后续补 promotion dashboard。
 
 ## 9. 测试与 Benchmark 计划
 
@@ -782,7 +782,7 @@ PYTHONPATH=src python3 -m auto_harness.cli live-smoke-plan --execution-backend d
 3. 多任务并发。
 4. GPU 调度。
 5. 缓存清理策略。已完成第一版，支持 dry-run / apply、按 source/repo id 过滤和 keep-list。
-6. memory promotion 命令。已完成第一版，支持生成 human-review proposal 和显式 apply 到目标 skill。
+6. memory promotion 命令。已完成第二版，支持生成 human-review proposal、显式 apply 到目标 skill，并在 apply 后自动运行绑定 benchmark 子集。
 7. 自动生成部署产物包。
 8. CI benchmark。已完成第一版 benchmark CLI；Playwright browser smoke 已提供手动 GitHub Actions workflow，后续再扩展为完整 CI matrix。
 

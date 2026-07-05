@@ -57,15 +57,38 @@ class _FakeBrowserBackend:
 
 
 class BenchmarkRunner:
-    def run(self, manifest_path: Path, output_path: Path = None) -> Dict:
+    def run(self, manifest_path: Path, output_path: Path = None, case_ids: List[str] = None) -> Dict:
         manifest_path = Path(manifest_path)
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        selected_ids = list(case_ids or [])
+        manifest_cases = manifest.get("cases", [])
+        if selected_ids:
+            case_by_id = {case.get("id"): case for case in manifest_cases}
+            cases_to_run = []
+            for case_id in selected_ids:
+                case = case_by_id.get(case_id)
+                if case:
+                    cases_to_run.append(case)
+                else:
+                    cases_to_run.append({
+                        "id": case_id,
+                        "purpose": "selected benchmark case is missing from manifest",
+                        "expected_signal": "case id must exist",
+                        "_missing": True,
+                    })
+        else:
+            cases_to_run = manifest_cases
         cases: List[Dict] = []
-        for case in manifest.get("cases", []):
-            result = self._run_case(case, manifest_path.parent)
+        for case in cases_to_run:
+            if case.get("_missing"):
+                result = self._result(case, "failed", "benchmark case is not present in manifest")
+            else:
+                result = self._run_case(case, manifest_path.parent)
             cases.append(result)
         report = {
             "status": "passed" if all(case["status"] == "passed" for case in cases) else "failed",
+            "selected_case_ids": selected_ids,
+            "selected": bool(selected_ids),
             "cases": cases,
         }
         if output_path:
@@ -129,6 +152,8 @@ class BenchmarkRunner:
                 return self._case_docker_gpu_cache_backend(case)
             if case_id == "memory_promotion_approval_regression":
                 return self._case_memory_promotion_approval_regression(case)
+            if case_id == "memory_promotion_apply_regression_run":
+                return self._case_memory_promotion_apply_regression_run(case)
             if case_id == "verify_progress_refresh":
                 return self._case_verify_progress_refresh(case)
             if case_id == "openai_compatible_verify":
@@ -809,6 +834,55 @@ class BenchmarkRunner:
                 and "Memory Promotion" in skill_text
             )
         return self._result(case, "passed" if ok else "failed", "memory promotion approval and regression binding verified")
+
+    def _case_memory_promotion_apply_regression_run(self, case: Dict) -> Dict:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            memory_dir = root / "memory"
+            skills_dir = root / "skills"
+            memory_dir.mkdir()
+            (skills_dir / "verify-evidence").mkdir(parents=True)
+            skill_path = skills_dir / "verify-evidence" / "SKILL.md"
+            skill_path.write_text("---\nname: verify-evidence\n---\n# Verify\n", encoding="utf-8")
+            entries = [
+                {
+                    "id": "mem_apply_1",
+                    "stage": "verify",
+                    "category": "trace_not_observed",
+                    "frameworks": ["gradio"],
+                    "symptom": "trace missing",
+                    "root_cause": "api shape changed",
+                    "suggested_next_action": "run bound gradio regressions",
+                },
+                {
+                    "id": "mem_apply_2",
+                    "stage": "verify",
+                    "category": "trace_not_observed",
+                    "frameworks": ["gradio"],
+                    "symptom": "trace missing again",
+                    "root_cause": "api shape changed",
+                    "suggested_next_action": "run bound gradio regressions",
+                },
+            ]
+            (memory_dir / "deployment_issues.jsonl").write_text(
+                "\n".join(json.dumps(item, ensure_ascii=False) for item in entries) + "\n",
+                encoding="utf-8",
+            )
+            promoter = MemoryPromoter(memory_dir, skills_dir)
+            proposal = promoter.propose(min_count=2)["proposals"][0]
+            proposal_path = memory_dir / "promotions" / ("%s.json" % proposal["proposal_id"])
+            promoter.approve(proposal_path, reviewer="benchmark", note="run regression after apply")
+            applied = promoter.apply(proposal_path)
+            regression_path = Path(applied.get("regression", {}).get("output_path", ""))
+            regression = read_json(regression_path) if regression_path.exists() else {}
+            ok = (
+                applied.get("status") == "applied"
+                and applied.get("regression", {}).get("status") == "passed"
+                and regression.get("selected") is True
+                and regression.get("selected_case_ids") == proposal.get("regression_binding", {}).get("case_ids")
+                and all(item.get("status") == "passed" for item in regression.get("cases", []))
+            )
+        return self._result(case, "passed" if ok else "failed", "memory promotion apply regression execution verified")
 
     def _case_verify_progress_refresh(self, case: Dict) -> Dict:
         updates = []

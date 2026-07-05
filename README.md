@@ -23,7 +23,7 @@ AI-Auto-Harness 是一个面向 AI 开源 demo 项目的自动部署与验证 Ag
 - 可选 Claude Code analyzer advisor：通过 `AUTO_HARNESS_USE_AGENT_ANALYZER=1` 启用。
 - 仓库内置 skill：位于 `skills/*/SKILL.md`，按阶段选择并记录 hash。
 - 结构化问题记忆：位于 `memory/deployment_issues.jsonl`，用于检索历史相似失败。
-- Memory promotion：`memory-promote` 会把高频 issue memory 聚类为可审核的 skill 更新 proposal；默认只生成 proposal，不直接修改 skill，apply 前必须先审批，并会绑定建议回归 case。
+- Memory promotion：`memory-promote` 会把高频 issue memory 聚类为可审核的 skill 更新 proposal；默认只生成 proposal，不直接修改 skill，apply 前必须先审批，apply 后默认运行绑定 benchmark 子集并写出 regression report。
 - `resource_plan` 阶段：识别模型资产、GPU/CUDA 信号、磁盘风险和外部 token 需求。
 - `env_solve` 阶段：在安装前生成更稳定的依赖方案，识别老 Gradio 与 `numpy<2` / `pydantic<2` 兼容风险、headless OpenCV 替换建议，并根据本机 CUDA/Python 生成 PyTorch CPU/CUDA wheel 安装方案、fallback 和 `xformers` / `flash-attn` / `bitsandbytes` / `triton` GPU 包兼容矩阵。
 - Docker backend：`env_deploy` 和 `runner` 支持把安装/启动命令包装为 `docker run` 计划，包含 GPU 参数、模型缓存挂载、容器日志命令和清理命令元数据；默认仍是本地 backend，真实执行仍受 `--execute` 和命令白名单保护。
@@ -366,7 +366,15 @@ PYTHONPATH=src python3 -m auto_harness.cli memory-promote --approve --proposal m
 PYTHONPATH=src python3 -m auto_harness.cli memory-promote --apply --proposal memory/promotions/<proposal_id>.json
 ```
 
+`--apply` 默认会读取 proposal 的 `regression_binding`，只运行绑定的 benchmark case，并把结果写入 `memory/promotions/<proposal_id>.regression.json`。如果回归失败，CLI 会返回非 0；紧急场景可显式使用 `--skip-regression` 跳过，但不建议作为常规路径。
+
 该流程不会记录密钥值，也不会把一次性日志直接写入 skill；skill 更新仍应通过测试和代码审查。
+
+也可以单独运行某些 benchmark case：
+
+```bash
+PYTHONPATH=src python3 -m auto_harness.cli benchmark --case-id gradio_config_discovery --case-id gradio_queue_call_followup
+```
 
 ## 安全默认值
 

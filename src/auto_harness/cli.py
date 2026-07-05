@@ -66,6 +66,7 @@ def build_parser() -> argparse.ArgumentParser:
     memory_promote.add_argument("--proposal", default="")
     memory_promote.add_argument("--reviewer", default="operator")
     memory_promote.add_argument("--note", default="")
+    memory_promote.add_argument("--skip-regression", action="store_true", default=False)
 
     llm = sub.add_parser("llm-test", help="test LLM provider")
     llm.add_argument("--provider", choices=["mock", "xunfei"], default="mock")
@@ -74,6 +75,7 @@ def build_parser() -> argparse.ArgumentParser:
     benchmark = sub.add_parser("benchmark", help="run local benchmark fixtures")
     benchmark.add_argument("--manifest", default="tests/fixtures/benchmarks/manifest.json")
     benchmark.add_argument("--output", default="")
+    benchmark.add_argument("--case-id", action="append", default=None)
 
     live_smoke = sub.add_parser("live-smoke-plan", help="print optional networked E2E smoke plan")
     live_smoke.add_argument("--include-long-running", action="store_true", default=False)
@@ -174,7 +176,7 @@ def main(argv=None) -> int:
             if not args.proposal:
                 print(json.dumps({"status": "failed", "error": "--proposal is required with --apply"}, ensure_ascii=False, indent=2))
                 return 2
-            result = promoter.apply(Path(args.proposal))
+            result = promoter.apply(Path(args.proposal), run_regression=not args.skip_regression)
         else:
             output_dir = Path(args.output_dir) if args.output_dir else None
             result = promoter.propose(
@@ -184,7 +186,8 @@ def main(argv=None) -> int:
                 output_dir=output_dir,
             )
         print(json.dumps(result, ensure_ascii=False, indent=2))
-        return 0 if result.get("status") not in ("failed",) else 2
+        regression = result.get("regression") if isinstance(result.get("regression"), dict) else {}
+        return 0 if result.get("status") not in ("failed",) and regression.get("status") not in ("failed",) else 2
 
     if args.command == "llm-test":
         provider = MockLLMProvider() if args.provider == "mock" else XunfeiSparkProvider()
@@ -194,7 +197,7 @@ def main(argv=None) -> int:
 
     if args.command == "benchmark":
         output = Path(args.output) if args.output else None
-        report = BenchmarkRunner().run(Path(args.manifest), output)
+        report = BenchmarkRunner().run(Path(args.manifest), output, case_ids=args.case_id)
         print(json.dumps(report, ensure_ascii=False, indent=2))
         return 0 if report.get("status") == "passed" else 2
 

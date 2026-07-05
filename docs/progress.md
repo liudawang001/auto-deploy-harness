@@ -5,6 +5,11 @@
 ### 已完成
 
 - 下一阶段优化任务：
+  - `BenchmarkRunner.run` 支持按 `case_ids` 执行 benchmark 子集，CLI 新增 `benchmark --case-id`。
+  - `memory-promote --apply` 审批通过后默认运行 proposal `regression_binding.case_ids` 对应的 benchmark 子集，并写出 `memory/promotions/<proposal_id>.regression.json`。
+  - 回归结果会写回 proposal JSON；若回归失败，CLI 返回非 0，避免 skill promotion 变成无验证的规则追加。
+  - Benchmark cases 从 40 个扩展到 41 个，新增 `memory_promotion_apply_regression_run`。
+- 下一阶段优化任务：
   - `LogClassifier` 增强结构化诊断字段：缺失依赖会提取 package，numpy/pydantic/protobuf 冲突会输出兼容 constraint，wheel build 失败会提取失败包名。
   - 诊断结果新增 `root_cause`、`requires`、`rerun_from` 和 `recommended_actions`，便于后续 repair planner 直接消费。
   - `RepairPlanner` 优先使用诊断中的 recommended action，能把 `numpy.dtype size changed` 转换为受控 `pip install numpy<2` 建议，并从 `env_deploy` 安全重跑。

@@ -44,7 +44,7 @@ class MemoryPromoter:
             "proposals": proposals,
         }
 
-    def apply(self, proposal_path: Path) -> Dict:
+    def apply(self, proposal_path: Path, run_regression: bool = True, benchmark_runner=None) -> Dict:
         proposal_path = Path(proposal_path)
         proposal = json.loads(proposal_path.read_text(encoding="utf-8"))
         approval = proposal.get("approval") if isinstance(proposal.get("approval"), dict) else {}
@@ -66,10 +66,12 @@ class MemoryPromoter:
         raw = target.read_text(encoding="utf-8")
         marker = "auto-harness-memory-promotion:%s" % proposal["proposal_id"]
         if marker in raw:
+            regression_result = self._run_regression(proposal, proposal_path, benchmark_runner) if run_regression else self._skipped_regression(proposal)
             return {
                 "status": "already_applied",
                 "proposal_id": proposal["proposal_id"],
                 "target_skill": str(target),
+                "regression": regression_result,
             }
         block = "\n\n<!-- %s -->\n%s\n<!-- /%s -->\n" % (
             marker,
@@ -77,16 +79,19 @@ class MemoryPromoter:
             marker,
         )
         target.write_text(raw.rstrip() + block, encoding="utf-8")
+        regression_result = self._run_regression(proposal, proposal_path, benchmark_runner) if run_regression else self._skipped_regression(proposal)
         applied = dict(proposal)
         applied["status"] = "applied"
         applied["applied_at"] = utc_now_iso()
         applied["applied_target"] = str(target)
+        applied["regression"] = regression_result
         write_json(proposal_path, applied)
         return {
             "status": "applied",
             "proposal_id": proposal["proposal_id"],
             "target_skill": str(target),
             "regression_binding": proposal.get("regression_binding", {}),
+            "regression": regression_result,
         }
 
     def approve(self, proposal_path: Path, reviewer: str = "operator", note: str = "") -> Dict:
@@ -281,3 +286,37 @@ class MemoryPromoter:
             if len(result) >= limit:
                 break
         return result
+
+    def _run_regression(self, proposal: Dict, proposal_path: Path, benchmark_runner=None) -> Dict:
+        binding = proposal.get("regression_binding") if isinstance(proposal.get("regression_binding"), dict) else {}
+        manifest = binding.get("manifest")
+        case_ids = binding.get("case_ids") or []
+        if not manifest or not case_ids:
+            return {
+                "status": "skipped",
+                "reason": "no regression binding case ids",
+                "binding": binding,
+            }
+        manifest_path = Path(manifest)
+        if not manifest_path.is_absolute():
+            manifest_path = Path.cwd() / manifest_path
+        output_path = proposal_path.with_suffix(".regression.json")
+        if benchmark_runner is None:
+            from auto_harness.benchmarks import BenchmarkRunner
+            benchmark_runner = BenchmarkRunner()
+        report = benchmark_runner.run(manifest_path, output_path=output_path, case_ids=case_ids)
+        return {
+            "status": report.get("status"),
+            "manifest": str(manifest_path),
+            "case_ids": case_ids,
+            "output_path": str(output_path),
+            "case_count": len(report.get("cases") or []),
+            "failed_case_ids": [case.get("id") for case in report.get("cases", []) if case.get("status") != "passed"],
+        }
+
+    def _skipped_regression(self, proposal: Dict) -> Dict:
+        return {
+            "status": "skipped",
+            "reason": "regression execution disabled by caller",
+            "binding": proposal.get("regression_binding", {}),
+        }
