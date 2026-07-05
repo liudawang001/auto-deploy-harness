@@ -16,7 +16,7 @@ from auto_harness.assets.manifest import ModelAsset
 from auto_harness.diagnostics import LogClassifier
 from auto_harness.models.task import ProjectSpec, RuntimePolicy, TaskSpec
 from auto_harness.agents.base import AgentResult
-from auto_harness.memory import MemoryStore
+from auto_harness.memory import MemoryPromoter, MemoryStore
 from auto_harness.assets import GitLFSDetector, ModelCache, ModelAssetDetector, ModelFileSelector
 from auto_harness.modules.analyzer import ProjectAnalyzer
 from auto_harness.modules.env_deploy import EnvDeployModule
@@ -414,6 +414,92 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(hits[0]["category"], "trace_not_observed")
             store.remember_issue("task1", "verify", StageResult("verify", "uncertain", "verify completed with uncertain"), analysis)
             self.assertEqual(len(store.query("verify", analysis)), 2)
+
+    def test_memory_promoter_generates_review_proposal_and_apply(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            memory_dir = root / "memory"
+            memory_dir.mkdir()
+            skills_dir = root / "skills"
+            target_dir = skills_dir / "verify-evidence"
+            target_dir.mkdir(parents=True)
+            skill_path = target_dir / "SKILL.md"
+            skill_path.write_text("---\nname: verify-evidence\n---\n# Verify\n", encoding="utf-8")
+            entries = [
+                {
+                    "id": "mem_1",
+                    "stage": "verify",
+                    "category": "trace_not_observed",
+                    "frameworks": ["gradio"],
+                    "symptom": "response did not contain trace id",
+                    "root_cause": "default API shape is wrong",
+                    "suggested_next_action": "Inspect /config and update verify_hint.",
+                },
+                {
+                    "id": "mem_2",
+                    "stage": "verify",
+                    "category": "trace_not_observed",
+                    "frameworks": ["gradio"],
+                    "symptom": "artifact and response did not contain trace id",
+                    "root_cause": "service endpoint differs from /api/predict",
+                    "suggested_next_action": "Use Gradio config discovery before fallback.",
+                },
+            ]
+            (memory_dir / "deployment_issues.jsonl").write_text(
+                "\n".join(json.dumps(entry, ensure_ascii=False) for entry in entries) + "\n",
+                encoding="utf-8",
+            )
+            result = MemoryPromoter(memory_dir, skills_dir).propose(min_count=2)
+            self.assertEqual(result["status"], "proposed")
+            self.assertEqual(result["candidate_count"], 1)
+            proposal = result["proposals"][0]
+            self.assertEqual(proposal["target_skill"], "verify-evidence/SKILL.md")
+            self.assertTrue((memory_dir / "promotions" / ("%s.json" % proposal["proposal_id"])).exists())
+            self.assertTrue(proposal["review_required"])
+            apply_result = MemoryPromoter(memory_dir, skills_dir).apply(memory_dir / "promotions" / ("%s.json" % proposal["proposal_id"]))
+            self.assertEqual(apply_result["status"], "applied")
+            self.assertIn("Memory Promotion: verify / trace_not_observed", skill_path.read_text(encoding="utf-8"))
+
+    def test_memory_promote_cli_outputs_proposal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            memory_dir = root / "memory"
+            memory_dir.mkdir()
+            skills_dir = root / "skills"
+            (skills_dir / "verify-evidence").mkdir(parents=True)
+            (skills_dir / "verify-evidence" / "SKILL.md").write_text("---\nname: verify-evidence\n---\n# Verify\n", encoding="utf-8")
+            for index in range(2):
+                with (memory_dir / "deployment_issues.jsonl").open("a", encoding="utf-8") as f:
+                    f.write(json.dumps({
+                        "id": "mem_%s" % index,
+                        "stage": "verify",
+                        "category": "api_shape_unknown",
+                        "frameworks": ["streamlit"],
+                        "symptom": "streamlit trace not observed %s" % index,
+                        "suggested_next_action": "Add browser verify rule.",
+                    }, ensure_ascii=False) + "\n")
+            config_path = root / "config.json"
+            config_path.write_text(json.dumps({
+                "memory_dir": str(memory_dir),
+                "skills_dir": str(skills_dir),
+                "runs_dir": str(root / "runs"),
+                "model_cache_dir": str(root / "model_cache"),
+            }), encoding="utf-8")
+            old_config = os.environ.get("AUTO_HARNESS_CONFIG")
+            os.environ["AUTO_HARNESS_CONFIG"] = str(config_path)
+            output = io.StringIO()
+            try:
+                with redirect_stdout(output):
+                    code = cli_main(["memory-promote", "--min-count", "2"])
+            finally:
+                if old_config is None:
+                    os.environ.pop("AUTO_HARNESS_CONFIG", None)
+                else:
+                    os.environ["AUTO_HARNESS_CONFIG"] = old_config
+            self.assertEqual(code, 0)
+            data = json.loads(output.getvalue())
+            self.assertEqual(data["status"], "proposed")
+            self.assertEqual(data["proposals"][0]["cluster"]["category"], "api_shape_unknown")
 
     def test_model_asset_detector_finds_huggingface_repo(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1281,6 +1367,7 @@ class CoreTests(unittest.TestCase):
         self.assertIn("env_solve_legacy_gradio_constraints", ids)
         self.assertIn("env_solve_torch_cuda_wheel", ids)
         self.assertIn("local_e2e_fixture_matrix", ids)
+        self.assertIn("memory_promotion_proposal", ids)
         self.assertIn("gradio_api_shape_variation", ids)
         self.assertIn("gradio_queue_call_followup", ids)
         self.assertIn("token_missing_diagnosis", ids)
@@ -1291,7 +1378,7 @@ class CoreTests(unittest.TestCase):
     def test_benchmark_runner_executes_all_fixture_cases(self):
         report = BenchmarkRunner().run(Path("tests/fixtures/benchmarks/manifest.json"))
         self.assertEqual(report["status"], "passed")
-        self.assertEqual(len(report["cases"]), 28)
+        self.assertEqual(len(report["cases"]), 29)
         self.assertTrue(all(case["status"] == "passed" for case in report["cases"]))
 
     def test_benchmark_cli_writes_output(self):

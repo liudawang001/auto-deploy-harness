@@ -138,6 +138,36 @@ src/auto_harness/memory/store.py
 
 例如，一条 memory 可以建议“修改 Gradio launch 参数”，但如果当前 `allow_source_edit=false`，pipeline 仍然不能自动改源码。
 
+## Memory 如何提升为 Skill
+
+当同一类 memory 多次出现，可以用 `memory-promote` 生成可审核的 skill 更新建议：
+
+```bash
+PYTHONPATH=src python3 -m auto_harness.cli memory-promote --min-count 2
+```
+
+默认只生成审核稿：
+
+```text
+memory/promotions/<proposal_id>.json
+memory/promotions/<proposal_id>.md
+```
+
+proposal 会记录：
+
+- 聚类条件：stage、category、frameworks、count、memory ids。
+- 目标 skill，例如 verify 问题默认指向 `skills/verify-evidence/SKILL.md`。
+- 建议追加的 Markdown 规则片段。
+- `review_required=true`，表示必须人工确认后才能进入 skill。
+
+只有显式执行下面的命令才会修改 skill：
+
+```bash
+PYTHONPATH=src python3 -m auto_harness.cli memory-promote --apply --proposal memory/promotions/<proposal_id>.json
+```
+
+这条命令会用 marker 包裹追加内容，避免重复应用。默认 proposal 模式不会改 `skills/*/SKILL.md`，也不会执行 shell。任何从 memory 提升到 skill 的内容都不能包含密钥值、一次性路径或未经验证的临时 workaround。
+
 ## Verify 模块为什么要重点设计
 
 Verify 是这个项目最关键的工程价值点，因为它负责阻止“假成功”。

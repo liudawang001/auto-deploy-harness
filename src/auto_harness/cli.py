@@ -4,6 +4,7 @@ from pathlib import Path
 
 from auto_harness.config import HarnessConfig
 from auto_harness.benchmarks import BenchmarkRunner
+from auto_harness.memory import MemoryPromoter
 from auto_harness.orchestrator import TaskRunner
 from auto_harness.providers import Message, MockLLMProvider, XunfeiSparkProvider
 
@@ -43,6 +44,14 @@ def build_parser() -> argparse.ArgumentParser:
     repair_approve = sub.add_parser("repair-approve", help="approve the latest repair plan for a task")
     repair_approve.add_argument("--task-id", required=True)
     repair_approve.add_argument("--note", default="")
+
+    memory_promote = sub.add_parser("memory-promote", help="generate or apply skill update proposals from issue memory")
+    memory_promote.add_argument("--min-count", type=int, default=2)
+    memory_promote.add_argument("--stage", default=None)
+    memory_promote.add_argument("--category", default=None)
+    memory_promote.add_argument("--output-dir", default="")
+    memory_promote.add_argument("--apply", action="store_true", default=False)
+    memory_promote.add_argument("--proposal", default="")
 
     llm = sub.add_parser("llm-test", help="test LLM provider")
     llm.add_argument("--provider", choices=["mock", "xunfei"], default="mock")
@@ -119,6 +128,24 @@ def main(argv=None) -> int:
         approval = runner.approve_repair(args.task_id, note=args.note)
         print(json.dumps(approval, ensure_ascii=False, indent=2))
         return 0
+
+    if args.command == "memory-promote":
+        promoter = MemoryPromoter(config.memory_path, config.skills_path)
+        if args.apply:
+            if not args.proposal:
+                print(json.dumps({"status": "failed", "error": "--proposal is required with --apply"}, ensure_ascii=False, indent=2))
+                return 2
+            result = promoter.apply(Path(args.proposal))
+        else:
+            output_dir = Path(args.output_dir) if args.output_dir else None
+            result = promoter.propose(
+                min_count=max(1, args.min_count),
+                stage=args.stage,
+                category=args.category,
+                output_dir=output_dir,
+            )
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0 if result.get("status") not in ("failed",) else 2
 
     if args.command == "llm-test":
         provider = MockLLMProvider() if args.provider == "mock" else XunfeiSparkProvider()

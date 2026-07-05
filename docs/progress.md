@@ -63,6 +63,12 @@
   - Benchmark 新增 `local_e2e_fixture_matrix`，逐个调用 `TaskRunner.deploy(..., dry_run=True)` 跑完整 pipeline，并检查 `analyze`、`resource_plan`、`env_solve`、`env_deploy`、`model_prepare`、`runner`、`verify`、`report` 阶段结果。
   - E2E matrix 会断言 framework 识别、run candidate 端口、env_solve 约束、Git LFS pointer/size、Torch solution、manifest 和 report 输出，防止 pipeline 接线回归。
   - Benchmark cases 从 27 个扩展到 28 个。
+- 下一阶段优化任务：
+  - 新增 `MemoryPromoter`，读取 `memory/deployment_issues.jsonl`，按 stage / category / frameworks 聚类高频失败记忆。
+  - 新增 CLI 子命令 `memory-promote`：默认生成 `memory/promotions/<proposal_id>.json` 和 `.md` 审核稿，包含 cluster、目标 skill、建议追加片段和 `review_required=true`。
+  - `memory-promote --apply --proposal <path>` 才会把审核后的片段追加到目标 `skills/*/SKILL.md`，并使用 marker 防止重复应用；默认 proposal 模式不会修改 skill。
+  - Promotion 会按阶段选择目标 skill：verify -> `verify-evidence`，resource/model -> `prepare-model-assets`，env_solve/dependency -> `solve-python-cuda-env`，env_deploy/runner -> `deploy-python-webui`。
+  - Benchmark cases 从 28 个扩展到 29 个，新增 `memory_promotion_proposal`，验证 proposal JSON/Markdown 生成和默认不修改 skill 的安全边界。
 
 ### 五阶段总结与总进度
 
@@ -74,13 +80,13 @@
 4. Git LFS 检测：识别 LFS pointer 和 `.gitattributes`，缺 `git-lfs` 时进入诊断态，并给出准备命令。
 5. Playwright smoke 治理：补齐真实浏览器 backend 的本地 smoke 文档和手动 CI workflow。
 
-按 `docs/optimization-roadmap.md` 的“全自动开源模型部署 Agent”目标估算，当前总项目进度约为 **78%**。
+按 `docs/optimization-roadmap.md` 的“全自动开源模型部署 Agent”目标估算，当前总项目进度约为 **80%**。
 
 估算依据：
 
 - 已完成约 85% 的 P0/P1 核心控制链路：下载缓存、断点续传、verify 防误判、repair plan/policy/resume、benchmark 回归体系已经成型。
 - 已完成约 72% 的真实开源模型部署能力：Hugging Face / ModelScope 下载、Git LFS 检测、Gradio/Streamlit/browser verify、PyTorch CPU/CUDA wheel 求解和本地 E2E fixture matrix 已具备第一版，但真实联网/真实大模型端到端矩阵仍需扩大。
-- 尚未完成的关键 22% 主要是：Docker/sandbox 隔离、真实大模型长耗时 E2E 验证、GPU 包版本矩阵、memory promotion 到 skill 的人工审核流程。
+- 尚未完成的关键 20% 主要是：Docker/sandbox 隔离、真实大模型长耗时 E2E 验证、GPU 包版本矩阵、真实 Git LFS 长耗时进度解析。
 - 继续执行 P0/P1 优化任务：
   - `ModelCache.reserve` 会为缓存目录写入 `.auto_harness_asset.json`，记录 source、repo id、revision、origin、asset id 和 cache key。
   - `ModelCache.entries()` 会读取缓存元数据，返回 repo id、revision、origin，便于后续审计和精细清理。
@@ -166,11 +172,11 @@
 
 ### 下一步
 
-1. 增加 memory promotion 工作流：把高频失败记忆提升为可审核的 skill 更新建议。
-2. 引入更强 sandbox / Docker backend，隔离真实依赖安装和服务启动。
-3. 增加 Git LFS 真实拉取的长耗时进度解析，例如解析 `git lfs pull` 输出中的文件级下载进度。
-4. 扩展 GPU 包版本矩阵：`xformers`、`flash-attn`、`bitsandbytes`、`triton` 与 Python/CUDA/Torch 的组合规则。
-5. 扩展真实联网 E2E：选择小型 Hugging Face / ModelScope demo 和一个真实 Git LFS 权重仓库做可选长耗时 smoke。
+1. 引入更强 sandbox / Docker backend，隔离真实依赖安装和服务启动。
+2. 增加 Git LFS 真实拉取的长耗时进度解析，例如解析 `git lfs pull` 输出中的文件级下载进度。
+3. 扩展 GPU 包版本矩阵：`xformers`、`flash-attn`、`bitsandbytes`、`triton` 与 Python/CUDA/Torch 的组合规则。
+4. 扩展真实联网 E2E：选择小型 Hugging Face / ModelScope demo 和一个真实 Git LFS 权重仓库做可选长耗时 smoke。
+5. 为 memory promotion 增加人工审批元数据和 apply 后的 fixture 回归绑定。
 
 ## 2026-07-03
 
@@ -319,7 +325,7 @@
 - `RunnerModule` 尚未持久化进程句柄，后续需要支持清理。
 - `XunfeiSparkProvider` 当前假设 Anthropic-compatible HTTP messages 接口；如果选定的 Spark API 变体需要 WebSocket 签名，需要新增 transport。
 - 测试套件已覆盖核心 dry-run、verify、repair、下载和 benchmark 路径；后续仍需增加真实联网和真实浏览器矩阵。
-- Memory 会自动记录，但还没有 human review/promotion 命令来把重复 memory 转成 skill 更新。
+- Memory 会自动记录；`memory-promote` 已支持生成 human review proposal 和显式 apply，后续还需要把 apply 与 fixture 回归、审批人元数据绑定。
 - `model_prepare` 已接入 Hugging Face 和 ModelScope 下载器。
 - 下载器目前使用 stdlib HTTP 实现，已支持并发下载、有限重试、etag 缓存失效和远端提供 sha256 时的校验；后续仍需扩展更多模型源和真实大文件 E2E。
 - Repair plan 当前会生成受控 artifacts，但不会直接执行 shell 或修改源码。

@@ -111,6 +111,11 @@
       "expected_signal": "all local fixtures produce pipeline_results with expected stage evidence"
     },
     {
+      "id": "memory_promotion_proposal",
+      "purpose": "验证高频 issue memory 会生成可审核的 skill 更新 proposal，默认不直接修改 skill",
+      "expected_signal": "memory-promote creates proposal json/md with review_required=true"
+    },
+    {
       "id": "gradio_api_shape_variation",
       "purpose": "验证 Gradio /config 中 api_name 带斜杠且前置 dependency 不可用时仍能选中正确 API",
       "expected_signal": "request is sent to /api/predict with selected fn_index"

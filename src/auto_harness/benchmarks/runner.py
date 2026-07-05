@@ -7,6 +7,7 @@ from auto_harness.assets import GitLFSDetector, HuggingFaceDownloader, ModelCach
 from auto_harness.assets.manifest import ModelAsset
 from auto_harness.config import HarnessConfig
 from auto_harness.diagnostics import LogClassifier
+from auto_harness.memory import MemoryPromoter
 from auto_harness.models.base import read_json, write_json
 from auto_harness.modules.env_solve import EnvSolveModule
 from auto_harness.modules.model_prepare import ModelPrepareModule
@@ -116,6 +117,8 @@ class BenchmarkRunner:
                 return self._case_env_solve_torch_cuda_wheel(case)
             if case_id == "local_e2e_fixture_matrix":
                 return self._case_local_e2e_fixture_matrix(case, fixture_dir)
+            if case_id == "memory_promotion_proposal":
+                return self._case_memory_promotion_proposal(case)
             if case_id == "gradio_api_shape_variation":
                 return self._case_gradio_api_shape_variation(case)
             if case_id == "gradio_queue_call_followup":
@@ -633,6 +636,55 @@ class BenchmarkRunner:
         if not (run_dir / "reports" / "report.md").exists():
             return False, "%s report missing" % spec["name"]
         return True, spec["name"]
+
+    def _case_memory_promotion_proposal(self, case: Dict) -> Dict:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            memory_dir = root / "memory"
+            memory_dir.mkdir()
+            skills_dir = root / "skills"
+            target_dir = skills_dir / "verify-evidence"
+            target_dir.mkdir(parents=True)
+            skill_path = target_dir / "SKILL.md"
+            skill_path.write_text("---\nname: verify-evidence\n---\n# Verify\n", encoding="utf-8")
+            memories = [
+                {
+                    "id": "mem_gradio_trace_1",
+                    "stage": "verify",
+                    "category": "trace_not_observed",
+                    "frameworks": ["gradio"],
+                    "symptom": "HTTP response did not contain trace id",
+                    "root_cause": "Gradio API shape differs from fallback",
+                    "suggested_next_action": "Read /config before selecting verify request.",
+                },
+                {
+                    "id": "mem_gradio_trace_2",
+                    "stage": "verify",
+                    "category": "trace_not_observed",
+                    "frameworks": ["gradio"],
+                    "symptom": "artifact did not include current trace id",
+                    "root_cause": "Default /api/predict endpoint does not match app",
+                    "suggested_next_action": "Generate a verify_hint from discovered dependency api_name.",
+                },
+            ]
+            (memory_dir / "deployment_issues.jsonl").write_text(
+                "\n".join(json.dumps(item, ensure_ascii=False) for item in memories) + "\n",
+                encoding="utf-8",
+            )
+            result = MemoryPromoter(memory_dir, skills_dir).propose(min_count=2)
+            proposal = result.get("proposals", [{}])[0]
+            proposal_path = memory_dir / "promotions" / ("%s.json" % proposal.get("proposal_id", "missing"))
+            md_path = memory_dir / "promotions" / ("%s.md" % proposal.get("proposal_id", "missing"))
+            ok = (
+                result.get("status") == "proposed"
+                and proposal.get("review_required") is True
+                and proposal.get("target_skill") == "verify-evidence/SKILL.md"
+                and proposal_path.exists()
+                and md_path.exists()
+                and "Memory Promotion" in md_path.read_text(encoding="utf-8")
+                and "Memory Promotion" not in skill_path.read_text(encoding="utf-8")
+            )
+        return self._result(case, "passed" if ok else "failed", "memory promotion proposal verified")
 
     def _case_gradio_api_shape_variation(self, case: Dict) -> Dict:
         captured = {}

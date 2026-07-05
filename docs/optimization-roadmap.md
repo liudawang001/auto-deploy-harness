@@ -641,6 +641,8 @@ memory cluster
 - memory 不是无限堆积。
 - 高频问题会沉淀为稳定部署策略。
 
+当前状态：已完成第一版 `memory-promote` CLI。默认读取 `memory/deployment_issues.jsonl` 并按 stage/category/frameworks 聚类，生成 `memory/promotions/<proposal_id>.json` 和 `.md` 审核稿；只有显式 `--apply --proposal <path>` 才会追加到目标 `skills/*/SKILL.md`。后续补审批人元数据、apply 后 fixture 绑定回归和 promotion dashboard。
+
 ## 9. 测试与 Benchmark 计划
 
 ### 9.1 Fixture 项目
@@ -746,7 +748,7 @@ tests/fixtures/
 3. 多任务并发。
 4. GPU 调度。
 5. 缓存清理策略。已完成第一版，支持 dry-run / apply、按 source/repo id 过滤和 keep-list。
-6. memory promotion 命令。
+6. memory promotion 命令。已完成第一版，支持生成 human-review proposal 和显式 apply 到目标 skill。
 7. 自动生成部署产物包。
 8. CI benchmark。已完成第一版 benchmark CLI；Playwright browser smoke 已提供手动 GitHub Actions workflow，后续再扩展为完整 CI matrix。
 
