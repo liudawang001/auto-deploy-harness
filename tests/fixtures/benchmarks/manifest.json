@@ -211,6 +211,11 @@
       "expected_signal": "dashboard html contains task summary and benchmark status"
     },
     {
+      "id": "dashboard_http_server",
+      "purpose": "验证 dashboard 可以作为只读本地 HTTP 服务提供 HTML、JSON 和健康检查",
+      "expected_signal": "HTTP server returns dashboard html, dashboard.json and healthz"
+    },
+    {
       "id": "deployment_queue_dry_run",
       "purpose": "验证本地持久化任务队列可以入队、列出并前台消费 dry-run 部署任务",
       "expected_signal": "queued job becomes completed and writes pipeline_results"

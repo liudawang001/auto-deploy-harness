@@ -5,7 +5,7 @@ from pathlib import Path
 from auto_harness.config import HarnessConfig
 from auto_harness.artifacts import DeploymentPackageExporter
 from auto_harness.benchmarks import BenchmarkRunner, LiveSmokePlanner
-from auto_harness.dashboard import DashboardGenerator
+from auto_harness.dashboard import DashboardGenerator, DashboardServer
 from auto_harness.memory import MemoryPromoter
 from auto_harness.orchestrator import TaskRunner
 from auto_harness.providers import Message, MockLLMProvider, XunfeiSparkProvider
@@ -88,6 +88,9 @@ def build_parser() -> argparse.ArgumentParser:
     dashboard = sub.add_parser("dashboard", help="generate a static HTML dashboard from local runs")
     dashboard.add_argument("--output", default="")
     dashboard.add_argument("--benchmark-report", default="")
+    dashboard.add_argument("--serve", action="store_true", default=False)
+    dashboard.add_argument("--host", default="127.0.0.1")
+    dashboard.add_argument("--port", type=int, default=8765)
 
     queue = sub.add_parser("queue", help="submit and run persistent deployment queue jobs")
     queue_sub = queue.add_subparsers(dest="queue_command", required=True)
@@ -242,6 +245,17 @@ def main(argv=None) -> int:
         return 0 if report.get("status") == "passed" else 2
 
     if args.command == "dashboard":
+        if args.serve:
+            server = DashboardServer().create_server(
+                config.runs_path,
+                host=args.host,
+                port=args.port,
+                benchmark_report=Path(args.benchmark_report) if args.benchmark_report else None,
+            )
+            host, port = server.server_address
+            print(json.dumps({"status": "serving", "url": "http://%s:%s/" % (host, port)}, ensure_ascii=False, indent=2))
+            server.serve_forever()
+            return 0
         output = Path(args.output) if args.output else config.runs_path / "dashboard.html"
         benchmark_report = Path(args.benchmark_report) if args.benchmark_report else None
         result = DashboardGenerator().generate(config.runs_path, output, benchmark_report=benchmark_report)

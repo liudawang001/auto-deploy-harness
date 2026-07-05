@@ -5,6 +5,7 @@ import os
 import tarfile
 import tempfile
 import threading
+import urllib.request
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -16,6 +17,7 @@ from auto_harness.assets.huggingface import HuggingFaceDownloader
 from auto_harness.assets.modelscope import ModelScopeDownloader
 from auto_harness.assets.manifest import ModelAsset
 from auto_harness.diagnostics import LogClassifier
+from auto_harness.dashboard import DashboardServer
 from auto_harness.models.task import ProjectSpec, RuntimePolicy, TaskSpec
 from auto_harness.agents.base import AgentResult
 from auto_harness.memory import MemoryPromoter, MemoryStore
@@ -1805,6 +1807,7 @@ class CoreTests(unittest.TestCase):
         self.assertIn("repair_resume_audit_report", ids)
         self.assertIn("token_report_required_env", ids)
         self.assertIn("static_dashboard_export", ids)
+        self.assertIn("dashboard_http_server", ids)
         self.assertIn("deployment_queue_dry_run", ids)
         self.assertIn("deployment_package_export", ids)
         self.assertIn("queue_parallel_worker_pool", ids)
@@ -1815,7 +1818,7 @@ class CoreTests(unittest.TestCase):
     def test_benchmark_runner_executes_all_fixture_cases(self):
         report = BenchmarkRunner().run(Path("tests/fixtures/benchmarks/manifest.json"))
         self.assertEqual(report["status"], "passed")
-        self.assertEqual(len(report["cases"]), 48)
+        self.assertEqual(len(report["cases"]), 49)
         self.assertTrue(all(case["status"] == "passed" for case in report["cases"]))
 
     def test_benchmark_cli_writes_output(self):
@@ -1892,6 +1895,43 @@ class CoreTests(unittest.TestCase):
             self.assertTrue(output_path.exists())
             self.assertTrue(output_path.with_suffix(".json").exists())
             self.assertIn("dashboard-cli-demo", output_path.read_text(encoding="utf-8"))
+
+    def test_dashboard_server_serves_html_json_and_health(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            runs = root / "runs"
+            task_dir = runs / "task-dashboard-http"
+            (task_dir / "reports").mkdir(parents=True)
+            (task_dir / "task.json").write_text(json.dumps({
+                "task_id": "task-dashboard-http",
+                "project": {"name": "dashboard-http-demo", "repo_url": "local://demo"},
+                "runtime": {"workspace_root": str(task_dir / "workspace")},
+                "created_at": "2026-07-05T00:00:00Z",
+            }), encoding="utf-8")
+            (task_dir / "state.json").write_text(json.dumps({
+                "task_id": "task-dashboard-http",
+                "status": "completed",
+                "current_stage": "report",
+                "report_path": str(task_dir / "reports" / "report.md"),
+                "stages": {"report": {"status": "passed", "updated_at": "2026-07-05T00:00:01Z"}},
+            }), encoding="utf-8")
+            server = DashboardServer().create_server(runs, host="127.0.0.1", port=0)
+            host, port = server.server_address
+            thread = threading.Thread(target=lambda: [server.handle_request() for _ in range(3)])
+            thread.daemon = True
+            thread.start()
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            try:
+                health = json.loads(opener.open("http://%s:%s/healthz" % (host, port), timeout=5).read().decode("utf-8"))
+                summary = json.loads(opener.open("http://%s:%s/dashboard.json" % (host, port), timeout=5).read().decode("utf-8"))
+                html_body = opener.open("http://%s:%s/" % (host, port), timeout=5).read().decode("utf-8")
+            finally:
+                server.server_close()
+                thread.join(timeout=5)
+            self.assertEqual(health["status"], "ok")
+            self.assertEqual(summary["task_count"], 1)
+            self.assertIn("dashboard-http-demo", html_body)
+            self.assertIn("AI-Auto-Harness Dashboard", html_body)
 
     def test_queue_cli_submits_lists_and_runs_dry_run_job(self):
         with tempfile.TemporaryDirectory() as tmp:

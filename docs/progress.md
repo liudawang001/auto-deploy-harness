@@ -5,6 +5,11 @@
 ### 已完成
 
 - 下一阶段优化任务：
+  - 新增 `DashboardServer` 只读本地 HTTP dashboard，复用 `DashboardGenerator.build_summary` 实时读取 runs 状态。
+  - CLI `dashboard` 新增 `--serve --host --port`；显式启动后提供 `/` HTML、`/dashboard.json` 和 `/healthz`，默认仍是静态导出。
+  - HTTP 服务不提供修改任务、运行命令或写入仓库的接口，只用于本机运维观察和面试演示。
+  - Benchmark cases 从 48 个扩展到 49 个，新增 `dashboard_http_server`。
+- 下一阶段优化任务：
   - 队列 claim lock 新增 TTL 回收，配置项 `queue_claim_ttl_seconds` 默认 3600 秒；崩溃 worker 遗留的过期 lock 会被删除并重新 claim。
   - `queue run` 结果新增 `recovered_locks`，记录被回收的 job id 和 lock age，方便审计为什么某个 job 能重新运行。
   - 未过期 lock 仍会阻止重复执行并保留任务 queued；过期 lock 回收后任务会继续走原有 `TaskRunner.deploy` 安全边界。
@@ -166,13 +171,13 @@
 4. Git LFS 检测：识别 LFS pointer 和 `.gitattributes`，缺 `git-lfs` 时进入诊断态，并给出准备命令。
 5. Playwright smoke 治理：补齐真实浏览器 backend 的本地 smoke 文档和手动 CI workflow。
 
-按 `docs/optimization-roadmap.md` 的“全自动开源模型部署 Agent”目标估算，当前总项目进度约为 **98%**。
+按 `docs/optimization-roadmap.md` 的“全自动开源模型部署 Agent”目标估算，当前总项目进度约为 **99%**。
 
 估算依据：
 
 - 已完成约 95% 的 P0/P1 核心控制链路：下载缓存、断点续传、verify 防误判、OpenAPI/OpenAI-compatible verify、repair plan/policy/resume、memory promotion 审批与回归、benchmark 回归体系已经成型。
-- 已完成约 96% 的真实开源模型部署能力：Hugging Face / ModelScope 下载、Git LFS / submodule 检测与受控准备、Gradio/Streamlit/browser verify、PyTorch CPU/CUDA wheel 求解、GPU 包兼容矩阵、本地 E2E fixture matrix、Docker GPU/cache backend、静态 dashboard、本地持久化队列、并发 worker pool、跨进程 claim lock、stale lock recovery、GPU 探测调度和部署产物包已具备，但真实联网/真实大模型端到端矩阵仍需扩大。
-- 尚未完成的关键 2% 主要是：真实联网长耗时 E2E、真实 Docker/GPU smoke、真实 vLLM 服务 smoke、更多模型仓库源、分布式资源锁和常驻 Web dashboard。
+- 已完成约 97% 的真实开源模型部署能力：Hugging Face / ModelScope 下载、Git LFS / submodule 检测与受控准备、Gradio/Streamlit/browser verify、PyTorch CPU/CUDA wheel 求解、GPU 包兼容矩阵、本地 E2E fixture matrix、Docker GPU/cache backend、静态/HTTP dashboard、本地持久化队列、并发 worker pool、跨进程 claim lock、stale lock recovery、GPU 探测调度和部署产物包已具备，但真实联网/真实大模型端到端矩阵仍需扩大。
+- 尚未完成的关键 1% 主要是：真实联网长耗时 E2E、真实 Docker/GPU smoke、真实 vLLM 服务 smoke、更多模型仓库源和分布式资源锁。
 - 继续执行 P0/P1 优化任务：
   - `ModelCache.reserve` 会为缓存目录写入 `.auto_harness_asset.json`，记录 source、repo id、revision、origin、asset id 和 cache key。
   - `ModelCache.entries()` 会读取缓存元数据，返回 repo id、revision、origin，便于后续审计和精细清理。

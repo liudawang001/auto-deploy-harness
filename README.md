@@ -35,10 +35,10 @@ AI-Auto-Harness 是一个面向 AI 开源 demo 项目的自动部署与验证 Ag
 - Report 会汇总 `resource_plan`、diagnosis 和 repair plan 中的 token 变量名，提示 operator/secret manager 注入，报告中不保存任何 token value。
 - Repair loop：失败或 uncertain 阶段会生成结构化修复建议，经过 policy 和 loop gate 校验后写入受控 repair artifacts；同一问题有最大尝试次数，不安全的 `rerun_from` 会回退到安全阶段，`resume` 会按 `rerun_from_effective` 从安全阶段重跑，需要人工确认的 action 可通过 `repair-approve` 批准。
 - Resume execution audit：当 repair resume 从中间阶段恢复时，会生成 `reports/execution_audit.json`，并在报告中展示复用阶段、重跑阶段和 fallback 信息。
-- Static dashboard：`dashboard` 命令会从本地 `runs/`、任务状态和可选 benchmark report 生成静态 HTML/JSON，用于本机开发和面试演示，不启动服务。
+- Dashboard：`dashboard` 命令会从本地 `runs/`、任务状态和可选 benchmark report 生成静态 HTML/JSON；`dashboard --serve` 可启动只读本地 HTTP 服务，暴露 HTML、JSON 和 health check。
 - Persistent queue：`queue submit/list/run` 提供本地持久化任务队列，入队与执行分离，前台 worker 显式消费任务；`queue run --max-jobs N` 会用线程池并发运行多个队列项，并通过原子 claim lock 防止多 worker 重复执行同一个 job，过期 lock 会按 TTL 回收。
 - Deployment package：`package --task-id` 会导出 `tar.gz` 审计产物包和 sidecar manifest，包含 task/state/events/reports/evidence/repairs，默认排除 workspace、模型缓存和日志。
-- Benchmark fixtures：`tests/fixtures/benchmarks` 覆盖下载续传、缓存命中、并发下载、etag 缓存失效、缓存清理、按来源/repo/keep-list 清理、服务启动后退出、历史 artifact 干扰、Gradio API shape 变化、token 缺失、token report 提示、Gradio `/config` discovery、OpenAPI schema discovery、OpenAI-compatible model discovery/stream verify、浏览器 DOM trace、Streamlit 错误页面、HTTP 200 false-positive 防护、repair policy 拒绝、repair loop 限流、repair resume 阶段跳转、人工审批、checksum 失败、本地 E2E fixture matrix、memory promotion proposal/审批/回归绑定、静态 dashboard 导出、持久化任务队列 dry-run 调度、队列并发 worker pool、队列 claim lock、stale claim lock recovery、GPU 探测调度、部署产物包导出、Docker backend plan/GPU/cache/log 元数据、GPU 包矩阵、verify progress 和 Git LFS progress parse。
+- Benchmark fixtures：`tests/fixtures/benchmarks` 覆盖下载续传、缓存命中、并发下载、etag 缓存失效、缓存清理、按来源/repo/keep-list 清理、服务启动后退出、历史 artifact 干扰、Gradio API shape 变化、token 缺失、token report 提示、Gradio `/config` discovery、OpenAPI schema discovery、OpenAI-compatible model discovery/stream verify、浏览器 DOM trace、Streamlit 错误页面、HTTP 200 false-positive 防护、repair policy 拒绝、repair loop 限流、repair resume 阶段跳转、人工审批、checksum 失败、本地 E2E fixture matrix、memory promotion proposal/审批/回归绑定、静态 dashboard 导出、只读 HTTP dashboard、持久化任务队列 dry-run 调度、队列并发 worker pool、队列 claim lock、stale claim lock recovery、GPU 探测调度、部署产物包导出、Docker backend plan/GPU/cache/log 元数据、GPU 包矩阵、verify progress 和 Git LFS progress parse。
 - 开发进度报告：`docs/progress.md`。
 
 ## 快速开始
@@ -271,6 +271,7 @@ docs/optimization-roadmap.md
 ```bash
 PYTHONPATH=src python3 -m auto_harness.cli dashboard --output runs/dashboard.html
 PYTHONPATH=src python3 -m auto_harness.cli dashboard --output runs/dashboard.html --benchmark-report benchmark_report.json
+PYTHONPATH=src python3 -m auto_harness.cli dashboard --serve --host 127.0.0.1 --port 8765
 ```
 
 该命令会同时写出：
@@ -281,6 +282,14 @@ runs/dashboard.json
 ```
 
 HTML 展示任务状态、当前阶段、各阶段状态、报告路径和可选 benchmark 概览；JSON 用于后续接入真正的 Web dashboard 或任务队列。
+
+`--serve` 会以前台只读方式启动本地 HTTP dashboard：
+
+```text
+GET /              HTML dashboard
+GET /dashboard.json JSON summary
+GET /healthz       health check
+```
 
 ## Queue
 
@@ -349,6 +358,7 @@ PYTHONPATH=src python3 -m auto_harness.cli live-smoke-plan --execution-backend d
 - 长耗时 verify 会持续刷新首次推理探针和完成状态。
 - vLLM/OpenAI-compatible server 会优先通过 `/v1/models` 发现模型，再使用 `/v1/chat/completions` 发送 trace prompt；普通 JSON 或 streaming SSE 响应中包含当前 trace 才通过。
 - 本地 E2E fixture matrix 会把小型 Gradio demo、Streamlit demo 和 Git LFS 权重仓库跑完整 dry-run pipeline，并检查阶段结果。
+- Dashboard 可以作为只读本地 HTTP 服务提供 HTML、JSON 和 health check。
 - 持久化任务队列可以入队、列出并前台消费 dry-run 部署任务。
 - 队列 worker pool 可以并发消费多个已选队列任务，并保持结果顺序稳定。
 - 队列 claim lock 可以阻止多个 worker 重复执行同一个 queued job。

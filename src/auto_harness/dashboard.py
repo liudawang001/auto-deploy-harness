@@ -1,5 +1,6 @@
 import html
 import json
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -24,9 +25,23 @@ class DashboardGenerator:
     def generate(self, runs_dir: Path, output_path: Path, benchmark_report: Optional[Path] = None) -> Dict:
         runs_dir = Path(runs_dir)
         output_path = Path(output_path)
+        summary = self.build_summary(runs_dir, benchmark_report=benchmark_report)
+        write_json(output_path.with_suffix(".json"), summary)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(self.render_html(summary), encoding="utf-8")
+        return {
+            "status": "generated",
+            "output_path": str(output_path),
+            "summary_path": str(output_path.with_suffix(".json")),
+            "task_count": summary["task_count"],
+            "benchmark_status": summary["benchmark"].get("status", ""),
+        }
+
+    def build_summary(self, runs_dir: Path, benchmark_report: Optional[Path] = None) -> Dict:
+        runs_dir = Path(runs_dir)
         tasks = self._tasks(runs_dir)
         benchmark = self._read_benchmark(benchmark_report)
-        summary = {
+        return {
             "generated_at": utc_now_iso(),
             "runs_dir": str(runs_dir),
             "task_count": len(tasks),
@@ -35,16 +50,9 @@ class DashboardGenerator:
             "benchmark": self._benchmark_summary(benchmark),
             "tasks": tasks,
         }
-        write_json(output_path.with_suffix(".json"), summary)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_text(self._html(summary), encoding="utf-8")
-        return {
-            "status": "generated",
-            "output_path": str(output_path),
-            "summary_path": str(output_path.with_suffix(".json")),
-            "task_count": len(tasks),
-            "benchmark_status": summary["benchmark"].get("status", ""),
-        }
+
+    def render_html(self, summary: Dict) -> str:
+        return self._html(summary)
 
     def _tasks(self, runs_dir: Path) -> List[Dict]:
         if not runs_dir.exists():
@@ -232,3 +240,46 @@ class DashboardGenerator:
 
     def _e(self, value) -> str:
         return html.escape(str(value or ""), quote=True)
+
+
+class DashboardServer:
+    """Read-only HTTP dashboard server for local operations."""
+
+    def __init__(self, generator: DashboardGenerator = None) -> None:
+        self.generator = generator or DashboardGenerator()
+
+    def create_server(self, runs_dir: Path, host: str = "127.0.0.1", port: int = 8765, benchmark_report: Optional[Path] = None):
+        generator = self.generator
+        runs_dir = Path(runs_dir)
+        benchmark_report = Path(benchmark_report) if benchmark_report else None
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):  # noqa: N802 - stdlib handler API
+                if self.path in ("/", "/index.html"):
+                    summary = generator.build_summary(runs_dir, benchmark_report=benchmark_report)
+                    body = generator.render_html(summary).encode("utf-8")
+                    self._send(200, "text/html; charset=utf-8", body)
+                    return
+                if self.path == "/dashboard.json":
+                    summary = generator.build_summary(runs_dir, benchmark_report=benchmark_report)
+                    body = json.dumps(summary, ensure_ascii=False, indent=2).encode("utf-8")
+                    self._send(200, "application/json; charset=utf-8", body)
+                    return
+                if self.path == "/healthz":
+                    body = json.dumps({"status": "ok", "runs_dir": str(runs_dir)}, ensure_ascii=False).encode("utf-8")
+                    self._send(200, "application/json; charset=utf-8", body)
+                    return
+                self._send(404, "application/json; charset=utf-8", b'{"status":"not_found"}')
+
+            def log_message(self, format, *args):  # noqa: A002,N802 - stdlib handler API
+                return
+
+            def _send(self, status: int, content_type: str, body: bytes) -> None:
+                self.send_response(status)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        return ThreadingHTTPServer((host, port), Handler)

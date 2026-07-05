@@ -3,6 +3,7 @@ import os
 import tarfile
 import tempfile
 import threading
+import urllib.request
 from pathlib import Path
 from typing import Dict, List
 
@@ -10,7 +11,7 @@ from auto_harness.artifacts import DeploymentPackageExporter
 from auto_harness.assets import GitLFSDetector, GitSubmoduleDetector, HuggingFaceDownloader, ModelCache
 from auto_harness.assets.manifest import ModelAsset
 from auto_harness.config import HarnessConfig
-from auto_harness.dashboard import DashboardGenerator
+from auto_harness.dashboard import DashboardGenerator, DashboardServer
 from auto_harness.diagnostics import LogClassifier
 from auto_harness.memory import MemoryPromoter
 from auto_harness.models.base import read_json, write_json
@@ -188,6 +189,8 @@ class BenchmarkRunner:
                 return self._case_token_report_required_env(case)
             if case_id == "static_dashboard_export":
                 return self._case_static_dashboard_export(case)
+            if case_id == "dashboard_http_server":
+                return self._case_dashboard_http_server(case)
             if case_id == "deployment_queue_dry_run":
                 return self._case_deployment_queue_dry_run(case)
             if case_id == "deployment_package_export":
@@ -1403,6 +1406,47 @@ class BenchmarkRunner:
                 and "AI-Auto-Harness Dashboard" in html
             )
         return self._result(case, "passed" if ok else "failed", "static dashboard export verified")
+
+    def _case_dashboard_http_server(self, case: Dict) -> Dict:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            runs = root / "runs"
+            task_dir = runs / "task-dashboard-http"
+            reports = task_dir / "reports"
+            reports.mkdir(parents=True)
+            write_json(task_dir / "task.json", {
+                "task_id": "task-dashboard-http",
+                "project": {"name": "dashboard-http-demo", "repo_url": "local://demo"},
+                "runtime": {"workspace_root": str(task_dir / "workspace")},
+                "created_at": "2026-07-05T00:00:00Z",
+            })
+            write_json(task_dir / "state.json", {
+                "task_id": "task-dashboard-http",
+                "status": "completed",
+                "current_stage": "report",
+                "report_path": str(reports / "report.md"),
+                "stages": {"report": {"status": "passed", "updated_at": "2026-07-05T00:00:01Z"}},
+            })
+            server = DashboardServer().create_server(runs, host="127.0.0.1", port=0)
+            host, port = server.server_address
+            thread = threading.Thread(target=lambda: [server.handle_request() for _ in range(3)])
+            thread.daemon = True
+            thread.start()
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            try:
+                health = json.loads(opener.open("http://%s:%s/healthz" % (host, port), timeout=5).read().decode("utf-8"))
+                summary = json.loads(opener.open("http://%s:%s/dashboard.json" % (host, port), timeout=5).read().decode("utf-8"))
+                html_body = opener.open("http://%s:%s/" % (host, port), timeout=5).read().decode("utf-8")
+            finally:
+                server.server_close()
+                thread.join(timeout=5)
+            ok = (
+                health.get("status") == "ok"
+                and summary.get("task_count") == 1
+                and "dashboard-http-demo" in html_body
+                and "AI-Auto-Harness Dashboard" in html_body
+            )
+        return self._result(case, "passed" if ok else "failed", "dashboard HTTP server verified")
 
     def _case_deployment_queue_dry_run(self, case: Dict) -> Dict:
         with tempfile.TemporaryDirectory() as tmp:
