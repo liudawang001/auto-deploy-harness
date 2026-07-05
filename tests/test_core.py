@@ -192,6 +192,19 @@ class CoreTests(unittest.TestCase):
             self.assertTrue(result.data["run_candidates"])
             self.assertEqual(result.data["verify_hint"]["request"]["method"], "POST")
 
+    def test_analyzer_detects_vllm_openai_compatible_service(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "requirements.txt").write_text("vllm\ntransformers\n", encoding="utf-8")
+            (repo / "README.md").write_text("Run an OpenAI-compatible /v1/chat/completions server with GPU.", encoding="utf-8")
+            result = ProjectAnalyzer().analyze(repo)
+            self.assertEqual(result.status, "passed")
+            self.assertIn("vllm", result.data["frameworks"])
+            self.assertIn("openai_compatible", result.data["frameworks"])
+            self.assertEqual(result.data["verify_hint"]["service_type"], "openai_compatible")
+            self.assertEqual(result.data["verify_hint"]["request"]["path"], "/v1/chat/completions")
+            self.assertTrue(any(candidate.get("expected_port") == 8000 for candidate in result.data["run_candidates"]))
+
     def test_analyzer_can_call_optional_agent_advisor(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
@@ -357,6 +370,40 @@ class CoreTests(unittest.TestCase):
             evidence = json.loads(Path(result.evidence[1]).read_text(encoding="utf-8"))
             self.assertTrue(evidence["request"]["discovery"]["queue_enabled"])
             self.assertTrue(evidence["follow_up_response"]["trace_found"])
+
+    def test_verify_supports_openai_compatible_chat_completion(self):
+        captured = {}
+
+        def fake_urlopen(req, timeout):
+            captured["url"] = req.full_url
+            captured["method"] = req.get_method()
+            captured["body"] = json.loads(req.data.decode("utf-8"))
+            trace = captured["body"]["messages"][0]["content"].split("trace ", 1)[1]
+            return FakeHttpResponse(json.dumps({
+                "choices": [
+                    {"message": {"role": "assistant", "content": "received %s" % trace}}
+                ]
+            }))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / "workspace" / "repo").mkdir(parents=True)
+            result = VerifyModule(urlopen=fake_urlopen).verify(
+                run_dir,
+                analysis={
+                    "frameworks": ["vllm", "openai_compatible"],
+                    "verify_hint": {
+                        "service_type": "openai_compatible",
+                        "endpoint": "http://127.0.0.1:8000",
+                        "model": "demo-model",
+                    },
+                },
+                runner_result={"pid": 1234, "expected_port": 8000, "service_ready": True},
+            )
+            self.assertEqual(result.status, "passed")
+            self.assertEqual(captured["method"], "POST")
+            self.assertEqual(captured["url"], "http://127.0.0.1:8000/v1/chat/completions")
+            self.assertEqual(captured["body"]["model"], "demo-model")
 
     def test_verify_reports_long_running_progress(self):
         updates = []
@@ -1508,6 +1555,7 @@ class CoreTests(unittest.TestCase):
         self.assertIn("docker_gpu_cache_backend", ids)
         self.assertIn("memory_promotion_approval_regression", ids)
         self.assertIn("verify_progress_refresh", ids)
+        self.assertIn("openai_compatible_verify", ids)
         self.assertIn("local_e2e_fixture_matrix", ids)
         self.assertIn("memory_promotion_proposal", ids)
         self.assertIn("gradio_api_shape_variation", ids)
@@ -1520,7 +1568,7 @@ class CoreTests(unittest.TestCase):
     def test_benchmark_runner_executes_all_fixture_cases(self):
         report = BenchmarkRunner().run(Path("tests/fixtures/benchmarks/manifest.json"))
         self.assertEqual(report["status"], "passed")
-        self.assertEqual(len(report["cases"]), 35)
+        self.assertEqual(len(report["cases"]), 36)
         self.assertTrue(all(case["status"] == "passed" for case in report["cases"]))
 
     def test_benchmark_cli_writes_output(self):

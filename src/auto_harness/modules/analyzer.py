@@ -66,9 +66,11 @@ class ProjectAnalyzer:
                     text += "\n" + path.read_text(encoding="utf-8", errors="ignore").lower()
                 except OSError:
                     pass
-        for key in ("gradio", "streamlit", "fastapi", "flask", "torch", "transformers"):
+        for key in ("gradio", "streamlit", "fastapi", "flask", "torch", "transformers", "vllm"):
             if key in text:
                 frameworks.append(key)
+        if "openai-compatible" in text or "openai compatible" in text or "/v1/chat/completions" in text:
+            frameworks.append("openai_compatible")
         if "package.json" in files:
             frameworks.append("node")
         if not frameworks:
@@ -96,6 +98,20 @@ class ProjectAnalyzer:
             for entry in ("app.py", "main.py", "demo.py"):
                 if entry in files:
                     candidates.append({"cmd": [".venv/bin/streamlit", "run", entry], "expected_port": 8501, "confidence": 0.8})
+        if "vllm" in frameworks:
+            candidates.append({
+                "cmd": [
+                    ".venv/bin/python",
+                    "-m",
+                    "vllm.entrypoints.openai.api_server",
+                    "--host",
+                    "127.0.0.1",
+                    "--port",
+                    "8000",
+                ],
+                "expected_port": 8000,
+                "confidence": 0.5,
+            })
         return candidates
 
     def _verify_hint(self, frameworks: List[str]) -> Dict:
@@ -114,6 +130,23 @@ class ProjectAnalyzer:
                 "service_type": "api",
                 "expected_output": "json_or_text",
                 "request": {"method": "GET"},
+            }
+        if "vllm" in frameworks or "openai_compatible" in frameworks:
+            return {
+                "service_type": "openai_compatible",
+                "expected_output": "chat_completion",
+                "request": {
+                    "method": "POST",
+                    "path": "/v1/chat/completions",
+                    "json": {
+                        "model": "{{model}}",
+                        "messages": [
+                            {"role": "user", "content": "auto harness trace {{trace_id}}"}
+                        ],
+                        "temperature": 0,
+                        "max_tokens": 16,
+                    },
+                },
             }
         return {"service_type": "unknown", "expected_output": "unknown"}
 

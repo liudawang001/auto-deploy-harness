@@ -4,6 +4,10 @@
 
 ### 已完成
 
+- 继续执行 90% 后三阶段开发 - 阶段 3：
+  - `ProjectAnalyzer` 新增 `vllm` / `openai_compatible` 识别，能根据依赖和 README 中的 `/v1/chat/completions` 信号生成 OpenAI-compatible verify hint。
+  - `VerifyModule` 支持 OpenAI-compatible `/v1/chat/completions` POST trace 请求，自动替换 `{{model}}`，仍要求响应体包含当前 trace 才算强证据。
+  - Benchmark 新增 `openai_compatible_verify`，覆盖 vLLM/OpenAI-compatible trace 验证。
 - 继续执行 90% 后三阶段开发 - 阶段 2：
   - 新增 `DockerSmokeChecker`，可生成 Docker/GPU runtime smoke 检查计划，默认不执行任何 Docker 命令。
   - 新增 CLI `docker-smoke`，支持默认 plan 模式和 `--probe` 本机探测模式；探测项包括 `docker version`、`docker info`、Python 镜像运行和可选 `--gpus all`。

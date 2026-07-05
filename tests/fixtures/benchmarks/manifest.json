@@ -136,6 +136,11 @@
       "expected_signal": "progress callback receives first_inference and verify_completed updates"
     },
     {
+      "id": "openai_compatible_verify",
+      "purpose": "验证 vLLM/OpenAI-compatible server 可通过 /v1/chat/completions 进行 trace 证据验证",
+      "expected_signal": "POST /v1/chat/completions includes trace prompt and response trace passes verify"
+    },
+    {
       "id": "local_e2e_fixture_matrix",
       "purpose": "验证本地 Gradio、Streamlit 和 Git LFS 权重 fixture 可以跑完整 dry-run pipeline",
       "expected_signal": "all local fixtures produce pipeline_results with expected stage evidence"

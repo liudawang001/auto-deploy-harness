@@ -50,7 +50,7 @@ class ResourcePlanner:
         return "unknown"
 
     def _gpu_required(self, repo_dir: Path, frameworks: set) -> bool:
-        if {"torch", "transformers"}.intersection(frameworks):
+        if {"torch", "transformers", "vllm"}.intersection(frameworks):
             text = self._read_key_text(repo_dir).lower()
             gpu_tokens = ("cuda", "gpu", "flash-attn", "xformers", "bitsandbytes", "vllm")
             return any(token in text for token in gpu_tokens)

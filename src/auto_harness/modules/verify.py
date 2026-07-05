@@ -206,6 +206,8 @@ class VerifyModule:
         if discovered:
             request_hint = discovered["request"]
             endpoint = discovered["endpoint"]
+        elif self._is_openai_compatible(analysis, verify_hint):
+            request_hint = self._openai_compatible_request_hint(verify_hint)
 
         base_endpoint = endpoint
         method = str(request_hint.get("method") or "GET").upper()
@@ -223,6 +225,7 @@ class VerifyModule:
             if template is None:
                 template = {"trace_id": "{{trace_id}}", "prompt": "auto harness trace {{trace_id}}"}
             body_json = self._replace_trace(template, trace_id)
+            body_json = self._replace_model_placeholder(body_json, verify_hint)
             body = json.dumps(body_json).encode("utf-8")
             headers["Content-Type"] = "application/json"
         else:
@@ -241,6 +244,25 @@ class VerifyModule:
             "headers": headers,
             "discovery": discovered,
             "follow_up_url_template": follow_up_url_template,
+        }
+
+    def _is_openai_compatible(self, analysis: Dict, verify_hint: Dict) -> bool:
+        frameworks = set(analysis.get("frameworks") or []) if isinstance(analysis, dict) else set()
+        return verify_hint.get("service_type") == "openai_compatible" or bool(frameworks.intersection({"vllm", "openai_compatible"}))
+
+    def _openai_compatible_request_hint(self, verify_hint: Dict) -> Dict:
+        request = verify_hint.get("request") if isinstance(verify_hint, dict) else None
+        if isinstance(request, dict) and request.get("path"):
+            return request
+        return {
+            "method": "POST",
+            "path": "/v1/chat/completions",
+            "json": {
+                "model": "{{model}}",
+                "messages": [{"role": "user", "content": "auto harness trace {{trace_id}}"}],
+                "temperature": 0,
+                "max_tokens": 16,
+            },
         }
 
     def _discover_gradio_request(self, endpoint: str, analysis: Dict) -> Optional[Dict]:
@@ -390,6 +412,16 @@ class VerifyModule:
             return [self._replace_trace(item, trace_id) for item in value]
         if isinstance(value, dict):
             return {key: self._replace_trace(item, trace_id) for key, item in value.items()}
+        return value
+
+    def _replace_model_placeholder(self, value, verify_hint: Dict):
+        model = verify_hint.get("model") or verify_hint.get("model_id") or "auto-harness-smoke-model"
+        if isinstance(value, str):
+            return value.replace("{{model}}", model)
+        if isinstance(value, list):
+            return [self._replace_model_placeholder(item, verify_hint) for item in value]
+        if isinstance(value, dict):
+            return {key: self._replace_model_placeholder(item, verify_hint) for key, item in value.items()}
         return value
 
     def _select_endpoint(self, service: Dict, analysis: Dict) -> Optional[str]:
