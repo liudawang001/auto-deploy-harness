@@ -1,3 +1,4 @@
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -75,15 +76,28 @@ class DeploymentQueue:
                 used_gpu += 1
             if len(selected) >= max(1, max_jobs):
                 break
-        results = [self._run_item(item) for item in selected]
+        results = self._run_items(selected, max_workers=max(1, max_jobs))
         return {
             "status": "completed" if results else "idle",
             "requested_max_jobs": max_jobs,
+            "worker_count": min(len(selected), max(1, max_jobs)),
             "gpu_slots": gpu_slots,
             "started": len(results),
             "results": results,
             "skipped": skipped,
         }
+
+    def _run_items(self, items: List[Dict], max_workers: int) -> List[Dict]:
+        if not items:
+            return []
+        if len(items) == 1 or max_workers <= 1:
+            return [self._run_item(item) for item in items]
+        indexed_results: Dict[int, Dict] = {}
+        with ThreadPoolExecutor(max_workers=min(len(items), max_workers)) as executor:
+            futures = {executor.submit(self._run_item, item): index for index, item in enumerate(items)}
+            for future in as_completed(futures):
+                indexed_results[futures[future]] = future.result()
+        return [indexed_results[index] for index in range(len(items))]
 
     def _run_item(self, item: Dict) -> Dict:
         item["status"] = "running"

@@ -36,9 +36,9 @@ AI-Auto-Harness 是一个面向 AI 开源 demo 项目的自动部署与验证 Ag
 - Repair loop：失败或 uncertain 阶段会生成结构化修复建议，经过 policy 和 loop gate 校验后写入受控 repair artifacts；同一问题有最大尝试次数，不安全的 `rerun_from` 会回退到安全阶段，`resume` 会按 `rerun_from_effective` 从安全阶段重跑，需要人工确认的 action 可通过 `repair-approve` 批准。
 - Resume execution audit：当 repair resume 从中间阶段恢复时，会生成 `reports/execution_audit.json`，并在报告中展示复用阶段、重跑阶段和 fallback 信息。
 - Static dashboard：`dashboard` 命令会从本地 `runs/`、任务状态和可选 benchmark report 生成静态 HTML/JSON，用于本机开发和面试演示，不启动服务。
-- Persistent queue：`queue submit/list/run` 提供本地持久化任务队列第一版，入队与执行分离，前台 worker 显式消费任务，可按 GPU slot 跳过暂不可运行任务。
+- Persistent queue：`queue submit/list/run` 提供本地持久化任务队列，入队与执行分离，前台 worker 显式消费任务；`queue run --max-jobs N` 会用线程池并发运行多个队列项，可按 GPU slot 跳过暂不可运行任务。
 - Deployment package：`package --task-id` 会导出 `tar.gz` 审计产物包和 sidecar manifest，包含 task/state/events/reports/evidence/repairs，默认排除 workspace、模型缓存和日志。
-- Benchmark fixtures：`tests/fixtures/benchmarks` 覆盖下载续传、缓存命中、并发下载、etag 缓存失效、缓存清理、按来源/repo/keep-list 清理、服务启动后退出、历史 artifact 干扰、Gradio API shape 变化、token 缺失、token report 提示、Gradio `/config` discovery、OpenAPI schema discovery、OpenAI-compatible model discovery/stream verify、浏览器 DOM trace、Streamlit 错误页面、HTTP 200 false-positive 防护、repair policy 拒绝、repair loop 限流、repair resume 阶段跳转、人工审批、checksum 失败、本地 E2E fixture matrix、memory promotion proposal/审批/回归绑定、静态 dashboard 导出、持久化任务队列 dry-run 调度、部署产物包导出、Docker backend plan/GPU/cache/log 元数据、GPU 包矩阵、verify progress 和 Git LFS progress parse。
+- Benchmark fixtures：`tests/fixtures/benchmarks` 覆盖下载续传、缓存命中、并发下载、etag 缓存失效、缓存清理、按来源/repo/keep-list 清理、服务启动后退出、历史 artifact 干扰、Gradio API shape 变化、token 缺失、token report 提示、Gradio `/config` discovery、OpenAPI schema discovery、OpenAI-compatible model discovery/stream verify、浏览器 DOM trace、Streamlit 错误页面、HTTP 200 false-positive 防护、repair policy 拒绝、repair loop 限流、repair resume 阶段跳转、人工审批、checksum 失败、本地 E2E fixture matrix、memory promotion proposal/审批/回归绑定、静态 dashboard 导出、持久化任务队列 dry-run 调度、队列并发 worker pool、部署产物包导出、Docker backend plan/GPU/cache/log 元数据、GPU 包矩阵、verify progress 和 Git LFS progress parse。
 - 开发进度报告：`docs/progress.md`。
 
 ## 快速开始
@@ -292,7 +292,7 @@ PYTHONPATH=src python3 -m auto_harness.cli queue list
 PYTHONPATH=src python3 -m auto_harness.cli queue run --max-jobs 1
 ```
 
-`queue submit` 默认仍是 dry-run，不安装依赖、不启动服务；只有传入 `--execute --allow-install --allow-start`，并且 worker 执行时命令白名单允许，才会进入真实执行路径。GPU 任务可以用 `--require-gpu` 标记；`queue run --gpu-slots 0` 会跳过这类任务，避免普通开发机误跑 GPU 部署。
+`queue submit` 默认仍是 dry-run，不安装依赖、不启动服务；只有传入 `--execute --allow-install --allow-start`，并且 worker 执行时命令白名单允许，才会进入真实执行路径。`queue run --max-jobs N` 使用线程池并发消费已选队列项，返回结果仍按调度顺序排列。GPU 任务可以用 `--require-gpu` 标记；`queue run --gpu-slots 0` 会跳过这类任务，避免普通开发机误跑 GPU 部署。
 
 ## Deployment Package
 
@@ -350,6 +350,7 @@ PYTHONPATH=src python3 -m auto_harness.cli live-smoke-plan --execution-backend d
 - vLLM/OpenAI-compatible server 会优先通过 `/v1/models` 发现模型，再使用 `/v1/chat/completions` 发送 trace prompt；普通 JSON 或 streaming SSE 响应中包含当前 trace 才通过。
 - 本地 E2E fixture matrix 会把小型 Gradio demo、Streamlit demo 和 Git LFS 权重仓库跑完整 dry-run pipeline，并检查阶段结果。
 - 持久化任务队列可以入队、列出并前台消费 dry-run 部署任务。
+- 队列 worker pool 可以并发消费多个已选队列任务，并保持结果顺序稳定。
 - 部署任务可以导出不包含 workspace 的审计产物包和 manifest。
 - 服务进程启动后快速退出不能判定为启动成功。
 - token 缺失或 401 日志会被诊断为 `auth_required`。

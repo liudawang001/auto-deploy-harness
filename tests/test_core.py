@@ -4,6 +4,7 @@ import io
 import os
 import tarfile
 import tempfile
+import threading
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -32,6 +33,7 @@ from auto_harness.providers import Message, MockLLMProvider
 from auto_harness.skills import SkillRegistry
 from auto_harness.state import StateStore
 from auto_harness.orchestrator import TaskRunner
+from auto_harness.queue import DeploymentQueue
 from auto_harness.repair import RepairApplier, RepairLoopController, RepairOverlay, RepairPlanner, RepairPolicy
 from auto_harness.runtime import DockerSmokeChecker
 from auto_harness.verify import BrowserVerifier
@@ -1805,11 +1807,12 @@ class CoreTests(unittest.TestCase):
         self.assertIn("static_dashboard_export", ids)
         self.assertIn("deployment_queue_dry_run", ids)
         self.assertIn("deployment_package_export", ids)
+        self.assertIn("queue_parallel_worker_pool", ids)
 
     def test_benchmark_runner_executes_all_fixture_cases(self):
         report = BenchmarkRunner().run(Path("tests/fixtures/benchmarks/manifest.json"))
         self.assertEqual(report["status"], "passed")
-        self.assertEqual(len(report["cases"]), 44)
+        self.assertEqual(len(report["cases"]), 45)
         self.assertTrue(all(case["status"] == "passed" for case in report["cases"]))
 
     def test_benchmark_cli_writes_output(self):
@@ -1931,6 +1934,31 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(run["started"], 1)
             self.assertEqual(run["results"][0]["status"], "completed")
             self.assertTrue((root / "runs" / run["results"][0]["task_id"] / "reports" / "pipeline_results.json").exists())
+
+    def test_deployment_queue_runs_multiple_jobs_in_parallel(self):
+        class BarrierRunner:
+            def __init__(self):
+                self.barrier = threading.Barrier(2)
+                self.calls = []
+
+            def deploy(self, repo_url, name, dry_run=True, skip_clone=False, allow_install=False, allow_start=False):
+                self.calls.append(name)
+                self.barrier.wait(timeout=2)
+                return "task_%s" % name
+
+        with tempfile.TemporaryDirectory() as tmp:
+            runner = BarrierRunner()
+            queue = DeploymentQueue(Path(tmp) / "queue", runner)
+            queue.submit("local://one", name="one")
+            queue.submit("local://two", name="two")
+            result = queue.run_next(max_jobs=2)
+            listed = queue.list()
+            self.assertEqual(result["worker_count"], 2)
+            self.assertEqual(result["started"], 2)
+            self.assertEqual([item["status"] for item in result["results"]], ["completed", "completed"])
+            self.assertEqual([item["task_id"] for item in result["results"]], ["task_one", "task_two"])
+            self.assertEqual(listed["status_counts"]["completed"], 2)
+            self.assertEqual(sorted(runner.calls), ["one", "two"])
 
     def test_package_cli_exports_deployment_audit_bundle(self):
         with tempfile.TemporaryDirectory() as tmp:

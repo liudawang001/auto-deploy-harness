@@ -1,6 +1,7 @@
 import json
 import tarfile
 import tempfile
+import threading
 from pathlib import Path
 from typing import Dict, List
 
@@ -190,6 +191,8 @@ class BenchmarkRunner:
                 return self._case_deployment_queue_dry_run(case)
             if case_id == "deployment_package_export":
                 return self._case_deployment_package_export(case)
+            if case_id == "queue_parallel_worker_pool":
+                return self._case_queue_parallel_worker_pool(case)
             return self._result(case, "skipped", "unknown benchmark case")
         except Exception as exc:  # noqa: BLE001 - benchmark report should continue
             return self._result(case, "failed", str(exc))
@@ -1454,6 +1457,34 @@ class BenchmarkRunner:
                 and not any("/workspace/" in name for name in names)
             )
         return self._result(case, "passed" if ok else "failed", "deployment package export verified")
+
+    def _case_queue_parallel_worker_pool(self, case: Dict) -> Dict:
+        class BarrierRunner:
+            def __init__(self):
+                self.barrier = threading.Barrier(2)
+                self.calls = []
+
+            def deploy(self, repo_url, name, dry_run=True, skip_clone=False, allow_install=False, allow_start=False):
+                self.calls.append(name)
+                self.barrier.wait(timeout=2)
+                return "task_%s" % name
+
+        with tempfile.TemporaryDirectory() as tmp:
+            runner = BarrierRunner()
+            queue = DeploymentQueue(Path(tmp) / "queue", runner)
+            queue.submit("local://one", name="one")
+            queue.submit("local://two", name="two")
+            result = queue.run_next(max_jobs=2)
+            listed = queue.list()
+            ok = (
+                result.get("worker_count") == 2
+                and result.get("started") == 2
+                and [item.get("status") for item in result.get("results", [])] == ["completed", "completed"]
+                and [item.get("task_id") for item in result.get("results", [])] == ["task_one", "task_two"]
+                and listed.get("status_counts", {}).get("completed") == 2
+                and sorted(runner.calls) == ["one", "two"]
+            )
+        return self._result(case, "passed" if ok else "failed", "queue parallel worker pool verified")
 
     def _stage_update_count(self, run_dir: Path) -> Dict[str, int]:
         counts: Dict[str, int] = {}
