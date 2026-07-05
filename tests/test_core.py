@@ -17,7 +17,7 @@ from auto_harness.diagnostics import LogClassifier
 from auto_harness.models.task import ProjectSpec, RuntimePolicy, TaskSpec
 from auto_harness.agents.base import AgentResult
 from auto_harness.memory import MemoryPromoter, MemoryStore
-from auto_harness.assets import GitLFSDetector, ModelCache, ModelAssetDetector, ModelFileSelector
+from auto_harness.assets import GitLFSDetector, GitLFSProgressParser, ModelCache, ModelAssetDetector, ModelFileSelector
 from auto_harness.modules.analyzer import ProjectAnalyzer
 from auto_harness.modules.env_deploy import EnvDeployModule
 from auto_harness.modules.env_solve import EnvSolveModule
@@ -157,12 +157,21 @@ class CoreTests(unittest.TestCase):
             "5",
             "--download-retry-backoff",
             "0",
+            "--execution-backend",
+            "docker",
+            "--docker-image",
+            "python:3.11-slim",
+            "--docker-network",
+            "none",
         ])
         config = HarnessConfig()
         _apply_cli_overrides(config, args)
         self.assertEqual(config.model_download_max_workers, 3)
         self.assertEqual(config.model_download_retry_count, 5)
         self.assertEqual(config.model_download_retry_backoff_seconds, 0.0)
+        self.assertEqual(config.execution_backend, "docker")
+        self.assertEqual(config.docker_image, "python:3.11-slim")
+        self.assertEqual(config.docker_network, "none")
 
     def test_analyzer_detects_gradio_requirements(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -677,6 +686,8 @@ class CoreTests(unittest.TestCase):
 
         def fake_runner(cmd, cwd, timeout_seconds=900):
             calls.append((cmd, str(cwd), timeout_seconds))
+            if cmd == ["git", "lfs", "pull"]:
+                return CommandResult(cmd, str(cwd), 0, "Downloading LFS objects:  75% (3/4), 1.5 GB | 10 MB/s\n", "", False)
             return CommandResult(cmd, str(cwd), 0, "ok", "", False)
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -707,6 +718,9 @@ class CoreTests(unittest.TestCase):
             self.assertEqual([call[0] for call in calls], [["git", "lfs", "install"], ["git", "lfs", "pull"]])
             self.assertEqual(calls[0][2], 7)
             self.assertEqual(result.data["git_lfs"]["status"], "ready")
+            self.assertEqual(result.data["git_lfs"]["commands"][1]["progress"]["percent"], 75)
+            self.assertEqual(result.data["git_lfs"]["progress"]["percent"], 100)
+            self.assertEqual(result.data["progress"]["status"], "git_lfs_ready")
 
     def test_model_prepare_rejects_git_lfs_when_command_not_allowed(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -731,6 +745,50 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(result.status, "failed")
             self.assertEqual(result.data["git_lfs"]["diagnosis"]["category"], "command_rejected")
             self.assertIn("disallowed command", result.error)
+
+    def test_git_lfs_progress_parser_extracts_percent_and_bytes(self):
+        parsed = GitLFSProgressParser().parse(
+            "Downloading LFS objects:  50% (1/2), 20 MB | 4 MB/s\n"
+            "Git LFS: (1 of 2 files) 10 MB / 20 MB\n"
+        )
+        self.assertEqual(parsed["percent"], 50)
+        self.assertEqual(parsed["files_done"], 1)
+        self.assertEqual(parsed["files_total"], 2)
+        self.assertEqual(parsed["downloaded_bytes"], 10 * 1024 * 1024)
+        self.assertEqual(parsed["total_bytes"], 20 * 1024 * 1024)
+
+    def test_env_deploy_docker_backend_wraps_commands(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            result = EnvDeployModule().deploy(
+                repo,
+                {"install_plan": [["python3", "-m", "pip", "install", "-r", "requirements.txt"]]},
+                execute=False,
+                execution_backend="docker",
+                docker_image="python:3.11-slim",
+                docker_network="none",
+            )
+            self.assertEqual(result.status, "passed")
+            self.assertEqual(result.data["execution_backend"], "docker")
+            self.assertEqual(result.data["effective_commands"][0][0], "docker")
+            self.assertIn("python:3.11-slim", result.data["effective_commands"][0])
+            self.assertEqual(result.data["sandbox"]["network"], "none")
+
+    def test_runner_docker_backend_requires_docker_allowed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            result = RunnerModule().run(
+                repo,
+                {"run_candidates": [{"cmd": ["python3", "app.py"], "expected_port": 7860}]},
+                execute=True,
+                allowed_commands=["python3"],
+                execution_backend="docker",
+                docker_image="python:3.11-slim",
+            )
+            self.assertEqual(result.status, "failed")
+            self.assertEqual(result.data["cmd"][0], "docker")
+            self.assertIn("-p", result.data["cmd"])
+            self.assertIn("disallowed command: docker", result.error)
 
     def test_huggingface_downloader_resumes_partial_file(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1364,6 +1422,8 @@ class CoreTests(unittest.TestCase):
         self.assertIn("artifact_download_validation", ids)
         self.assertIn("git_lfs_detection", ids)
         self.assertIn("git_lfs_prepare_execute", ids)
+        self.assertIn("git_lfs_progress_parse", ids)
+        self.assertIn("docker_backend_plan", ids)
         self.assertIn("env_solve_legacy_gradio_constraints", ids)
         self.assertIn("env_solve_torch_cuda_wheel", ids)
         self.assertIn("local_e2e_fixture_matrix", ids)
@@ -1378,7 +1438,7 @@ class CoreTests(unittest.TestCase):
     def test_benchmark_runner_executes_all_fixture_cases(self):
         report = BenchmarkRunner().run(Path("tests/fixtures/benchmarks/manifest.json"))
         self.assertEqual(report["status"], "passed")
-        self.assertEqual(len(report["cases"]), 29)
+        self.assertEqual(len(report["cases"]), 31)
         self.assertTrue(all(case["status"] == "passed" for case in report["cases"]))
 
     def test_benchmark_cli_writes_output(self):

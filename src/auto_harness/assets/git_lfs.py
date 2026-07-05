@@ -83,3 +83,47 @@ class GitLFSDetector:
     def _match(self, pattern, text: str):
         match = pattern.search(text)
         return match.group(1) if match else None
+
+
+class GitLFSProgressParser:
+    """Parses common git-lfs progress lines into structured stage progress."""
+
+    OBJECTS_RE = re.compile(r"Downloading LFS objects:\s*(\d+)%\s*\((\d+)/(\d+)\)", re.IGNORECASE)
+    FILE_BYTES_RE = re.compile(r"\((\d+)\s+of\s+(\d+)\s+files?\)\s+([0-9.]+)\s*([KMGT]?B)\s*/\s*([0-9.]+)\s*([KMGT]?B)", re.IGNORECASE)
+
+    def parse(self, text: str) -> Dict:
+        progress: Dict = {}
+        if not text:
+            return progress
+        for line in text.splitlines():
+            objects_match = self.OBJECTS_RE.search(line)
+            if objects_match:
+                progress.update({
+                    "percent": int(objects_match.group(1)),
+                    "files_done": int(objects_match.group(2)),
+                    "files_total": int(objects_match.group(3)),
+                    "status": "git_lfs_downloading",
+                })
+            bytes_match = self.FILE_BYTES_RE.search(line)
+            if bytes_match:
+                downloaded = self._to_bytes(float(bytes_match.group(3)), bytes_match.group(4))
+                total = self._to_bytes(float(bytes_match.group(5)), bytes_match.group(6))
+                progress.update({
+                    "files_done": int(bytes_match.group(1)),
+                    "files_total": int(bytes_match.group(2)),
+                    "downloaded_bytes": downloaded,
+                    "total_bytes": total,
+                    "percent": int(downloaded * 100 / total) if total else progress.get("percent"),
+                    "status": "git_lfs_downloading",
+                })
+        return progress
+
+    def _to_bytes(self, value: float, unit: str) -> int:
+        factors = {
+            "B": 1,
+            "KB": 1024,
+            "MB": 1024 ** 2,
+            "GB": 1024 ** 3,
+            "TB": 1024 ** 4,
+        }
+        return int(value * factors.get(unit.upper(), 1))

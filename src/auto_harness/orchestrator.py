@@ -177,6 +177,9 @@ class TaskRunner:
                 deploy_analysis,
                 execute=not dry_run and task.runtime.allow_dependency_install,
                 allowed_commands=self.config.allowed_commands,
+                execution_backend=self.config.execution_backend,
+                docker_image=self.config.docker_image,
+                docker_network=self.config.docker_network,
             )
             self._attach_context(env_result, env_context)
             self._attach_repair_overlay(env_result, repair_overlay)
@@ -207,6 +210,9 @@ class TaskRunner:
                 deploy_analysis,
                 execute=not dry_run and task.runtime.allow_service_start,
                 allowed_commands=self.config.allowed_commands,
+                execution_backend=self.config.execution_backend,
+                docker_image=self.config.docker_image,
+                docker_network=self.config.docker_network,
             )
             self._attach_context(runner_result, runner_context)
             results["runner"] = to_plain(runner_result)

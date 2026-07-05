@@ -26,15 +26,16 @@ AI-Auto-Harness 是一个面向 AI 开源 demo 项目的自动部署与验证 Ag
 - Memory promotion：`memory-promote` 会把高频 issue memory 聚类为可审核的 skill 更新 proposal；默认只生成 proposal，不直接修改 skill。
 - `resource_plan` 阶段：识别模型资产、GPU/CUDA 信号、磁盘风险和外部 token 需求。
 - `env_solve` 阶段：在安装前生成更稳定的依赖方案，识别老 Gradio 与 `numpy<2` / `pydantic<2` 兼容风险、headless OpenCV 替换建议，并根据本机 CUDA/Python 生成 PyTorch CPU/CUDA wheel 安装方案和 fallback。
+- Docker backend 第一版：`env_deploy` 和 `runner` 支持把安装/启动命令包装为 `docker run` 计划；默认仍是本地 backend，真实执行仍受 `--execute` 和命令白名单保护。
 - Git LFS 检测：识别 `.gitattributes` 和 LFS pointer 文件，估算 pointer size，缺少 `git-lfs` 时给出 `git_lfs_missing` 诊断和 `git lfs install/pull` 准备命令。
-- Git LFS 受控准备：`model_prepare` 在 `--execute` 且 `git` 通过命令白名单时执行 `git lfs install` / `git lfs pull`，并记录命令结果、stderr/stdout tail 和进度状态。
+- Git LFS 受控准备：`model_prepare` 在 `--execute` 且 `git` 通过命令白名单时执行 `git lfs install` / `git lfs pull`，并记录命令结果、stderr/stdout tail、文件数/百分比/字节进度和最终状态。
 - `model_prepare` 阶段：生成模型资产 manifest、缓存 key 和 `model_cache` 路径；执行模式下支持 Hugging Face / ModelScope 文件清单解析、断点续传、并发下载、sha256/etag 校验元数据和缓存写入。
 - `verify` 增强：支持 Gradio `/config` discovery、Gradio queue `/call/<api_name>` follow-up、Streamlit DOM/HTML 证据探测，以及可选 Playwright 浏览器 DOM probe。
 - 日志规则分类器：对缺依赖、CUDA OOM、磁盘不足、token 权限、wheel 构建失败等常见错误生成结构化诊断；token 权限问题只提取所需环境变量名，不记录密钥值。
 - Report 会汇总 `resource_plan`、diagnosis 和 repair plan 中的 token 变量名，提示 operator/secret manager 注入，报告中不保存任何 token value。
 - Repair loop：失败或 uncertain 阶段会生成结构化修复建议，经过 policy 和 loop gate 校验后写入受控 repair artifacts；同一问题有最大尝试次数，不安全的 `rerun_from` 会回退到安全阶段，`resume` 会按 `rerun_from_effective` 从安全阶段重跑，需要人工确认的 action 可通过 `repair-approve` 批准。
 - Resume execution audit：当 repair resume 从中间阶段恢复时，会生成 `reports/execution_audit.json`，并在报告中展示复用阶段、重跑阶段和 fallback 信息。
-- Benchmark fixtures：`tests/fixtures/benchmarks` 覆盖下载续传、缓存命中、并发下载、etag 缓存失效、缓存清理、按来源/repo/keep-list 清理、服务启动后退出、历史 artifact 干扰、Gradio API shape 变化、token 缺失、token report 提示、Gradio `/config` discovery、浏览器 DOM trace、Streamlit 错误页面、HTTP 200 false-positive 防护、repair policy 拒绝、repair loop 限流、repair resume 阶段跳转、人工审批、checksum 失败、本地 E2E fixture matrix 和 memory promotion proposal。
+- Benchmark fixtures：`tests/fixtures/benchmarks` 覆盖下载续传、缓存命中、并发下载、etag 缓存失效、缓存清理、按来源/repo/keep-list 清理、服务启动后退出、历史 artifact 干扰、Gradio API shape 变化、token 缺失、token report 提示、Gradio `/config` discovery、浏览器 DOM trace、Streamlit 错误页面、HTTP 200 false-positive 防护、repair policy 拒绝、repair loop 限流、repair resume 阶段跳转、人工审批、checksum 失败、本地 E2E fixture matrix、memory promotion proposal、Docker backend plan 和 Git LFS progress parse。
 - 开发进度报告：`docs/progress.md`。
 
 ## 快速开始
@@ -164,6 +165,14 @@ PYTHONPATH=src python3 -m auto_harness.cli deploy --repo <repo> --execute --mode
 PYTHONPATH=src python3 -m auto_harness.cli resume --task-id <task-id> --execute --model-download-workers 2
 ```
 
+执行 backend 默认是 `local`。如果需要把依赖安装和服务启动包装进 Docker，可通过配置或 CLI 指定：
+
+```bash
+PYTHONPATH=src python3 -m auto_harness.cli deploy --repo <repo> --execute --allow-install --allow-start --execution-backend docker --docker-image python:3.11-slim
+```
+
+Docker backend 会生成 `docker run --rm -v <repo>:/workspace/repo -w /workspace/repo ...` 形式的 effective command。真正执行仍必须让 `docker` 进入 `allowed_commands`，否则会被 policy 拒绝。
+
 缓存清理由 `ModelCache.cleanup(...)` 提供，默认 `dry_run=True`，会先返回候选列表、候选大小和预计删除项；只有显式传入 `dry_run=False` 才会删除缓存目录。
 
 CLI 缓存清理同样默认 dry-run：
@@ -190,7 +199,8 @@ PYTHONPATH=src python3 -m auto_harness.cli cache --cleanup --source huggingface 
 
 - `executed`: 是否真实执行。
 - `status`: `planned` / `ready` / `failed`。
-- 每条 LFS 准备命令的 exit code、stdout/stderr tail 和 timeout 状态。
+- 每条 LFS 准备命令的 exit code、stdout/stderr tail、timeout 状态和解析出的 progress。
+- `progress`: 从 `git lfs pull` 输出解析出的 `percent`、`files_done`、`files_total`、`downloaded_bytes`、`total_bytes`。
 - 命令被白名单拒绝时的 `command_rejected` diagnosis。
 
 ## Browser Verify

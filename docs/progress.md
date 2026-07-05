@@ -69,6 +69,12 @@
   - `memory-promote --apply --proposal <path>` 才会把审核后的片段追加到目标 `skills/*/SKILL.md`，并使用 marker 防止重复应用；默认 proposal 模式不会修改 skill。
   - Promotion 会按阶段选择目标 skill：verify -> `verify-evidence`，resource/model -> `prepare-model-assets`，env_solve/dependency -> `solve-python-cuda-env`，env_deploy/runner -> `deploy-python-webui`。
   - Benchmark cases 从 28 个扩展到 29 个，新增 `memory_promotion_proposal`，验证 proposal JSON/Markdown 生成和默认不修改 skill 的安全边界。
+- 下一阶段优化任务：
+  - 新增 Docker sandbox backend 第一版，`env_deploy` 和 `runner` 可根据 `execution_backend=docker` 将安装/启动命令包装成 `docker run` effective command。
+  - Docker backend 支持 workspace volume mount、workdir、网络参数和服务端口映射；默认仍为 `local` backend，真实执行仍需要 `--execute`、权限开关和 `allowed_commands` 中显式允许 `docker`。
+  - `deploy` / `resume` 新增 `--execution-backend`、`--docker-image`、`--docker-network` 覆盖参数，`configs/default.json` 新增对应默认配置。
+  - Git LFS 准备阶段新增进度解析，可从 `git lfs pull` 输出提取 `percent`、`files_done`、`files_total`、`downloaded_bytes` 和 `total_bytes`，写入 `git_lfs.commands[].progress` 与 `model_prepare.progress`。
+  - Benchmark cases 从 29 个扩展到 31 个，新增 `docker_backend_plan` 和 `git_lfs_progress_parse`。
 
 ### 五阶段总结与总进度
 
@@ -80,13 +86,13 @@
 4. Git LFS 检测：识别 LFS pointer 和 `.gitattributes`，缺 `git-lfs` 时进入诊断态，并给出准备命令。
 5. Playwright smoke 治理：补齐真实浏览器 backend 的本地 smoke 文档和手动 CI workflow。
 
-按 `docs/optimization-roadmap.md` 的“全自动开源模型部署 Agent”目标估算，当前总项目进度约为 **80%**。
+按 `docs/optimization-roadmap.md` 的“全自动开源模型部署 Agent”目标估算，当前总项目进度约为 **82%**。
 
 估算依据：
 
 - 已完成约 85% 的 P0/P1 核心控制链路：下载缓存、断点续传、verify 防误判、repair plan/policy/resume、benchmark 回归体系已经成型。
-- 已完成约 72% 的真实开源模型部署能力：Hugging Face / ModelScope 下载、Git LFS 检测、Gradio/Streamlit/browser verify、PyTorch CPU/CUDA wheel 求解和本地 E2E fixture matrix 已具备第一版，但真实联网/真实大模型端到端矩阵仍需扩大。
-- 尚未完成的关键 20% 主要是：Docker/sandbox 隔离、真实大模型长耗时 E2E 验证、GPU 包版本矩阵、真实 Git LFS 长耗时进度解析。
+- 已完成约 75% 的真实开源模型部署能力：Hugging Face / ModelScope 下载、Git LFS 检测与进度解析、Gradio/Streamlit/browser verify、PyTorch CPU/CUDA wheel 求解、本地 E2E fixture matrix 和 Docker backend 第一版已具备，但真实联网/真实大模型端到端矩阵仍需扩大。
+- 尚未完成的关键 18% 主要是：Docker GPU/model_cache/log cleanup 完整化、真实大模型长耗时 E2E 验证、GPU 包版本矩阵和长耗时 verify。
 - 继续执行 P0/P1 优化任务：
   - `ModelCache.reserve` 会为缓存目录写入 `.auto_harness_asset.json`，记录 source、repo id、revision、origin、asset id 和 cache key。
   - `ModelCache.entries()` 会读取缓存元数据，返回 repo id、revision、origin，便于后续审计和精细清理。
@@ -172,11 +178,11 @@
 
 ### 下一步
 
-1. 引入更强 sandbox / Docker backend，隔离真实依赖安装和服务启动。
-2. 增加 Git LFS 真实拉取的长耗时进度解析，例如解析 `git lfs pull` 输出中的文件级下载进度。
-3. 扩展 GPU 包版本矩阵：`xformers`、`flash-attn`、`bitsandbytes`、`triton` 与 Python/CUDA/Torch 的组合规则。
-4. 扩展真实联网 E2E：选择小型 Hugging Face / ModelScope demo 和一个真实 Git LFS 权重仓库做可选长耗时 smoke。
-5. 为 memory promotion 增加人工审批元数据和 apply 后的 fixture 回归绑定。
+1. 扩展 GPU 包版本矩阵：`xformers`、`flash-attn`、`bitsandbytes`、`triton` 与 Python/CUDA/Torch 的组合规则。
+2. 扩展真实联网 E2E：选择小型 Hugging Face / ModelScope demo 和一个真实 Git LFS 权重仓库做可选长耗时 smoke。
+3. 为 memory promotion 增加人工审批元数据和 apply 后的 fixture 回归绑定。
+4. Docker backend 增加 GPU 参数、model_cache 挂载、容器日志收集和容器清理。
+5. 扩展长耗时 verify，包括首次推理加载模型时的持续状态刷新。
 
 ## 2026-07-03
 

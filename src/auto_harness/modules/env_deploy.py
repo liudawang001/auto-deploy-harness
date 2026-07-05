@@ -3,6 +3,7 @@ from typing import Dict, List
 
 from auto_harness.models.result import StageResult
 from auto_harness.diagnostics import LogClassifier
+from auto_harness.runtime import DockerSandboxBackend
 from auto_harness.utils.commands import is_allowed_command
 from auto_harness.utils.shell import run_command
 
@@ -18,27 +19,49 @@ class EnvDeployModule:
         execute: bool = False,
         timeout_seconds: int = 900,
         allowed_commands=None,
+        execution_backend: str = "local",
+        docker_image: str = "python:3.10-slim",
+        docker_network: str = "bridge",
     ) -> StageResult:
         plan: List[List[str]] = analysis.get("install_plan", [])
         if not plan:
             return StageResult("env_deploy", "uncertain", "no install plan detected", {"commands": []})
+        effective_plan, sandbox = self._effective_plan(repo_dir, plan, execution_backend, docker_image, docker_network)
         if not execute:
-            return StageResult("env_deploy", "passed", "dry-run install plan generated", {"commands": plan, "executed": False})
+            return StageResult(
+                "env_deploy",
+                "passed",
+                "dry-run install plan generated",
+                {
+                    "commands": plan,
+                    "effective_commands": effective_plan,
+                    "execution_backend": execution_backend,
+                    "sandbox": sandbox,
+                    "executed": False,
+                },
+            )
 
         allowed_commands = allowed_commands or []
         command_results = []
-        for cmd in plan:
+        for original_cmd, cmd in zip(plan, effective_plan):
             if not is_allowed_command(cmd, allowed_commands):
                 return StageResult(
                     "env_deploy",
                     "failed",
                     "command rejected by policy",
-                    {"cmd": cmd, "allowed_commands": list(allowed_commands)},
+                    {
+                        "cmd": cmd,
+                        "original_cmd": original_cmd,
+                        "allowed_commands": list(allowed_commands),
+                        "execution_backend": execution_backend,
+                        "sandbox": sandbox,
+                    },
                     error="disallowed command: %s" % (cmd[0] if cmd else ""),
                 )
             result = run_command(cmd, repo_dir, timeout_seconds=timeout_seconds)
             command_results.append({
                 "cmd": result.cmd,
+                "original_cmd": original_cmd,
                 "exit_code": result.exit_code,
                 "stdout_tail": result.stdout[-4000:],
                 "stderr_tail": result.stderr[-4000:],
@@ -53,4 +76,25 @@ class EnvDeployModule:
                     {"commands": command_results, "diagnosis": diagnosis},
                     error=result.stderr[-2000:],
                 )
-        return StageResult("env_deploy", "passed", "environment deployed", {"commands": command_results})
+        return StageResult(
+            "env_deploy",
+            "passed",
+            "environment deployed",
+            {
+                "commands": command_results,
+                "execution_backend": execution_backend,
+                "sandbox": sandbox,
+            },
+        )
+
+    def _effective_plan(self, repo_dir: Path, plan: List[List[str]], execution_backend: str, docker_image: str, docker_network: str):
+        if execution_backend != "docker":
+            return [list(cmd) for cmd in plan], {"backend": "local"}
+        backend = DockerSandboxBackend(image=docker_image, network=docker_network)
+        sandbox_commands = [backend.wrap(repo_dir, cmd).to_dict() for cmd in plan]
+        return [item["effective_cmd"] for item in sandbox_commands], {
+            "backend": "docker",
+            "image": docker_image,
+            "network": docker_network,
+            "commands": sandbox_commands,
+        }

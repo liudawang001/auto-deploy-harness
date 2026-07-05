@@ -45,5 +45,6 @@ description: 规划和准备开源模型资产。用于 resource_plan 和 model_
 - 已有 `.part` 时通过 HTTP Range 续传。
 - 文件清单包含 `sha256` 时，下载后必须校验 sha256。
 - 进度写入 stage result 和 `state.json`。
+- Git LFS 执行阶段应解析 `git lfs pull` 输出中的百分比、文件数和字节数，写入 `git_lfs.progress` 与 stage progress，便于长耗时拉取期间恢复和审计。
 
-并发下载和 etag 强一致校验尚未接入。sha256 只在远端清单提供该字段时可用，不要假定所有模型文件都有 checksum。
+当前已支持并发下载、etag 缓存失效和受控缓存清理。sha256 只在远端清单提供该字段时可用，不要假定所有模型文件都有 checksum。

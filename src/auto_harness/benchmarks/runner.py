@@ -9,6 +9,7 @@ from auto_harness.config import HarnessConfig
 from auto_harness.diagnostics import LogClassifier
 from auto_harness.memory import MemoryPromoter
 from auto_harness.models.base import read_json, write_json
+from auto_harness.modules.env_deploy import EnvDeployModule
 from auto_harness.modules.env_solve import EnvSolveModule
 from auto_harness.modules.model_prepare import ModelPrepareModule
 from auto_harness.modules.reporter import ReportGenerator
@@ -111,6 +112,10 @@ class BenchmarkRunner:
                 return self._case_git_lfs_detection(case)
             if case_id == "git_lfs_prepare_execute":
                 return self._case_git_lfs_prepare_execute(case)
+            if case_id == "git_lfs_progress_parse":
+                return self._case_git_lfs_progress_parse(case)
+            if case_id == "docker_backend_plan":
+                return self._case_docker_backend_plan(case)
             if case_id == "env_solve_legacy_gradio_constraints":
                 return self._case_env_solve_legacy_gradio_constraints(case)
             if case_id == "env_solve_torch_cuda_wheel":
@@ -502,6 +507,85 @@ class BenchmarkRunner:
             and calls == [["git", "lfs", "install"], ["git", "lfs", "pull"]]
         )
         return self._result(case, "passed" if ok else "failed", "Git LFS controlled execution verified")
+
+    def _case_git_lfs_progress_parse(self, case: Dict) -> Dict:
+        def fake_runner(cmd, cwd, timeout_seconds=900):
+            if cmd == ["git", "lfs", "pull"]:
+                return CommandResult(
+                    cmd,
+                    str(cwd),
+                    0,
+                    "Downloading LFS objects:  50% (1/2), 20 MB | 2 MB/s\nGit LFS: (1 of 2 files) 10 MB / 20 MB\n",
+                    "",
+                    False,
+                )
+            return CommandResult(cmd, str(cwd), 0, "ok", "", False)
+
+        updates = []
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            repo = run_dir / "workspace" / "repo"
+            repo.mkdir(parents=True)
+            (run_dir / "reports").mkdir(parents=True)
+            result = ModelPrepareModule(ModelCache(Path(tmp) / "cache"), command_runner=fake_runner).prepare(
+                run_dir,
+                {
+                    "model_assets": [],
+                    "git_lfs": {
+                        "required": True,
+                        "available": True,
+                        "pointer_count": 2,
+                        "total_pointer_size_bytes": 20 * 1024 * 1024,
+                        "prepare_commands": [["git", "lfs", "install"], ["git", "lfs", "pull"]],
+                    },
+                },
+                execute=True,
+                repo_dir=repo,
+                allowed_commands=["git"],
+                progress_callback=lambda progress: updates.append(progress),
+            )
+        lfs_progress = result.data.get("git_lfs", {}).get("commands", [{}, {}])[1].get("progress", {})
+        ok = (
+            result.status == "passed"
+            and lfs_progress.get("percent") == 50
+            and lfs_progress.get("files_done") == 1
+            and lfs_progress.get("files_total") == 2
+            and lfs_progress.get("downloaded_bytes") == 10 * 1024 * 1024
+            and any(update.get("status") == "git_lfs_downloading" for update in updates)
+            and result.data.get("git_lfs", {}).get("progress", {}).get("percent") == 100
+        )
+        return self._result(case, "passed" if ok else "failed", "Git LFS progress parsing verified")
+
+    def _case_docker_backend_plan(self, case: Dict) -> Dict:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            env_result = EnvDeployModule().deploy(
+                repo,
+                {"install_plan": [["python3", "-m", "pip", "install", "-r", "requirements.txt"]]},
+                execute=False,
+                execution_backend="docker",
+                docker_image="python:3.11-slim",
+                docker_network="none",
+            )
+            runner_result = RunnerModule().run(
+                repo,
+                {"run_candidates": [{"cmd": ["python3", "app.py"], "expected_port": 7860}]},
+                execute=True,
+                allowed_commands=["python3"],
+                execution_backend="docker",
+                docker_image="python:3.11-slim",
+                docker_network="none",
+            )
+        ok = (
+            env_result.status == "passed"
+            and env_result.data.get("effective_commands", [[]])[0][0] == "docker"
+            and "python:3.11-slim" in env_result.data.get("effective_commands", [[]])[0]
+            and runner_result.status == "failed"
+            and runner_result.data.get("cmd", [None])[0] == "docker"
+            and "-p" in runner_result.data.get("cmd", [])
+            and "disallowed command: docker" in (runner_result.error or "")
+        )
+        return self._result(case, "passed" if ok else "failed", "Docker backend planning verified")
 
     def _case_env_solve_legacy_gradio_constraints(self, case: Dict) -> Dict:
         with tempfile.TemporaryDirectory() as tmp:

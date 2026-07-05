@@ -26,6 +26,9 @@ def build_parser() -> argparse.ArgumentParser:
     deploy.add_argument("--model-download-workers", type=int, default=None)
     deploy.add_argument("--download-retries", type=int, default=None)
     deploy.add_argument("--download-retry-backoff", type=float, default=None)
+    deploy.add_argument("--execution-backend", choices=["local", "docker"], default=None)
+    deploy.add_argument("--docker-image", default=None)
+    deploy.add_argument("--docker-network", default=None)
 
     resume = sub.add_parser("resume", help="resume an existing task")
     resume.add_argument("--task-id", required=True)
@@ -34,6 +37,9 @@ def build_parser() -> argparse.ArgumentParser:
     resume.add_argument("--model-download-workers", type=int, default=None)
     resume.add_argument("--download-retries", type=int, default=None)
     resume.add_argument("--download-retry-backoff", type=float, default=None)
+    resume.add_argument("--execution-backend", choices=["local", "docker"], default=None)
+    resume.add_argument("--docker-image", default=None)
+    resume.add_argument("--docker-network", default=None)
 
     status = sub.add_parser("status", help="show task status")
     status.add_argument("--task-id", required=True)
@@ -81,6 +87,12 @@ def _apply_cli_overrides(config: HarnessConfig, args) -> None:
         config.model_download_retry_count = max(0, args.download_retries)
     if getattr(args, "download_retry_backoff", None) is not None:
         config.model_download_retry_backoff_seconds = max(0.0, args.download_retry_backoff)
+    if getattr(args, "execution_backend", None) is not None:
+        config.execution_backend = args.execution_backend
+    if getattr(args, "docker_image", None):
+        config.docker_image = args.docker_image
+    if getattr(args, "docker_network", None):
+        config.docker_network = args.docker_network
 
 
 def main(argv=None) -> int:

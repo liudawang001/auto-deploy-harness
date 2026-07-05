@@ -598,6 +598,8 @@ Docker backend 需要支持：
 - 容器日志收集。
 - 容器清理。
 
+当前状态：已完成 Docker backend 第一版。`env_deploy` 和 `runner` 可通过 `execution_backend=docker` 生成 `docker run` effective command，支持 workspace mount、workdir、网络参数和端口映射；默认不启用，真实执行仍受 `--execute`、权限开关和 `allowed_commands` 中的 `docker` 白名单约束。后续补 GPU 参数、model_cache mount、容器日志收集和容器清理。
+
 ### 7.3 secret 保护
 
 规则：
@@ -725,8 +727,8 @@ tests/fixtures/
 1. CUDA/PyTorch compatibility solver。已完成 env_solve 第一版风险识别、本机 CUDA 探测、Torch wheel index URL 和 CPU/CUDA fallback 生成；后续补真实 CUDA E2E、`xformers` / `flash-attn` / `bitsandbytes` 的版本矩阵和 Docker fallback。
 2. 磁盘/显存预估。
 3. ModelScope 下载支持。
-4. Git LFS 支持。已完成检测、准备命令和白名单受控执行第一版；后续补真实 LFS 大文件 E2E 与下载进度解析。
-5. Docker backend。
+4. Git LFS 支持。已完成检测、准备命令、白名单受控执行和 `git lfs pull` 输出进度解析第一版；后续补真实 LFS 大文件 E2E。
+5. Docker backend。已完成第一版命令包装和白名单保护；后续补 GPU/model_cache/log/cleanup。
 6. 长耗时 verify。
 7. vLLM/OpenAI-compatible server 识别与 verify。
 8. 更多 dependency conflict rules。

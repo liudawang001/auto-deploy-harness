@@ -96,6 +96,16 @@
       "expected_signal": "git lfs install and pull are executed only when git is allowed"
     },
     {
+      "id": "git_lfs_progress_parse",
+      "purpose": "验证 Git LFS 拉取输出中的文件数、百分比和字节进度会写入 model_prepare 结果",
+      "expected_signal": "git_lfs progress includes percent, files_done, files_total and bytes"
+    },
+    {
+      "id": "docker_backend_plan",
+      "purpose": "验证 Docker backend 会为 env_deploy 和 runner 生成受控 docker run 命令，且执行仍受白名单保护",
+      "expected_signal": "effective commands start with docker and execution is rejected when docker is not allowed"
+    },
+    {
       "id": "env_solve_legacy_gradio_constraints",
       "purpose": "验证 env_solve 会为老 Gradio/未 pin 依赖项目生成 numpy/pydantic/opencv 兼容约束",
       "expected_signal": "install_plan includes numpy<2, pydantic<2 and opencv-python-headless"

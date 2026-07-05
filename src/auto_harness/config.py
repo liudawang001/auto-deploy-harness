@@ -14,6 +14,9 @@ class HarnessConfig:
     allow_source_edit: bool = False
     allow_dependency_install: bool = False
     allow_service_start: bool = False
+    execution_backend: str = "local"
+    docker_image: str = "python:3.10-slim"
+    docker_network: str = "bridge"
     verify_workspace_name: str = "verify_workspace"
     allowed_commands: List[str] = None
     use_agent_analyzer: bool = False

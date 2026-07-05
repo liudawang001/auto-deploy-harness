@@ -1,7 +1,7 @@
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
-from auto_harness.assets import HuggingFaceDownloader, ModelCache, ModelScopeDownloader
+from auto_harness.assets import GitLFSProgressParser, HuggingFaceDownloader, ModelCache, ModelScopeDownloader
 from auto_harness.assets.manifest import AssetManifest, ModelAsset
 from auto_harness.diagnostics import LogClassifier
 from auto_harness.models.base import write_json
@@ -18,12 +18,14 @@ class ModelPrepareModule:
         modelscope_downloader: ModelScopeDownloader = None,
         command_runner=None,
         log_classifier: LogClassifier = None,
+        git_lfs_progress_parser: GitLFSProgressParser = None,
     ) -> None:
         self.cache = cache
         self.huggingface_downloader = huggingface_downloader or HuggingFaceDownloader()
         self.modelscope_downloader = modelscope_downloader or ModelScopeDownloader()
         self.command_runner = command_runner or run_command
         self.log_classifier = log_classifier or LogClassifier()
+        self.git_lfs_progress_parser = git_lfs_progress_parser or GitLFSProgressParser()
 
     def prepare(
         self,
@@ -155,6 +157,7 @@ class ModelPrepareModule:
             "status": "planned",
             "pointer_count": plan.get("pointer_count", 0),
             "total_pointer_size_bytes": plan.get("total_pointer_size_bytes"),
+            "progress": {},
         }
         if not execute:
             return result
@@ -174,6 +177,10 @@ class ModelPrepareModule:
                 })
                 return result
             command_result = self.command_runner(cmd, repo_dir, timeout_seconds=timeout_seconds)
+            parsed_progress = self.git_lfs_progress_parser.parse(command_result.stdout + "\n" + command_result.stderr)
+            if parsed_progress:
+                result["progress"] = parsed_progress
+                progress_callback(parsed_progress)
             record = {
                 "cmd": command_result.cmd,
                 "exit_code": command_result.exit_code,
@@ -181,6 +188,8 @@ class ModelPrepareModule:
                 "stderr_tail": command_result.stderr[-4000:],
                 "timed_out": command_result.timed_out,
             }
+            if parsed_progress:
+                record["progress"] = parsed_progress
             result["commands"].append(record)
             if command_result.exit_code != 0:
                 diagnosis = self.log_classifier.classify(command_result.stderr + "\n" + command_result.stdout)
@@ -191,7 +200,11 @@ class ModelPrepareModule:
                 })
                 return result
         result["status"] = "ready"
-        progress_callback({"status": "git_lfs_ready", "current_file": ""})
+        final_progress = {"status": "git_lfs_ready", "current_file": "", "percent": 100}
+        if result.get("progress"):
+            final_progress.update({key: value for key, value in result["progress"].items() if key not in ("status", "percent")})
+        result["progress"] = final_progress
+        progress_callback(final_progress)
         return result
 
     def _total_size(self, assets):
