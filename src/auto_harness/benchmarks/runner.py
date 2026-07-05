@@ -130,6 +130,8 @@ class BenchmarkRunner:
                 return self._case_verify_progress_refresh(case)
             if case_id == "openai_compatible_verify":
                 return self._case_openai_compatible_verify(case)
+            if case_id == "openapi_schema_verify":
+                return self._case_openapi_schema_verify(case)
             if case_id == "local_e2e_fixture_matrix":
                 return self._case_local_e2e_fixture_matrix(case, fixture_dir)
             if case_id == "memory_promotion_proposal":
@@ -817,6 +819,55 @@ class BenchmarkRunner:
             and captured.get("body", {}).get("model") == "bench-model"
         )
         return self._result(case, "passed" if ok else "failed", "OpenAI-compatible chat completion verify verified")
+
+    def _case_openapi_schema_verify(self, case: Dict) -> Dict:
+        captured = {}
+
+        def fake_urlopen(req, timeout):
+            if req.full_url.endswith("/openapi.json"):
+                return _FakeResponse(json.dumps({
+                    "openapi": "3.0.0",
+                    "paths": {
+                        "/predict": {
+                            "post": {
+                                "operationId": "predict",
+                                "requestBody": {
+                                    "content": {
+                                        "application/json": {
+                                            "schema": {
+                                                "type": "object",
+                                                "required": ["prompt"],
+                                                "properties": {
+                                                    "prompt": {"type": "string"},
+                                                    "seed": {"type": "integer"},
+                                                },
+                                            }
+                                        }
+                                    }
+                                },
+                            }
+                        }
+                    },
+                }))
+            captured["url"] = req.full_url
+            captured["body"] = json.loads(req.data.decode("utf-8"))
+            trace = captured["body"]["prompt"].split("trace ", 1)[1]
+            return _FakeResponse(json.dumps({"trace": trace}))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / "workspace" / "repo").mkdir(parents=True)
+            result = VerifyModule(urlopen=fake_urlopen).verify(
+                run_dir,
+                analysis={"frameworks": ["fastapi"], "verify_hint": {"endpoint": "http://127.0.0.1:8000", "service_type": "api"}},
+                runner_result={"pid": 1234, "expected_port": 8000, "service_ready": True},
+            )
+        ok = (
+            result.status == "passed"
+            and captured.get("url") == "http://127.0.0.1:8000/predict"
+            and "prompt" in captured.get("body", {})
+        )
+        return self._result(case, "passed" if ok else "failed", "OpenAPI schema trace verify verified")
 
     def _case_local_e2e_fixture_matrix(self, case: Dict, fixture_dir: Path) -> Dict:
         fixture_root = fixture_dir.parent / "e2e"

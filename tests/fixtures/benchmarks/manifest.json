@@ -141,6 +141,11 @@
       "expected_signal": "POST /v1/chat/completions includes trace prompt and response trace passes verify"
     },
     {
+      "id": "openapi_schema_verify",
+      "purpose": "验证 FastAPI/Flask OpenAPI schema 可自动选择 POST endpoint 并构造 trace JSON 请求",
+      "expected_signal": "POST endpoint from /openapi.json echoes current trace and verify passes"
+    },
+    {
       "id": "local_e2e_fixture_matrix",
       "purpose": "验证本地 Gradio、Streamlit 和 Git LFS 权重 fixture 可以跑完整 dry-run pipeline",
       "expected_signal": "all local fixtures produce pipeline_results with expected stage evidence"

@@ -4,6 +4,11 @@
 
 ### 已完成
 
+- 下一阶段优化任务：
+  - `VerifyModule` 新增 FastAPI/Flask `/openapi.json` discovery，可选择不含 path parameter、带 JSON requestBody 的 POST endpoint。
+  - OpenAPI schema 请求体支持 `$ref` 解析、object required 字段、string/number/boolean/array 最小值生成，并自动注入当前 `trace_id`。
+  - HTTP 证据仍要求响应体包含当前 trace 才能通过，不会因为 OpenAPI 文档或 POST 200 本身误判成功。
+  - Benchmark cases 从 36 个扩展到 37 个，新增 `openapi_schema_verify`。
 - 继续执行 90% 后三阶段开发 - 阶段 3：
   - `ProjectAnalyzer` 新增 `vllm` / `openai_compatible` 识别，能根据依赖和 README 中的 `/v1/chat/completions` 信号生成 OpenAI-compatible verify hint。
   - `VerifyModule` 支持 OpenAI-compatible `/v1/chat/completions` POST trace 请求，自动替换 `{{model}}`，仍要求响应体包含当前 trace 才算强证据。

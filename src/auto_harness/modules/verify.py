@@ -208,6 +208,11 @@ class VerifyModule:
             endpoint = discovered["endpoint"]
         elif self._is_openai_compatible(analysis, verify_hint):
             request_hint = self._openai_compatible_request_hint(verify_hint)
+        else:
+            discovered = self._discover_openapi_request(endpoint, analysis)
+            if discovered:
+                request_hint = discovered["request"]
+                endpoint = discovered["endpoint"]
 
         base_endpoint = endpoint
         method = str(request_hint.get("method") or "GET").upper()
@@ -264,6 +269,116 @@ class VerifyModule:
                 "max_tokens": 16,
             },
         }
+
+    def _discover_openapi_request(self, endpoint: str, analysis: Dict) -> Optional[Dict]:
+        frameworks = set(analysis.get("frameworks") or []) if isinstance(analysis, dict) else set()
+        verify_hint = analysis.get("verify_hint", {}) if isinstance(analysis, dict) else {}
+        if not frameworks.intersection({"fastapi", "flask"}) and verify_hint.get("service_type") != "api":
+            return None
+        openapi_url = urllib.parse.urljoin(endpoint.rstrip("/") + "/", "openapi.json")
+        try:
+            req = urllib.request.Request(openapi_url, method="GET")
+            with self.urlopen(req, timeout=5) as resp:
+                raw = resp.read().decode("utf-8", errors="replace")
+            spec = json.loads(raw)
+        except Exception:  # noqa: BLE001 - discovery is optional
+            return None
+        operation = self._select_openapi_operation(spec)
+        if not operation:
+            return None
+        schema = operation.get("schema") or {"type": "object"}
+        body = self._sample_json_from_schema(schema, spec, trace_token="{{trace_id}}")
+        return {
+            "type": "openapi_schema",
+            "openapi_url": openapi_url,
+            "endpoint": endpoint,
+            "operation_id": operation.get("operation_id", ""),
+            "request": {
+                "method": "POST",
+                "path": operation["path"],
+                "json": body,
+            },
+        }
+
+    def _select_openapi_operation(self, spec: Dict) -> Optional[Dict]:
+        paths = spec.get("paths") if isinstance(spec, dict) else None
+        if not isinstance(paths, dict):
+            return None
+        for path in sorted(paths):
+            if "{" in path or "}" in path:
+                continue
+            path_item = paths.get(path)
+            if not isinstance(path_item, dict):
+                continue
+            operation = path_item.get("post")
+            if not isinstance(operation, dict):
+                continue
+            request_body = operation.get("requestBody") if isinstance(operation.get("requestBody"), dict) else {}
+            content = request_body.get("content") if isinstance(request_body, dict) else {}
+            json_content = content.get("application/json") if isinstance(content, dict) else None
+            schema = json_content.get("schema") if isinstance(json_content, dict) else None
+            return {
+                "path": path,
+                "operation_id": operation.get("operationId", ""),
+                "schema": schema or {"type": "object"},
+            }
+        return None
+
+    def _sample_json_from_schema(self, schema, spec: Dict, trace_token: str):
+        schema = self._resolve_schema_ref(schema, spec)
+        if not isinstance(schema, dict):
+            return {"trace_id": trace_token, "prompt": "auto harness trace %s" % trace_token}
+        schema_type = schema.get("type")
+        if schema_type == "array":
+            return [self._sample_json_from_schema(schema.get("items") or {"type": "string"}, spec, trace_token)]
+        if schema_type == "integer":
+            return 0
+        if schema_type == "number":
+            return 0
+        if schema_type == "boolean":
+            return True
+        if schema_type == "string" or "enum" in schema:
+            return self._sample_string(schema, trace_token)
+        properties = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+        if properties:
+            required = schema.get("required") if isinstance(schema.get("required"), list) else []
+            keys = required or list(properties.keys())[:3]
+            result = {}
+            for key in keys:
+                if key in properties:
+                    result[key] = self._sample_json_from_schema(properties[key], spec, trace_token)
+            if not any(self._value_contains_trace(value, trace_token) for value in result.values()):
+                result["trace_id"] = trace_token
+            return result
+        return {"trace_id": trace_token, "prompt": "auto harness trace %s" % trace_token}
+
+    def _resolve_schema_ref(self, schema, spec: Dict):
+        if not isinstance(schema, dict) or "$ref" not in schema:
+            return schema
+        ref = str(schema.get("$ref") or "")
+        if not ref.startswith("#/"):
+            return schema
+        current = spec
+        for part in ref[2:].split("/"):
+            if not isinstance(current, dict):
+                return schema
+            current = current.get(part)
+        return current if isinstance(current, dict) else schema
+
+    def _sample_string(self, schema: Dict, trace_token: str) -> str:
+        enum = schema.get("enum")
+        if isinstance(enum, list) and enum:
+            return str(enum[0])
+        return "auto harness trace %s" % trace_token
+
+    def _value_contains_trace(self, value, trace_token: str) -> bool:
+        if isinstance(value, str):
+            return trace_token in value
+        if isinstance(value, list):
+            return any(self._value_contains_trace(item, trace_token) for item in value)
+        if isinstance(value, dict):
+            return any(self._value_contains_trace(item, trace_token) for item in value.values())
+        return False
 
     def _discover_gradio_request(self, endpoint: str, analysis: Dict) -> Optional[Dict]:
         frameworks = set(analysis.get("frameworks") or []) if isinstance(analysis, dict) else set()
