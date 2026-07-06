@@ -10,6 +10,7 @@ from auto_harness.memory import MemoryPromoter
 from auto_harness.orchestrator import TaskRunner
 from auto_harness.providers import Message, MockLLMProvider, XunfeiSparkProvider
 from auto_harness.queue import DeploymentQueue
+from auto_harness.readiness import ReadinessAuditor
 from auto_harness.runtime import DockerSmokeChecker
 
 
@@ -91,6 +92,10 @@ def build_parser() -> argparse.ArgumentParser:
     dashboard.add_argument("--serve", action="store_true", default=False)
     dashboard.add_argument("--host", default="127.0.0.1")
     dashboard.add_argument("--port", type=int, default=8765)
+
+    readiness = sub.add_parser("readiness", help="audit local project readiness and list external smoke gates")
+    readiness.add_argument("--benchmark-report", default="")
+    readiness.add_argument("--output", default="")
 
     queue = sub.add_parser("queue", help="submit and run persistent deployment queue jobs")
     queue_sub = queue.add_subparsers(dest="queue_command", required=True)
@@ -261,6 +266,13 @@ def main(argv=None) -> int:
         result = DashboardGenerator().generate(config.runs_path, output, benchmark_report=benchmark_report)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0 if result.get("status") == "generated" else 2
+
+    if args.command == "readiness":
+        output = Path(args.output) if args.output else Path("reports") / "readiness_audit.json"
+        benchmark_report = Path(args.benchmark_report) if args.benchmark_report else None
+        result = ReadinessAuditor().audit(Path.cwd(), benchmark_report=benchmark_report, output_path=output)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0 if result.get("status") == "ready_for_external_smoke" else 2
 
     if args.command == "queue":
         queue = DeploymentQueue(config.task_queue_path, runner, claim_ttl_seconds=config.queue_claim_ttl_seconds)

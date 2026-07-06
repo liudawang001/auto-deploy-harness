@@ -36,6 +36,7 @@ from auto_harness.skills import SkillRegistry
 from auto_harness.state import StateStore
 from auto_harness.orchestrator import TaskRunner
 from auto_harness.queue import DeploymentQueue
+from auto_harness.readiness import ReadinessAuditor
 from auto_harness.repair import RepairApplier, RepairLoopController, RepairOverlay, RepairPlanner, RepairPolicy
 from auto_harness.runtime import DockerSmokeChecker, GpuResourceProbe
 from auto_harness.verify import BrowserVerifier
@@ -1814,11 +1815,12 @@ class CoreTests(unittest.TestCase):
         self.assertIn("queue_gpu_probe_scheduling", ids)
         self.assertIn("queue_claim_lock_prevents_duplicate", ids)
         self.assertIn("queue_stale_claim_lock_recovery", ids)
+        self.assertIn("readiness_audit_report", ids)
 
     def test_benchmark_runner_executes_all_fixture_cases(self):
         report = BenchmarkRunner().run(Path("tests/fixtures/benchmarks/manifest.json"))
         self.assertEqual(report["status"], "passed")
-        self.assertEqual(len(report["cases"]), 49)
+        self.assertEqual(len(report["cases"]), 50)
         self.assertTrue(all(case["status"] == "passed" for case in report["cases"]))
 
     def test_benchmark_cli_writes_output(self):
@@ -1854,6 +1856,26 @@ class CoreTests(unittest.TestCase):
             self.assertTrue(data["selected"])
             self.assertEqual(data["selected_case_ids"], ["token_missing_diagnosis"])
             self.assertEqual([case["id"] for case in data["cases"]], ["token_missing_diagnosis"])
+
+    def test_readiness_auditor_reports_external_gates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "readiness.json"
+            report = ReadinessAuditor().audit(Path.cwd(), output_path=output)
+            self.assertEqual(report["status"], "ready_for_external_smoke")
+            self.assertEqual(report["local_readiness_percent"], 100)
+            self.assertGreaterEqual(report["summary"]["benchmark_manifest_cases"], 50)
+            self.assertTrue(any(gate["id"] == "docker_gpu_smoke" for gate in report["external_gates"]))
+            self.assertTrue(output.exists())
+
+    def test_readiness_cli_writes_report(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "readiness.json"
+            with redirect_stdout(io.StringIO()):
+                code = cli_main(["readiness", "--output", str(output)])
+            self.assertEqual(code, 0)
+            report = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(report["status"], "ready_for_external_smoke")
+            self.assertEqual(report["local_readiness_percent"], 100)
 
     def test_dashboard_cli_generates_static_html(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -244,6 +244,11 @@
       "id": "queue_stale_claim_lock_recovery",
       "purpose": "验证崩溃 worker 遗留的过期 claim lock 可以被回收并继续执行任务",
       "expected_signal": "expired lock is removed, job completes, and recovered_locks records the recovery"
+    },
+    {
+      "id": "readiness_audit_report",
+      "purpose": "验证项目完成度审计能区分本地已完成能力和外部真实验收门槛",
+      "expected_signal": "readiness report marks local readiness 100% and lists external smoke gates"
     }
   ]
 }

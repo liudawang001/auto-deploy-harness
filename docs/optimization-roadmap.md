@@ -785,11 +785,13 @@ PYTHONPATH=src python3 -m auto_harness.cli live-smoke-plan --execution-backend d
 6. memory promotion 命令。已完成第二版，支持生成 human-review proposal、显式 apply 到目标 skill，并在 apply 后自动运行绑定 benchmark 子集。
 7. 自动生成部署产物包。已完成第一版 `package --task-id`，生成 tar.gz 审计包和 sidecar manifest，默认包含 task/state/events/reports/evidence/repairs，排除 workspace、模型缓存和日志。
 8. CI benchmark。已完成第一版 benchmark CLI；Playwright browser smoke 已提供手动 GitHub Actions workflow，后续再扩展为完整 CI matrix。
+9. Readiness audit。已完成第一版 `readiness` CLI，可输出机器可读完成度审计，检查关键代码、文档和 benchmark manifest，把本地 100% 完成度与真实联网/GPU/Docker/vLLM 外部验收 gate 分开记录。
 
 验收：
 
 - 多个部署任务可排队执行。
 - 可查看下载进度、日志、verify evidence 和 memory。
+- 可生成 readiness report，明确本机开发闭环 100%，并列出真实外部环境中仍需执行的 smoke gate。
 - 重复部署相似项目时成功率提升。
 
 ## 11. 建议代码目录演进

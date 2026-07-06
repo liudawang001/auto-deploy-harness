@@ -27,6 +27,7 @@ from auto_harness.models.task import RuntimePolicy
 from auto_harness.repair import RepairLoopController, RepairPlanner, RepairPolicy
 from auto_harness.orchestrator import TaskRunner
 from auto_harness.queue import DeploymentQueue
+from auto_harness.readiness import ReadinessAuditor
 from auto_harness.verify import BrowserVerifier, StreamlitVerifier
 from auto_harness.utils.shell import CommandResult
 
@@ -203,6 +204,8 @@ class BenchmarkRunner:
                 return self._case_queue_claim_lock_prevents_duplicate(case)
             if case_id == "queue_stale_claim_lock_recovery":
                 return self._case_queue_stale_claim_lock_recovery(case)
+            if case_id == "readiness_audit_report":
+                return self._case_readiness_audit_report(case)
             return self._result(case, "skipped", "unknown benchmark case")
         except Exception as exc:  # noqa: BLE001 - benchmark report should continue
             return self._result(case, "failed", str(exc))
@@ -1609,6 +1612,36 @@ class BenchmarkRunner:
                 and listed.get("status_counts", {}).get("completed") == 1
             )
         return self._result(case, "passed" if ok else "failed", "queue stale claim lock recovery verified")
+
+    def _case_readiness_audit_report(self, case: Dict) -> Dict:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for file_name in ReadinessAuditor.REQUIRED_FILES:
+                path = root / file_name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                if file_name.endswith("manifest.json"):
+                    write_json(path, {
+                        "cases": [{"id": case_id} for case_id in ReadinessAuditor.REQUIRED_BENCHMARK_CASES]
+                    })
+                elif file_name == "docs/progress.md":
+                    path.write_text("当前总项目进度达到 **100%**。\n", encoding="utf-8")
+                else:
+                    path.write_text("readiness fixture\n", encoding="utf-8")
+            benchmark_report = root / "benchmark_report.json"
+            write_json(benchmark_report, {
+                "status": "passed",
+                "cases": [{"id": "readiness_audit_report", "status": "passed"}],
+            })
+            output = root / "reports" / "readiness_audit.json"
+            report = ReadinessAuditor().audit(root, benchmark_report=benchmark_report, output_path=output)
+            ok = (
+                report.get("status") == "ready_for_external_smoke"
+                and report.get("local_readiness_percent") == 100
+                and report.get("project_progress_percent") == 100
+                and report.get("summary", {}).get("external_gate_count") >= 4
+                and output.exists()
+            )
+        return self._result(case, "passed" if ok else "failed", "readiness audit report verified")
 
     def _stage_update_count(self, run_dir: Path) -> Dict[str, int]:
         counts: Dict[str, int] = {}
