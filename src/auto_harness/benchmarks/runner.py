@@ -7,6 +7,7 @@ import urllib.request
 from pathlib import Path
 from typing import Dict, List
 
+from auto_harness.agent import AgentDecisionEngine, AgentDiagnoser, AgentObservation, AgentTraceWriter, AgentVerifyPlanner
 from auto_harness.artifacts import DeploymentPackageExporter
 from auto_harness.assets import GitLFSDetector, GitSubmoduleDetector, HuggingFaceDownloader, ModelCache
 from auto_harness.assets.manifest import ModelAsset
@@ -18,13 +19,15 @@ from auto_harness.models.base import read_json, write_json
 from auto_harness.modules.env_deploy import EnvDeployModule
 from auto_harness.modules.env_solve import EnvSolveModule
 from auto_harness.modules.model_prepare import ModelPrepareModule
+from auto_harness.modules.analyzer import ProjectAnalyzer
 from auto_harness.modules.reporter import ReportGenerator
 from auto_harness.modules.resource_plan import ResourcePlanner
 from auto_harness.modules.runner import RunnerModule
 from auto_harness.modules.verify import VerifyModule
 from auto_harness.models.result import StageResult
 from auto_harness.models.task import RuntimePolicy
-from auto_harness.repair import RepairLoopController, RepairPlanner, RepairPolicy
+from auto_harness.providers import LLMResult
+from auto_harness.repair import RepairApplier, RepairLoopController, RepairPlanner, RepairPolicy
 from auto_harness.orchestrator import TaskRunner
 from auto_harness.queue import DeploymentQueue
 from auto_harness.readiness import ReadinessAuditor
@@ -62,6 +65,14 @@ class _FakeBrowserBackend:
             "status_code": 200,
             "html": '<html><body><div class="gradio-container">%s</div></body></html>' % trace,
         }
+
+
+class _FakeLLMProvider:
+    def __init__(self, text: str):
+        self.text = text
+
+    def complete(self, messages, temperature: float = 0.2):
+        return LLMResult(text=self.text, raw={}, usage={}, latency_ms=1)
 
 
 class BenchmarkRunner:
@@ -206,6 +217,12 @@ class BenchmarkRunner:
                 return self._case_queue_stale_claim_lock_recovery(case)
             if case_id == "readiness_audit_report":
                 return self._case_readiness_audit_report(case)
+            if case_id == "llm_planner_policy_merge":
+                return self._case_llm_planner_policy_merge(case)
+            if case_id == "llm_repair_dependency_execute_loop":
+                return self._case_llm_repair_dependency_execute_loop(case)
+            if case_id == "llm_verify_hint_recovery":
+                return self._case_llm_verify_hint_recovery(case)
             return self._result(case, "skipped", "unknown benchmark case")
         except Exception as exc:  # noqa: BLE001 - benchmark report should continue
             return self._result(case, "failed", str(exc))
@@ -1642,6 +1659,159 @@ class BenchmarkRunner:
                 and output.exists()
             )
         return self._result(case, "passed" if ok else "failed", "readiness audit report verified")
+
+    def _case_llm_planner_policy_merge(self, case: Dict) -> Dict:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            (repo / "README.md").write_text("Run with python serve.py and verify POST /generate", encoding="utf-8")
+            (repo / "serve.py").write_text("print('serve')\n", encoding="utf-8")
+            decision = {
+                "stage": "analyze",
+                "status": "ok",
+                "confidence": 0.9,
+                "actions": [
+                    {
+                        "type": "add_run_candidate",
+                        "confidence": 0.9,
+                        "payload": {"cmd": [".venv/bin/python", "serve.py"], "expected_port": 9000},
+                    },
+                    {
+                        "type": "add_run_candidate",
+                        "confidence": 0.9,
+                        "payload": {"cmd": "python serve.py; rm -rf /"},
+                    },
+                    {
+                        "type": "update_verify_hint",
+                        "confidence": 0.8,
+                        "payload": {
+                            "verify_hint": {
+                                "service_type": "api",
+                                "request": {
+                                    "method": "POST",
+                                    "path": "/generate",
+                                    "json": {"prompt": "auto harness trace {{trace_id}}"},
+                                },
+                            }
+                        },
+                    },
+                ],
+            }
+            result = ProjectAnalyzer(
+                agent_engine=AgentDecisionEngine(
+                    _FakeLLMProvider(json.dumps(decision)),
+                    trace_writer=AgentTraceWriter(root / "agent_calls"),
+                ),
+                agent_mode="planner",
+                task_id="bench-planner",
+            ).analyze(repo)
+            agent_decision = result.data.get("agent_decision", {})
+            ok = (
+                result.status == "passed"
+                and agent_decision.get("merged", {}).get("run_candidates_added") == 1
+                and agent_decision.get("merged", {}).get("verify_hint_updated") is True
+                and len(agent_decision.get("accepted_actions", [])) == 2
+                and len(agent_decision.get("rejected_actions", [])) == 1
+                and bool(list((root / "agent_calls").glob("analyze_*.json")))
+            )
+        return self._result(case, "passed" if ok else "failed", "LLM planner policy merge verified")
+
+    def _case_llm_repair_dependency_execute_loop(self, case: Dict) -> Dict:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / "workspace" / "repo").mkdir(parents=True)
+            provider = _FakeLLMProvider(json.dumps({
+                "stage": "runner",
+                "status": "ok",
+                "confidence": 0.86,
+                "diagnosis": {
+                    "category": "dependency_missing",
+                    "root_cause": "ModuleNotFoundError: cv2",
+                    "confidence": 0.86,
+                    "evidence": ["runner log contains ModuleNotFoundError"],
+                },
+                "actions": [
+                    {
+                        "type": "install_package",
+                        "confidence": 0.8,
+                        "payload": {"package": "opencv-python-headless"},
+                        "requires": {"dependency_install": True, "network": True, "source_edit": False},
+                    }
+                ],
+                "rerun_from": "env_deploy",
+            }))
+            agent_diagnosis = AgentDiagnoser(provider, trace_writer=AgentTraceWriter(run_dir / "logs" / "agent_calls")).diagnose(
+                AgentObservation(task_id="bench-repair", stage="runner")
+            )
+            stage_result = StageResult("runner", "failed", "service process exited", {"agent_diagnosis": agent_diagnosis})
+            plan = RepairPlanner().propose("runner", stage_result, {})
+            policy = RepairPolicy().check(plan, RuntimePolicy(workspace_root=str(run_dir / "workspace"), allow_dependency_install=True))
+            apply_result = RepairApplier().apply(
+                run_dir,
+                plan,
+                policy,
+                execute=True,
+                command_runner=lambda cmd, cwd, timeout_seconds: {"exit_code": 0, "stdout": "installed", "stderr": "", "timed_out": False},
+            )
+
+            def trace_urlopen(req, timeout):
+                trace = req.full_url.split("_auto_harness_trace=")[1]
+                return _FakeResponse("handled %s" % trace)
+
+            verify_result = VerifyModule(urlopen=trace_urlopen).verify(
+                run_dir,
+                {"verify_hint": {"endpoint": "http://127.0.0.1:8000", "request": {"method": "GET"}}},
+                {"pid": 1234, "expected_port": 8000, "service_ready": True},
+            )
+            ok = (
+                policy.get("allowed")
+                and apply_result.get("executed") is True
+                and apply_result.get("executed_action_count") == 1
+                and verify_result.status == "passed"
+                and bool(list((run_dir / "logs" / "agent_calls").glob("runner_*.json")))
+            )
+        return self._result(case, "passed" if ok else "failed", "LLM repair dependency execute loop verified")
+
+    def _case_llm_verify_hint_recovery(self, case: Dict) -> Dict:
+        calls = []
+
+        def fake_urlopen(req, timeout):
+            calls.append(req.full_url)
+            if req.full_url.endswith("/generate"):
+                body = json.loads(req.data.decode("utf-8"))
+                return _FakeResponse("ok %s" % body["prompt"].rsplit(" ", 1)[-1])
+            return _FakeResponse("ok without trace")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / "workspace" / "repo").mkdir(parents=True)
+            provider = _FakeLLMProvider(json.dumps({
+                "status": "ok",
+                "confidence": 0.8,
+                "verify_hint": {
+                    "request": {
+                        "method": "POST",
+                        "path": "/generate",
+                        "json": {"prompt": "auto harness trace {{trace_id}}"},
+                    }
+                },
+            }))
+            result = VerifyModule(
+                urlopen=fake_urlopen,
+                verify_planner=AgentVerifyPlanner(provider, trace_writer=AgentTraceWriter(run_dir / "logs" / "agent_calls")),
+            ).verify(
+                run_dir,
+                {"verify_hint": {"endpoint": "http://127.0.0.1:8000", "request": {"method": "GET"}}},
+                {"pid": 1234, "expected_port": 8000, "service_ready": True},
+            )
+            ok = (
+                result.status == "passed"
+                and any(url.endswith("/generate") for url in calls)
+                and result.data.get("llm_verify_planner", {}).get("status") == "ok"
+                and bool(list((run_dir / "logs" / "agent_calls").glob("verify_*.json")))
+            )
+        return self._result(case, "passed" if ok else "failed", "LLM verify hint recovery verified")
 
     def _stage_update_count(self, run_dir: Path) -> Dict[str, int]:
         counts: Dict[str, int] = {}

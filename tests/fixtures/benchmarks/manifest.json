@@ -249,6 +249,21 @@
       "id": "readiness_audit_report",
       "purpose": "验证项目完成度审计能区分本地已完成能力和外部真实验收门槛",
       "expected_signal": "readiness report marks local readiness 100% and lists external smoke gates"
+    },
+    {
+      "id": "llm_planner_policy_merge",
+      "purpose": "验证 LLM planner 可以通过结构化 action 影响 run candidate / verify hint，但不能越权执行命令",
+      "expected_signal": "accepted_actions and rejected_actions are both recorded"
+    },
+    {
+      "id": "llm_repair_dependency_execute_loop",
+      "purpose": "验证 LLM 诊断缺失依赖后生成 install_package action，经 policy 执行后从 env_deploy resume，并最终由 verify 判定成功",
+      "expected_signal": "repair_apply_result.executed=true and verify_result.status=pass"
+    },
+    {
+      "id": "llm_verify_hint_recovery",
+      "purpose": "验证默认 verify uncertain 后，LLM verify planner 能生成新的 trace request hint，并由 Python verify 重新验证成功",
+      "expected_signal": "first verify uncertain, second verify pass with trace evidence"
     }
   ]
 }

@@ -19,6 +19,7 @@ AI-Auto-Harness 是一个面向 AI 开源 demo 项目的自动部署与验证 Ag
 - 安全默认的 `env_solve`、`env_deploy`、`runner`、`verify`、report 模块。
 - Mock LLM provider 和讯飞 Anthropic-compatible provider。
 - Claude Code executor wrapper。
+- Policy-constrained LLM Agent：`agent_mode=planner` 时 LLM 可通过 schema 化 action 影响 analyze plan；`agent_mode=gated_actor` 且显式开关打开时，LLM repair action 可在 policy gate 后执行安全动作；LLM 永远不能直接执行 shell、修改源码或判定成功。
 - HTTP trace evidence：`verify` 支持 GET 和 POST JSON；响应必须证明当前 trace 被处理，HTTP 200 本身不算成功；文件产物证据必须可读、非空并记录 size/sha256。
 - 可选 Claude Code analyzer advisor：通过 `AUTO_HARNESS_USE_AGENT_ANALYZER=1` 启用。
 - 仓库内置 skill：位于 `skills/*/SKILL.md`，按阶段选择并记录 hash。
@@ -39,7 +40,7 @@ AI-Auto-Harness 是一个面向 AI 开源 demo 项目的自动部署与验证 Ag
 - Persistent queue：`queue submit/list/run` 提供本地持久化任务队列，入队与执行分离，前台 worker 显式消费任务；`queue run --max-jobs N` 会用线程池并发运行多个队列项，并通过原子 claim lock 防止多 worker 重复执行同一个 job，过期 lock 会按 TTL 回收。
 - Deployment package：`package --task-id` 会导出 `tar.gz` 审计产物包和 sidecar manifest，包含 task/state/events/reports/evidence/repairs，默认排除 workspace、模型缓存和日志。
 - Readiness audit：`readiness` 命令会生成机器可读完成度审计，区分本地已完成能力和真实联网/GPU/Docker/vLLM 外部验收门，不保存任何密钥值。
-- Benchmark fixtures：`tests/fixtures/benchmarks` 覆盖下载续传、缓存命中、并发下载、etag 缓存失效、缓存清理、按来源/repo/keep-list 清理、服务启动后退出、历史 artifact 干扰、Gradio API shape 变化、token 缺失、token report 提示、Gradio `/config` discovery、OpenAPI schema discovery、OpenAI-compatible model discovery/stream verify、浏览器 DOM trace、Streamlit 错误页面、HTTP 200 false-positive 防护、repair policy 拒绝、repair loop 限流、repair resume 阶段跳转、人工审批、checksum 失败、本地 E2E fixture matrix、memory promotion proposal/审批/回归绑定、静态 dashboard 导出、只读 HTTP dashboard、持久化任务队列 dry-run 调度、队列并发 worker pool、队列 claim lock、stale claim lock recovery、GPU 探测调度、部署产物包导出、readiness audit、Docker backend plan/GPU/cache/log 元数据、GPU 包矩阵、verify progress 和 Git LFS progress parse。
+- Benchmark fixtures：`tests/fixtures/benchmarks` 覆盖下载续传、缓存命中、并发下载、etag 缓存失效、缓存清理、按来源/repo/keep-list 清理、服务启动后退出、历史 artifact 干扰、Gradio API shape 变化、token 缺失、token report 提示、Gradio `/config` discovery、OpenAPI schema discovery、OpenAI-compatible model discovery/stream verify、浏览器 DOM trace、Streamlit 错误页面、HTTP 200 false-positive 防护、repair policy 拒绝、repair loop 限流、repair resume 阶段跳转、人工审批、checksum 失败、本地 E2E fixture matrix、memory promotion proposal/审批/回归绑定、LLM planner policy merge、LLM repair execute loop、LLM verify hint recovery、静态 dashboard 导出、只读 HTTP dashboard、持久化任务队列 dry-run 调度、队列并发 worker pool、队列 claim lock、stale claim lock recovery、GPU 探测调度、部署产物包导出、readiness audit、Docker backend plan/GPU/cache/log 元数据、GPU 包矩阵、verify progress 和 Git LFS progress parse。
 - 开发进度报告：`docs/progress.md`。
 
 ## 快速开始
@@ -99,6 +100,42 @@ PYTHONPATH=src python3 -m auto_harness.cli deploy --repo ./demo --name demo --dr
 ```
 
 Agent advice 会写入 `analyze_result.json` 作为可选元数据，但不能绕过确定性 pipeline。
+
+## LLM Agent Planner
+
+LLM Agent 默认关闭，不影响 deterministic pipeline：
+
+```json
+{
+  "agent_mode": "off"
+}
+```
+
+开启结构化 planner：
+
+```bash
+export AUTO_HARNESS_AGENT_MODE=planner
+export AUTO_HARNESS_AGENT_PROVIDER=mock
+export AUTO_HARNESS_ENABLE_ANALYZE_PLANNER=1
+export AUTO_HARNESS_ENABLE_VERIFY_PLANNER=1
+PYTHONPATH=src python3 -m auto_harness.cli deploy --repo ./demo --name demo --dry-run
+```
+
+`planner` 模式下，LLM 只能输出 JSON decision/action。允许合并的动作包括 `add_run_candidate`、`select_run_candidate`、`update_verify_hint` 和 `add_dependency_constraint`；所有 action 都会经过 schema parsing、`AgentActionPolicy` 和 trace 写入。决策 trace 写入：
+
+```text
+runs/<task-id>/logs/agent_calls/
+```
+
+受控 repair action 需要更高权限：
+
+```bash
+export AUTO_HARNESS_AGENT_MODE=gated_actor
+export AUTO_HARNESS_ENABLE_LOG_DIAGNOSIS=1
+export AUTO_HARNESS_ENABLE_REPAIR_ACTIONS=1
+```
+
+即使在 `gated_actor` 下，LLM 也不能直接执行 shell 或修改源码。`install_package` 必须满足包名安全正则、runtime policy 允许依赖安装、repair loop 未超限，并且最终仍必须由 verify evidence 证明修复有效。
 
 ## Skill 与 Memory
 
@@ -367,6 +404,9 @@ PYTHONPATH=src python3 -m auto_harness.cli live-smoke-plan --execution-backend d
 - `xformers`、`flash-attn`、`bitsandbytes`、`triton` 会按 Python/CUDA/Torch/平台生成兼容矩阵，阻塞不兼容组合并给出建议动作。
 - Docker backend 会记录 GPU 参数、模型缓存挂载、容器日志命令和清理命令元数据。
 - Memory promotion 必须先审批，并绑定 apply 后建议运行的 benchmark case。
+- LLM planner 可以通过结构化 action 追加 run candidate、更新 verify hint，并记录 accepted/rejected actions。
+- LLM diagnoser 可以在未知失败日志下生成 repair action；`install_package` 只有在 policy 允许时才执行并记录命令结果。
+- LLM verify planner 可以在首次 verify uncertain 后生成新的 trace request hint，但 Python verify 仍要求响应、DOM 或 artifact 包含当前 trace。
 - 长耗时 verify 会持续刷新首次推理探针和完成状态。
 - vLLM/OpenAI-compatible server 会优先通过 `/v1/models` 发现模型，再使用 `/v1/chat/completions` 发送 trace prompt；普通 JSON 或 streaming SSE 响应中包含当前 trace 才通过。
 - 本地 E2E fixture matrix 会把小型 Gradio demo、Streamlit demo 和 Git LFS 权重仓库跑完整 dry-run pipeline，并检查阶段结果。

@@ -11,6 +11,8 @@ from contextlib import redirect_stdout
 from pathlib import Path
 
 from auto_harness.config import HarnessConfig
+from auto_harness.agent import AgentActionPolicy, AgentDecisionEngine, AgentDiagnoser, AgentTraceWriter, AgentVerifyPlanner
+from auto_harness.agent.schemas import AgentAction, AgentDecision, AgentObservation
 from auto_harness.benchmarks import BenchmarkRunner, LiveSmokePlanner
 from auto_harness.cli import _apply_cli_overrides, build_parser, main as cli_main
 from auto_harness.assets.huggingface import HuggingFaceDownloader
@@ -31,7 +33,7 @@ from auto_harness.modules.reporter import ReportGenerator
 from auto_harness.modules.runner import RunnerModule
 from auto_harness.modules.verify import VerifyModule
 from auto_harness.models.result import StageResult
-from auto_harness.providers import Message, MockLLMProvider
+from auto_harness.providers import LLMResult, Message, MockLLMProvider
 from auto_harness.skills import SkillRegistry
 from auto_harness.state import StateStore
 from auto_harness.orchestrator import TaskRunner
@@ -90,6 +92,16 @@ class FakeAgentExecutor:
 
     def resume(self, session_id, request):
         return self.run(request)
+
+
+class FakeLLMProvider:
+    def __init__(self, text: str):
+        self.text = text
+        self.messages = []
+
+    def complete(self, messages, temperature: float = 0.2):
+        self.messages.append(messages)
+        return LLMResult(text=self.text, raw={}, usage={}, latency_ms=1)
 
 
 class FakeBrowserBackend:
@@ -220,6 +232,111 @@ class CoreTests(unittest.TestCase):
             self.assertIn("agent_advice", result.data)
             self.assertEqual(result.data["agent_advice"]["risk"], "low")
             self.assertEqual(len(executor.requests), 1)
+
+    def test_agent_planner_adds_run_candidate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            repo.mkdir()
+            (repo / "README.md").write_text("Run with python serve.py", encoding="utf-8")
+            (repo / "serve.py").write_text("print('serve')\n", encoding="utf-8")
+            provider = FakeLLMProvider(json.dumps({
+                "stage": "analyze",
+                "status": "ok",
+                "confidence": 0.9,
+                "actions": [
+                    {
+                        "type": "add_run_candidate",
+                        "confidence": 0.9,
+                        "payload": {"cmd": [".venv/bin/python", "serve.py"], "expected_port": 9000},
+                    }
+                ],
+            }))
+            engine = AgentDecisionEngine(provider, trace_writer=AgentTraceWriter(Path(tmp) / "agent_calls"))
+            result = ProjectAnalyzer(agent_engine=engine, agent_mode="planner", task_id="task-agent").analyze(repo)
+            self.assertTrue(any(candidate.get("source") == "llm_planner" and candidate.get("expected_port") == 9000 for candidate in result.data["run_candidates"]))
+            self.assertEqual(result.data["agent_decision"]["merged"]["run_candidates_added"], 1)
+
+    def test_agent_planner_updates_verify_hint(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            repo.mkdir()
+            (repo / "README.md").write_text("POST /generate", encoding="utf-8")
+            provider = FakeLLMProvider(json.dumps({
+                "stage": "analyze",
+                "status": "ok",
+                "confidence": 0.8,
+                "actions": [
+                    {
+                        "type": "update_verify_hint",
+                        "confidence": 0.8,
+                        "payload": {
+                            "verify_hint": {
+                                "service_type": "api",
+                                "request": {
+                                    "method": "POST",
+                                    "path": "/generate",
+                                    "json": {"prompt": "auto harness trace {{trace_id}}"},
+                                },
+                            }
+                        },
+                    }
+                ],
+            }))
+            result = ProjectAnalyzer(agent_engine=AgentDecisionEngine(provider), agent_mode="planner").analyze(repo)
+            self.assertEqual(result.data["verify_hint"]["request"]["path"], "/generate")
+            self.assertTrue(result.data["agent_decision"]["merged"]["verify_hint_updated"])
+
+    def test_agent_planner_rejects_shell_string_command(self):
+        decision = AgentDecision(
+            stage="analyze",
+            status="ok",
+            confidence=0.9,
+            actions=[AgentAction(type="add_run_candidate", confidence=0.9, payload={"cmd": "python app.py; rm -rf /"})],
+        )
+        policy = AgentActionPolicy().validate(decision, RuntimePolicy(workspace_root="/tmp/demo"), mode="planner")
+        self.assertFalse(policy["allowed"])
+        self.assertEqual(policy["rejected_actions"][0]["reason"], "command payload must be a list")
+
+    def test_agent_planner_rejects_source_edit_without_permission(self):
+        decision = AgentDecision(
+            stage="analyze",
+            status="ok",
+            confidence=0.9,
+            actions=[AgentAction(type="propose_source_patch", confidence=0.9, payload={"diff": "---"}, requires={"source_edit": True})],
+        )
+        policy = AgentActionPolicy().validate(decision, RuntimePolicy(workspace_root="/tmp/demo", allow_source_edit=False), mode="planner")
+        self.assertFalse(policy["allowed"])
+        self.assertIn("source edit is not allowed", policy["rejected_actions"][0]["reason"])
+
+    def test_agent_planner_invalid_json_falls_back_to_deterministic(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            repo.mkdir()
+            (repo / "app.py").write_text("print('demo')\n", encoding="utf-8")
+            result = ProjectAnalyzer(
+                agent_engine=AgentDecisionEngine(FakeLLMProvider("not json")),
+                agent_mode="planner",
+            ).analyze(repo)
+            self.assertEqual(result.data["agent_decision"]["status"], "invalid")
+            self.assertTrue(result.data["run_candidates"])
+
+    def test_agent_decision_trace_is_written(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            repo.mkdir()
+            (repo / "README.md").write_text("demo", encoding="utf-8")
+            trace_dir = Path(tmp) / "agent_calls"
+            provider = FakeLLMProvider(json.dumps({"stage": "analyze", "status": "ok", "confidence": 0.6, "actions": []}))
+            ProjectAnalyzer(
+                agent_engine=AgentDecisionEngine(provider, trace_writer=AgentTraceWriter(trace_dir)),
+                agent_mode="planner",
+                task_id="trace-task",
+            ).analyze(repo)
+            traces = list(trace_dir.glob("analyze_*.json"))
+            self.assertEqual(len(traces), 1)
+            trace = json.loads(traces[0].read_text(encoding="utf-8"))
+            self.assertIn("prompt_hash", trace)
+            self.assertEqual(trace["observation_summary"]["task_id"], "trace-task")
 
     def test_verify_does_not_pass_without_artifact_evidence(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -533,6 +650,89 @@ class CoreTests(unittest.TestCase):
             self.assertIn("first_inference_probe_started", statuses)
             self.assertIn("http_trace_request_sent", statuses)
             self.assertEqual(statuses[-1], "verify_completed")
+
+    def test_llm_verify_planner_generates_post_hint(self):
+        provider = FakeLLMProvider(json.dumps({
+            "status": "ok",
+            "confidence": 0.8,
+            "reason": "README documents /generate",
+            "verify_hint": {
+                "request": {
+                    "method": "POST",
+                    "path": "/generate",
+                    "json": {"prompt": "auto harness trace {{trace_id}}"},
+                },
+                "expected_output": "response_contains_trace",
+            },
+        }))
+        planner = AgentVerifyPlanner(provider)
+        result = planner.plan(AgentObservation(task_id="task", stage="verify", allowed_action_types=["update_verify_hint"]))
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["verify_hint"]["request"]["path"], "/generate")
+
+    def test_llm_verify_planner_rejects_hint_without_trace(self):
+        planner = AgentVerifyPlanner(FakeLLMProvider("{}"))
+        valid, reason = planner.validate_hint({"request": {"method": "POST", "path": "/generate", "json": {"prompt": "hello"}}})
+        self.assertFalse(valid)
+        self.assertEqual(reason, "request must contain {{trace_id}}")
+
+    def test_llm_verify_planner_rejects_external_url(self):
+        planner = AgentVerifyPlanner(FakeLLMProvider("{}"))
+        valid, reason = planner.validate_hint({"request": {"method": "POST", "path": "https://evil.example/generate", "json": {"prompt": "{{trace_id}}"}}})
+        self.assertFalse(valid)
+        self.assertEqual(reason, "path must start with /")
+
+    def test_verify_uses_llm_hint_but_still_requires_trace_response(self):
+        calls = []
+
+        def fake_urlopen(req, timeout):
+            calls.append(req.full_url)
+            if req.full_url.endswith("/generate"):
+                body = json.loads(req.data.decode("utf-8"))
+                return FakeHttpResponse("handled %s" % body["prompt"].rsplit(" ", 1)[-1])
+            return FakeHttpResponse("ok without trace")
+
+        provider = FakeLLMProvider(json.dumps({
+            "status": "ok",
+            "confidence": 0.8,
+            "verify_hint": {
+                "request": {
+                    "method": "POST",
+                    "path": "/generate",
+                    "json": {"prompt": "auto harness trace {{trace_id}}"},
+                }
+            },
+        }))
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / "workspace" / "repo").mkdir(parents=True)
+            result = VerifyModule(
+                urlopen=fake_urlopen,
+                verify_planner=AgentVerifyPlanner(provider),
+            ).verify(
+                run_dir,
+                analysis={"verify_hint": {"endpoint": "http://127.0.0.1:8000", "request": {"method": "GET"}}},
+                runner_result={"pid": 1234, "expected_port": 8000, "service_ready": True},
+            )
+            self.assertEqual(result.status, "passed")
+            self.assertIn("http://127.0.0.1:8000/generate", calls)
+            self.assertEqual(result.data["llm_verify_planner"]["status"], "ok")
+
+        def no_trace_urlopen(req, timeout):
+            return FakeHttpResponse("ok without trace")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / "workspace" / "repo").mkdir(parents=True)
+            result = VerifyModule(
+                urlopen=no_trace_urlopen,
+                verify_planner=AgentVerifyPlanner(provider),
+            ).verify(
+                run_dir,
+                analysis={"verify_hint": {"endpoint": "http://127.0.0.1:8000", "request": {"method": "GET"}}},
+                runner_result={"pid": 1234, "expected_port": 8000, "service_ready": True},
+            )
+            self.assertEqual(result.status, "uncertain")
 
     def test_mock_provider(self):
         result = MockLLMProvider().complete([Message(role="user", content="hello")])
@@ -1499,6 +1699,141 @@ class CoreTests(unittest.TestCase):
         self.assertFalse(result["allowed"])
         self.assertIn("dependency install is not allowed", result["decisions"][0]["reasons"])
 
+    def test_llm_diagnoser_classifies_unknown_runner_log(self):
+        provider = FakeLLMProvider(json.dumps({
+            "stage": "runner",
+            "status": "ok",
+            "confidence": 0.86,
+            "diagnosis": {
+                "category": "dependency_missing",
+                "root_cause": "ModuleNotFoundError: cv2",
+                "confidence": 0.86,
+                "evidence": ["runner log contains ModuleNotFoundError"],
+            },
+            "actions": [
+                {
+                    "type": "install_package",
+                    "reason": "cv2 requires opencv-python-headless",
+                    "confidence": 0.8,
+                    "payload": {"package": "opencv-python-headless"},
+                    "requires": {"dependency_install": True, "network": True, "source_edit": False},
+                }
+            ],
+            "plan_delta": {"rerun_from": "env_deploy"},
+        }))
+        result = AgentDiagnoser(provider).diagnose(AgentObservation(task_id="task", stage="runner"))
+        self.assertEqual(result["diagnosis"]["category"], "dependency_missing")
+        self.assertEqual(result["actions"][0]["payload"]["package"], "opencv-python-headless")
+
+    def test_llm_repair_install_package_is_policy_gated(self):
+        plan = {
+            "actions": [
+                {
+                    "type": "install_package",
+                    "requires": {"dependency_install": True},
+                    "payload": {"package": "opencv-python-headless"},
+                }
+            ]
+        }
+        rejected = RepairPolicy().check(plan, RuntimePolicy(workspace_root="/tmp/demo", allow_dependency_install=False))
+        allowed = RepairPolicy().check(plan, RuntimePolicy(workspace_root="/tmp/demo", allow_dependency_install=True))
+        self.assertFalse(rejected["allowed"])
+        self.assertTrue(allowed["allowed"])
+
+    def test_llm_repair_rejects_unsafe_package_spec(self):
+        plan = {
+            "actions": [
+                {
+                    "type": "install_package",
+                    "requires": {"dependency_install": True},
+                    "payload": {"package": "https://evil.example/pkg.whl"},
+                }
+            ]
+        }
+        result = RepairPolicy().check(plan, RuntimePolicy(workspace_root="/tmp/demo", allow_dependency_install=True))
+        self.assertFalse(result["allowed"])
+        self.assertIn("unsafe package spec", result["decisions"][0]["reasons"])
+
+    def test_repair_execute_records_command_result(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / "workspace" / "repo").mkdir(parents=True)
+            plan = {
+                "actions": [
+                    {
+                        "type": "install_package",
+                        "requires": {"dependency_install": True},
+                        "payload": {"package": "opencv-python-headless"},
+                    }
+                ]
+            }
+
+            def fake_runner(cmd, cwd, timeout_seconds):
+                return {"exit_code": 0, "stdout": "installed", "stderr": "", "timed_out": False}
+
+            result = RepairApplier().apply(run_dir, plan, {"allowed": True, "decisions": []}, execute=True, command_runner=fake_runner)
+            self.assertTrue(result["executed"])
+            self.assertEqual(result["executed_action_count"], 1)
+            self.assertEqual(result["action_results"][0]["cmd"][-1], "opencv-python-headless")
+            stored = json.loads((run_dir / "repairs" / "repair_apply_result.json").read_text(encoding="utf-8"))
+            self.assertEqual(stored["action_results"][0]["stdout_tail"], "installed")
+
+    def test_repair_execute_then_resume_requires_verify_pass(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / "workspace" / "repo").mkdir(parents=True)
+            plan = {
+                "actions": [
+                    {
+                        "type": "install_package",
+                        "requires": {"dependency_install": True},
+                        "payload": {"package": "demo-package"},
+                    }
+                ],
+                "verification_required": True,
+            }
+            apply_result = RepairApplier().apply(
+                run_dir,
+                plan,
+                {"allowed": True, "decisions": []},
+                execute=True,
+                command_runner=lambda cmd, cwd, timeout_seconds: {"exit_code": 0, "stdout": "", "stderr": "", "timed_out": False},
+            )
+            self.assertEqual(apply_result["executed_action_count"], 1)
+            uncertain = VerifyModule(urlopen=lambda req, timeout: FakeHttpResponse("ok without trace")).verify(
+                run_dir,
+                analysis={"verify_hint": {"endpoint": "http://127.0.0.1:8000", "request": {"method": "GET"}}},
+                runner_result={"pid": 1234, "expected_port": 8000, "service_ready": True},
+            )
+            self.assertEqual(uncertain.status, "uncertain")
+
+            def trace_urlopen(req, timeout):
+                trace = req.full_url.split("_auto_harness_trace=")[1]
+                return FakeHttpResponse("handled %s" % trace)
+
+            passed = VerifyModule(urlopen=trace_urlopen).verify(
+                run_dir,
+                analysis={"verify_hint": {"endpoint": "http://127.0.0.1:8000", "request": {"method": "GET"}}},
+                runner_result={"pid": 1234, "expected_port": 8000, "service_ready": True},
+            )
+            self.assertEqual(passed.status, "passed")
+
+    def test_repair_does_not_record_secret_values(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            plan = {
+                "actions": [
+                    {
+                        "type": "set_env_var_name_only",
+                        "payload": {"env_vars": ["HF_TOKEN"], "token_value": "hf_should_not_be_recorded"},
+                    }
+                ]
+            }
+            RepairApplier().apply(run_dir, plan, {"allowed": True, "decisions": []})
+            text = (run_dir / "repairs" / "repair_plan.json").read_text(encoding="utf-8")
+            self.assertIn("HF_TOKEN", text)
+            self.assertNotIn("hf_should_not_be_recorded", text)
+
     def test_repair_policy_allows_operator_approved_action(self):
         action = {
             "type": "change_cache_dir",
@@ -1816,11 +2151,14 @@ class CoreTests(unittest.TestCase):
         self.assertIn("queue_claim_lock_prevents_duplicate", ids)
         self.assertIn("queue_stale_claim_lock_recovery", ids)
         self.assertIn("readiness_audit_report", ids)
+        self.assertIn("llm_planner_policy_merge", ids)
+        self.assertIn("llm_repair_dependency_execute_loop", ids)
+        self.assertIn("llm_verify_hint_recovery", ids)
 
     def test_benchmark_runner_executes_all_fixture_cases(self):
         report = BenchmarkRunner().run(Path("tests/fixtures/benchmarks/manifest.json"))
         self.assertEqual(report["status"], "passed")
-        self.assertEqual(len(report["cases"]), 50)
+        self.assertEqual(len(report["cases"]), 53)
         self.assertTrue(all(case["status"] == "passed" for case in report["cases"]))
 
     def test_benchmark_cli_writes_output(self):

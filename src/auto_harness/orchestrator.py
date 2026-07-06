@@ -4,6 +4,7 @@ import subprocess
 from pathlib import Path
 from typing import Dict
 
+from auto_harness.agent import AgentDecisionEngine, AgentDiagnoser, AgentObservation, AgentTraceWriter, AgentVerifyPlanner
 from auto_harness.config import HarnessConfig
 from auto_harness.agents.claude_code import ClaudeCodeExecutor
 from auto_harness.assets import HuggingFaceDownloader, ModelCache, ModelScopeDownloader
@@ -20,6 +21,7 @@ from auto_harness.modules import (
     RunnerModule,
     VerifyModule,
 )
+from auto_harness.providers import MockLLMProvider, XunfeiSparkProvider
 from auto_harness.skills import SkillRegistry
 from auto_harness.repair import RepairApplier, RepairLoopController, RepairOverlay, RepairPlanner, RepairPolicy
 from auto_harness.state import StateStore
@@ -132,11 +134,17 @@ class TaskRunner:
 
         if should_run("analyze"):
             analyze_context = self._stage_context("analyze", {})
+            trace_writer = self._agent_trace_writer(run_dir)
             analyzer = ProjectAnalyzer(
                 agent_executor=ClaudeCodeExecutor() if self.config.use_agent_analyzer else None,
                 use_agent=self.config.use_agent_analyzer,
                 agent_timeout_seconds=self.config.agent_timeout_seconds,
                 stage_context=analyze_context,
+                agent_engine=self._agent_decision_engine(trace_writer) if self._agent_planner_enabled("analyze") else None,
+                agent_mode=self.config.agent_mode,
+                runtime_policy=task.runtime,
+                task_id=task_id,
+                agent_max_file_chars=self.config.agent_max_file_chars,
             )
             analyze_result = analyzer.analyze(repo_dir)
             results["analyze"] = to_plain(analyze_result)
@@ -227,9 +235,11 @@ class TaskRunner:
             runner_data = results["runner"]["data"]
 
         verify_context = self._stage_context("verify", deploy_analysis)
+        verify_trace_writer = self._agent_trace_writer(run_dir)
         verify_result = VerifyModule(
             stage_context=verify_context,
             progress_callback=lambda progress: self.store.update_stage(task_id, "verify", "running_verify", progress=progress),
+            verify_planner=self._agent_verify_planner(verify_trace_writer) if self._agent_verify_planner_enabled() else None,
         ).verify(run_dir, deploy_analysis, runner_data)
         self._attach_repair_overlay(verify_result, repair_overlay)
         results["verify"] = to_plain(verify_result)
@@ -353,6 +363,61 @@ class TaskRunner:
             "generated_at": utc_now_iso(),
         }
 
+    def _agent_provider(self):
+        if self.config.agent_provider == "xunfei":
+            return XunfeiSparkProvider()
+        return MockLLMProvider()
+
+    def _agent_trace_writer(self, run_dir: Path) -> AgentTraceWriter:
+        return AgentTraceWriter(run_dir / "logs" / "agent_calls")
+
+    def _agent_decision_engine(self, trace_writer: AgentTraceWriter) -> AgentDecisionEngine:
+        return AgentDecisionEngine(self._agent_provider(), config=self.config, trace_writer=trace_writer)
+
+    def _agent_planner_enabled(self, stage: str) -> bool:
+        return (
+            self.config.agent_mode == "planner"
+            and stage == "analyze"
+            and self.config.agent_enable_analyze_planner
+        )
+
+    def _agent_verify_planner_enabled(self) -> bool:
+        return self.config.agent_mode in ("planner", "gated_actor") and self.config.agent_enable_verify_planner
+
+    def _agent_repair_execute_enabled(self, runtime: RuntimePolicy) -> bool:
+        return (
+            self.config.agent_mode == "gated_actor"
+            and self.config.agent_enable_repair_actions
+            and runtime.allow_dependency_install
+        )
+
+    def _maybe_agent_diagnose(self, task_id: str, stage: str, result, analysis: Dict, runtime: RuntimePolicy, run_dir: Path) -> None:
+        if not (self.config.agent_mode in ("planner", "gated_actor") and self.config.agent_enable_log_diagnosis):
+            return
+        if result.status not in ("failed", "uncertain"):
+            return
+        data = result.data if isinstance(result.data, dict) else {}
+        diagnosis = data.get("diagnosis") if isinstance(data.get("diagnosis"), dict) else {}
+        if diagnosis.get("category") not in (None, "", "unknown") and float(diagnosis.get("confidence") or 0) >= 0.75:
+            return
+        observation = AgentObservation(
+            task_id=task_id,
+            stage=stage,
+            repo_dir=str(run_dir / "workspace" / "repo"),
+            deterministic_result=to_plain(result),
+            previous_results=self._load_previous_results(run_dir),
+            memory_hits=self.memory.query(stage, analysis, limit=self.config.max_memory_items),
+            runtime_policy=runtime.__dict__,
+            allowed_action_types=["install_package", "update_verify_hint", "request_env_var_name_only", "rerun_from_stage"],
+            extra={"analysis": analysis},
+        )
+        diagnoser = AgentDiagnoser(self._agent_provider(), config=self.config, trace_writer=self._agent_trace_writer(run_dir))
+        agent_diagnosis = diagnoser.diagnose(observation)
+        result.data.setdefault("agent_diagnosis", agent_diagnosis)
+
+    def _agent_verify_planner(self, trace_writer: AgentTraceWriter) -> AgentVerifyPlanner:
+        return AgentVerifyPlanner(self._agent_provider(), config=self.config, trace_writer=trace_writer)
+
     def _read_optional(self, path: Path):
         if not path.exists():
             return None
@@ -366,12 +431,19 @@ class TaskRunner:
         if entry:
             task = self.store.load_task(task_id)
             run_dir = self.store.run_dir(task_id)
+            self._maybe_agent_diagnose(task_id, stage, result, analysis, task.runtime, run_dir)
             repair_plan = self.repair_planner.propose(stage, result, analysis)
             approval = self.repair_loop.load_approval(run_dir)
             policy_result = self.repair_policy.check(repair_plan, task.runtime, operator_approval=approval)
             state = self.store.load_state(task_id)
             effective_policy = self.repair_loop.gate(run_dir, stage, entry, repair_plan, policy_result, state.last_safe_stage)
-            apply_result = self.repair_applier.apply(run_dir, repair_plan, effective_policy)
+            apply_result = self.repair_applier.apply(
+                run_dir,
+                repair_plan,
+                effective_policy,
+                execute=self._agent_repair_execute_enabled(task.runtime),
+                timeout_seconds=self.config.default_timeout_seconds,
+            )
             self.store.events(task_id).append(
                 stage,
                 "memory_recorded",

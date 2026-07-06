@@ -23,6 +23,15 @@ class HarnessConfig:
     allowed_commands: List[str] = None
     use_agent_analyzer: bool = False
     agent_timeout_seconds: int = 900
+    agent_mode: str = "off"
+    agent_provider: str = "mock"
+    agent_max_input_chars: int = 20000
+    agent_max_file_chars: int = 6000
+    agent_decision_timeout_seconds: int = 60
+    agent_enable_analyze_planner: bool = False
+    agent_enable_log_diagnosis: bool = False
+    agent_enable_verify_planner: bool = False
+    agent_enable_repair_actions: bool = False
     skills_dir: str = "skills"
     memory_dir: str = "memory"
     model_cache_dir: str = "model_cache"
@@ -65,6 +74,18 @@ class HarnessConfig:
                 known[key] = data[key]
         if os.environ.get("AUTO_HARNESS_USE_AGENT_ANALYZER"):
             known["use_agent_analyzer"] = os.environ.get("AUTO_HARNESS_USE_AGENT_ANALYZER") == "1"
+        if os.environ.get("AUTO_HARNESS_AGENT_MODE"):
+            known["agent_mode"] = os.environ["AUTO_HARNESS_AGENT_MODE"]
+        if os.environ.get("AUTO_HARNESS_AGENT_PROVIDER"):
+            known["agent_provider"] = os.environ["AUTO_HARNESS_AGENT_PROVIDER"]
+        if os.environ.get("AUTO_HARNESS_ENABLE_ANALYZE_PLANNER"):
+            known["agent_enable_analyze_planner"] = os.environ.get("AUTO_HARNESS_ENABLE_ANALYZE_PLANNER") == "1"
+        if os.environ.get("AUTO_HARNESS_ENABLE_LOG_DIAGNOSIS"):
+            known["agent_enable_log_diagnosis"] = os.environ.get("AUTO_HARNESS_ENABLE_LOG_DIAGNOSIS") == "1"
+        if os.environ.get("AUTO_HARNESS_ENABLE_VERIFY_PLANNER"):
+            known["agent_enable_verify_planner"] = os.environ.get("AUTO_HARNESS_ENABLE_VERIFY_PLANNER") == "1"
+        if os.environ.get("AUTO_HARNESS_ENABLE_REPAIR_ACTIONS"):
+            known["agent_enable_repair_actions"] = os.environ.get("AUTO_HARNESS_ENABLE_REPAIR_ACTIONS") == "1"
         return cls(**known)
 
     @property

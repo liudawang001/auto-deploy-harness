@@ -2,8 +2,10 @@ import json
 from pathlib import Path
 from typing import Dict, List, Optional
 
+from auto_harness.agent import AgentActionPolicy, AgentDecisionEngine, AgentObservation
 from auto_harness.agents.base import AgentExecutor, AgentRequest
 from auto_harness.models.result import StageResult
+from auto_harness.models.task import RuntimePolicy
 from auto_harness.providers.json_utils import parse_json_object
 
 
@@ -14,11 +16,22 @@ class ProjectAnalyzer:
         use_agent: bool = False,
         agent_timeout_seconds: int = 900,
         stage_context: Optional[Dict] = None,
+        agent_engine: Optional[AgentDecisionEngine] = None,
+        agent_mode: str = "off",
+        runtime_policy: Optional[RuntimePolicy] = None,
+        task_id: str = "",
+        agent_max_file_chars: int = 6000,
     ) -> None:
         self.agent_executor = agent_executor
         self.use_agent = use_agent
         self.agent_timeout_seconds = agent_timeout_seconds
         self.stage_context = stage_context or {}
+        self.agent_engine = agent_engine
+        self.agent_mode = agent_mode
+        self.runtime_policy = runtime_policy or RuntimePolicy(workspace_root="")
+        self.task_id = task_id
+        self.agent_max_file_chars = agent_max_file_chars
+        self.agent_policy = AgentActionPolicy()
 
     def analyze(self, repo_dir: Path) -> StageResult:
         files = self._collect_files(repo_dir)
@@ -37,6 +50,9 @@ class ProjectAnalyzer:
         agent_advice = self._agent_advice(repo_dir, data)
         if agent_advice:
             data["agent_advice"] = agent_advice
+        agent_decision = self._agent_planner(repo_dir, data)
+        if agent_decision:
+            data["agent_decision"] = agent_decision
         return StageResult(
             stage="analyze",
             status="passed",
@@ -179,3 +195,117 @@ class ProjectAnalyzer:
             parsed.setdefault("status", "ok")
             return parsed
         return {"status": "invalid_shape", "raw": parsed}
+
+    def _agent_planner(self, repo_dir: Path, analysis: Dict) -> Optional[Dict]:
+        if self.agent_mode != "planner" or not self.agent_engine:
+            return None
+        observation = AgentObservation(
+            task_id=self.task_id,
+            stage="analyze",
+            repo_dir=str(repo_dir),
+            file_tree=analysis.get("files", [])[:200],
+            selected_files=self._selected_files(repo_dir, analysis.get("files", [])),
+            deterministic_result=analysis,
+            previous_results={},
+            memory_hits=self.stage_context.get("memory_hits") or [],
+            selected_skills=self.stage_context.get("selected_skills") or [],
+            runtime_policy=self.runtime_policy.__dict__,
+            allowed_action_types=[
+                "add_run_candidate",
+                "select_run_candidate",
+                "update_verify_hint",
+                "add_dependency_constraint",
+            ],
+        )
+        decision = self.agent_engine.decide(observation)
+        policy = self.agent_policy.validate(decision, self.runtime_policy, mode=self.agent_mode)
+        merged = self._merge_agent_decision(analysis, decision, policy)
+        return {
+            "status": decision.status,
+            "confidence": decision.confidence,
+            "summary": decision.summary,
+            "accepted_actions": policy["accepted_actions"],
+            "rejected_actions": policy["rejected_actions"],
+            "merged": merged,
+        }
+
+    def _merge_agent_decision(self, analysis: Dict, decision, policy: Dict) -> Dict:
+        merged = {
+            "run_candidates_added": 0,
+            "verify_hint_updated": False,
+            "dependency_constraints_added": 0,
+            "preferred_candidate_selected": False,
+            "skipped": False,
+        }
+        if decision.status != "ok" or decision.confidence < 0.5:
+            merged["skipped"] = True
+            return merged
+        for action in policy.get("accepted_actions") or []:
+            if float(action.get("confidence") or 0) < 0.5:
+                continue
+            action_type = action.get("type")
+            payload = action.get("payload") or {}
+            if action_type == "add_run_candidate":
+                candidate = self._candidate_from_payload(payload)
+                if candidate:
+                    analysis.setdefault("run_candidates", []).append(candidate)
+                    merged["run_candidates_added"] += 1
+            elif action_type == "select_run_candidate":
+                if self._select_run_candidate(analysis, payload):
+                    merged["preferred_candidate_selected"] = True
+            elif action_type == "update_verify_hint":
+                verify_hint = payload.get("verify_hint") if isinstance(payload.get("verify_hint"), dict) else payload
+                if verify_hint:
+                    analysis["verify_hint"] = verify_hint
+                    merged["verify_hint_updated"] = True
+            elif action_type == "add_dependency_constraint":
+                command = self._dependency_constraint_command(payload)
+                if command:
+                    analysis.setdefault("install_plan", []).append(command)
+                    merged["dependency_constraints_added"] += 1
+        return merged
+
+    def _candidate_from_payload(self, payload: Dict) -> Optional[Dict]:
+        cmd = payload.get("cmd")
+        if not isinstance(cmd, list):
+            return None
+        return {
+            "cmd": list(cmd),
+            "expected_port": int(payload.get("expected_port") or 0),
+            "confidence": float(payload.get("confidence") or 0.5),
+            "source": "llm_planner",
+        }
+
+    def _select_run_candidate(self, analysis: Dict, payload: Dict) -> bool:
+        cmd = payload.get("cmd")
+        candidates = analysis.get("run_candidates") or []
+        for index, candidate in enumerate(candidates):
+            if candidate.get("cmd") == cmd:
+                selected = candidates.pop(index)
+                selected["preferred_by"] = "llm_planner"
+                candidates.insert(0, selected)
+                return True
+        return False
+
+    def _dependency_constraint_command(self, payload: Dict) -> Optional[List[str]]:
+        package = str(payload.get("package") or "")
+        constraint = str(payload.get("constraint") or "")
+        if not package:
+            return None
+        return [".venv/bin/python", "-m", "pip", "install", package + constraint]
+
+    def _selected_files(self, repo_dir: Path, files: List[str]) -> Dict[str, str]:
+        selected = {}
+        for name in files:
+            lowered = name.lower()
+            if any(marker in lowered for marker in (".env", "secret", "credential", "token", "key")):
+                continue
+            if Path(name).name not in ("README.md", "readme.md", "requirements.txt", "pyproject.toml", "app.py", "main.py", "server.py"):
+                continue
+            path = repo_dir / name
+            try:
+                if path.is_file():
+                    selected[name] = "UNTRUSTED REPO CONTENT:\n" + path.read_text(encoding="utf-8", errors="ignore")[:self.agent_max_file_chars]
+            except OSError:
+                continue
+        return selected

@@ -5,6 +5,7 @@ import urllib.request
 from pathlib import Path
 from typing import Dict, List, Optional
 
+from auto_harness.agent.schemas import AgentObservation
 from auto_harness.models.result import StageResult
 from auto_harness.models.verify import VerifyResult
 from auto_harness.utils.files import diff_snapshot, snapshot_files, short_hash
@@ -20,12 +21,14 @@ class VerifyModule:
         stage_context: Optional[Dict] = None,
         browser_verifier: BrowserVerifier = None,
         progress_callback=None,
+        verify_planner=None,
     ) -> None:
         self.urlopen = urlopen or urllib.request.urlopen
         self.stage_context = stage_context or {}
         self.streamlit_verifier = StreamlitVerifier(urlopen=self.urlopen)
         self.browser_verifier = browser_verifier or BrowserVerifier()
         self.progress_callback = progress_callback
+        self.verify_planner = verify_planner
 
     def verify(self, run_dir: Path, analysis: Dict, runner_result: Dict) -> StageResult:
         trace_id = "verify_%s_%s" % (compact_timestamp(), short_hash(str(run_dir), 6))
@@ -53,6 +56,21 @@ class VerifyModule:
         if browser_evidence:
             checks.append(browser_evidence["check"])
         status = "pass" if self._can_pass(service, checks) else "uncertain"
+        planner_evidence = None
+        planner_result = None
+        if status == "uncertain":
+            planner_result = self._plan_and_execute_verify_hint(
+                trace_id,
+                run_dir,
+                service,
+                analysis,
+                evidence_dir,
+                checks,
+            )
+            if planner_result and planner_result.get("evidence"):
+                planner_evidence = planner_result["evidence"]
+                checks.append(planner_evidence["check"])
+                status = "pass" if self._can_pass(service, checks) else "uncertain"
         self._progress("verify_completed", {"result_status": status, "trace_id": trace_id})
         diagnosis = {
             "category": "none" if status == "pass" else "unknown",
@@ -69,10 +87,13 @@ class VerifyModule:
                 ([http_evidence["path"]] if http_evidence else [])
                 + ([streamlit_evidence["path"]] if streamlit_evidence else [])
                 + ([browser_evidence["path"]] if browser_evidence else [])
+                + ([planner_evidence["path"]] if planner_evidence else [])
             ),
             next_action="report",
         )
         result_data = result.__dict__
+        if planner_result:
+            result_data["llm_verify_planner"] = planner_result.get("planner", {})
         if self.stage_context:
             result_data["control_context"] = self.stage_context
         evidence_path = evidence_dir / ("%s_verify.json" % trace_id)
@@ -87,8 +108,44 @@ class VerifyModule:
                 + ([http_evidence["path"]] if http_evidence else [])
                 + ([streamlit_evidence["path"]] if streamlit_evidence else [])
                 + ([browser_evidence["path"]] if browser_evidence else [])
+                + ([planner_evidence["path"]] if planner_evidence else [])
             ),
         )
+
+    def _plan_and_execute_verify_hint(
+        self,
+        trace_id: str,
+        run_dir: Path,
+        service: Dict,
+        analysis: Dict,
+        evidence_dir: Path,
+        checks: List[Dict],
+    ) -> Optional[Dict]:
+        if not self.verify_planner:
+            return None
+        if not service.get("process_alive") or not service.get("port_ready"):
+            return None
+        if any(check.get("status") == "pass" for check in checks if check.get("name") in {"http_trace_response", "browser_dom_probe", "artifact_download_validation"}):
+            return None
+        repo_dir = run_dir / "workspace" / "repo"
+        observation = AgentObservation(
+            task_id=run_dir.name,
+            stage="verify",
+            repo_dir=str(repo_dir),
+            file_tree=[],
+            selected_files=self._verify_selected_files(repo_dir),
+            deterministic_result={"analysis": analysis, "service": service, "checks": checks},
+            runtime_policy={},
+            allowed_action_types=["update_verify_hint"],
+        )
+        planner = self.verify_planner.plan(observation)
+        if planner.get("status") != "ok":
+            return {"planner": planner}
+        planned_analysis = dict(analysis)
+        planned_analysis["verify_hint"] = planner["verify_hint"]
+        self._progress("llm_verify_hint_generated", {"confidence": planner.get("confidence")})
+        evidence = self._execute_http_trace(trace_id, service, planned_analysis, evidence_dir)
+        return {"planner": planner, "evidence": evidence}
 
     def _service_discovery(self, runner_result: Dict) -> Dict:
         port = int(runner_result.get("expected_port") or 0)
@@ -631,6 +688,20 @@ class VerifyModule:
                 "reason": validation_reason,
             }
         ]
+
+    def _verify_selected_files(self, repo_dir: Path) -> Dict[str, str]:
+        selected = {}
+        for name in ("README.md", "readme.md", "app.py", "main.py", "server.py", "routes.py"):
+            path = repo_dir / name
+            lowered = name.lower()
+            if any(marker in lowered for marker in (".env", "secret", "credential", "token", "key")):
+                continue
+            try:
+                if path.is_file():
+                    selected[name] = "UNTRUSTED REPO CONTENT:\n" + path.read_text(encoding="utf-8", errors="ignore")[:6000]
+            except OSError:
+                continue
+        return selected
 
     def _sha256_file(self, path: Path) -> str:
         digest = hashlib.sha256()

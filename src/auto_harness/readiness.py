@@ -13,6 +13,13 @@ class ReadinessAuditor:
         "README.md",
         "docs/progress.md",
         "docs/optimization-roadmap.md",
+        "docs/llm-agent-upgrade-execution-plan.md",
+        "src/auto_harness/agent/schemas.py",
+        "src/auto_harness/agent/engine.py",
+        "src/auto_harness/agent/policy.py",
+        "src/auto_harness/agent/traces.py",
+        "src/auto_harness/agent/diagnoser.py",
+        "src/auto_harness/agent/verify_planner.py",
         "src/auto_harness/orchestrator.py",
         "src/auto_harness/modules/verify.py",
         "src/auto_harness/modules/model_prepare.py",
@@ -47,6 +54,9 @@ class ReadinessAuditor:
         "deployment_package_export",
         "dashboard_http_server",
         "readiness_audit_report",
+        "llm_planner_policy_merge",
+        "llm_repair_dependency_execute_loop",
+        "llm_verify_hint_recovery",
     ]
 
     EXTERNAL_GATES = [

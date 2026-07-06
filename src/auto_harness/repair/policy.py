@@ -1,5 +1,6 @@
 from typing import Dict, List
 
+from auto_harness.agent.repair_actions import safe_package_spec
 from auto_harness.models.task import RuntimePolicy
 
 
@@ -30,6 +31,10 @@ class RepairPolicy:
             reasons.append("operator secret is required")
         if requires.get("operator_approval") and not self._approved(action, operator_approval):
             reasons.append("operator approval is required")
+        if action.get("type") == "install_package":
+            package = str((action.get("payload") or {}).get("package") or "")
+            if not safe_package_spec(package):
+                reasons.append("unsafe package spec")
         return {
             "action_type": action.get("type", ""),
             "allowed": not reasons,

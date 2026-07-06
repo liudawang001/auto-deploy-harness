@@ -10,6 +10,15 @@ class RepairPlanner:
         analysis = analysis or {}
         plain = to_plain(result)
         data = plain.get("data") if isinstance(plain.get("data"), dict) else {}
+        agent_diagnosis = data.get("agent_diagnosis") if isinstance(data.get("agent_diagnosis"), dict) else {}
+        if agent_diagnosis.get("status") == "ok":
+            data = dict(data)
+            diagnosis = dict(agent_diagnosis.get("diagnosis") or {})
+            if agent_diagnosis.get("actions"):
+                diagnosis["recommended_actions"] = agent_diagnosis.get("actions")
+            if agent_diagnosis.get("rerun_from"):
+                diagnosis["rerun_from"] = agent_diagnosis.get("rerun_from")
+            data["diagnosis"] = diagnosis
         diagnosis = data.get("diagnosis") or {}
         category = diagnosis.get("category") or self._category_from_result(plain)
         root_cause = diagnosis.get("root_cause") or diagnosis.get("signal") or plain.get("error") or plain.get("summary") or "unknown"
