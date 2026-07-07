@@ -137,6 +137,8 @@ export AUTO_HARNESS_ENABLE_REPAIR_ACTIONS=1
 
 即使在 `gated_actor` 下，LLM 也不能直接执行 shell 或修改源码。`install_package` 必须满足包名安全正则、runtime policy 允许依赖安装、repair loop 未超限、命令在 `allowed_commands` 白名单内，并且最终仍必须由 verify evidence 证明修复有效。LLM verify planner 的二次 HTTP evidence 会单独保存，不覆盖初始 uncertain evidence。
 
+`AgentLoopController` 会把失败观察、LLM diagnosis、repair plan、policy gate、repair apply、stop reason 和 auto-resume 判定写入 stage result 与 `runs/<task-id>/logs/agent_loop/`。自动恢复默认关闭；只有显式设置 `agent_auto_resume_after_repair=true`，且 policy、runtime 和 repair action 都通过时，才会产生 `should_auto_resume=true` 的恢复建议。
+
 ## Skill 与 Memory
 
 Agent 控制文档写在仓库内：

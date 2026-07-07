@@ -22,6 +22,8 @@
   "agent_enable_log_diagnosis": false,
   "agent_enable_verify_planner": false,
   "agent_enable_repair_actions": false,
+  "agent_auto_resume_after_repair": false,
+  "agent_max_loop_iterations": 2,
   "skills_dir": "skills",
   "memory_dir": "memory",
   "model_cache_dir": "model_cache",

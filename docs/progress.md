@@ -9,7 +9,12 @@
   - Phase 2 LLM 日志诊断与受控 repair action 已完成第一版：新增 `AgentDiagnoser`，未知/低置信失败可生成结构化 diagnosis 和 repair action；`RepairPolicy` 会拒绝越权/不安全包名，`RepairApplier` 在显式 execute 条件下记录受控 `install_package` 命令结果，并对密钥值脱敏。
   - Phase 3 LLM verify planner 已完成第一版：当首次 verify uncertain 且服务存活时，`AgentVerifyPlanner` 可生成新的 GET/POST trace request hint；Python verify 会二次请求并仍以 trace evidence 判定成功，不能把 HTTP 200 作为成功。
   - 配置新增 `agent_mode`、`agent_provider`、`agent_enable_analyze_planner`、`agent_enable_log_diagnosis`、`agent_enable_verify_planner`、`agent_enable_repair_actions` 等开关，默认全部关闭或安全模式，保持现有 deterministic pipeline 行为。
-  - Benchmark cases 从 50 个扩展到 53 个，新增 `llm_planner_policy_merge`、`llm_repair_dependency_execute_loop`、`llm_verify_hint_recovery`。
+  - Benchmark cases 从 50 个扩展到 54 个，新增 `llm_planner_policy_merge`、`llm_repair_dependency_execute_loop`、`llm_verify_hint_recovery`、`agent_loop_dependency_self_repair_e2e`。
+- Agent Loop 控制器阶段：
+  - 新增 `AgentLoopController`，统一处理 failure observation、LLM diagnosis、repair plan、repair policy、repair apply、stop reason 和 auto-resume 判定。
+  - 新增配置 `agent_auto_resume_after_repair` 和 `agent_max_loop_iterations`，默认关闭自动恢复，避免改变现有 deterministic pipeline 行为。
+  - `TaskRunner._remember()` 已接入 Agent loop，stage result 会保存 `data.agent_loop` 摘要，`logs/agent_loop/` 会保存完整 loop trace。
+  - 新增 `agent_loop_dependency_self_repair_e2e` benchmark，覆盖 LLM 诊断缺依赖、policy 通过、受控 repair 执行、auto-resume 判定和最终 verify pass 的可审计闭环。
 - 最终完成度审计阶段：
   - 新增 `ReadinessAuditor`，从当前仓库关键代码、进度文档和 benchmark manifest 生成机器可读完成度审计报告。
   - CLI 新增 `readiness --benchmark-report <path> --output <path>`，默认输出 `reports/readiness_audit.json`；报告会区分 `local_readiness_percent` 和真实联网/GPU/Docker/vLLM 外部验收门。
@@ -188,7 +193,7 @@
 
 - 已完成 P0/P1 核心控制链路：下载缓存、断点续传、verify 防误判、OpenAPI/OpenAI-compatible verify、repair plan/policy/resume、memory promotion 审批与回归、benchmark 回归体系已经成型。
 - 已完成本机可验证的真实开源模型部署能力：Hugging Face / ModelScope 下载、Git LFS / submodule 检测与受控准备、Gradio/Streamlit/browser verify、PyTorch CPU/CUDA wheel 求解、GPU 包兼容矩阵、本地 E2E fixture matrix、Docker GPU/cache backend、静态/HTTP dashboard、本地持久化队列、并发 worker pool、跨进程 claim lock、stale lock recovery、GPU 探测调度和部署产物包已具备。
-- 新增 readiness audit 作为完成度门禁，当前 `local_readiness_percent=100`，benchmark manifest 覆盖 53 个本地 fixture case。
+- 新增 readiness audit 作为完成度门禁，当前 `local_readiness_percent=100`，benchmark manifest 覆盖 54 个本地 fixture case。
 - 真实联网长耗时 E2E、真实 Docker/GPU smoke、真实 vLLM 服务 smoke、更多模型仓库源和分布式资源锁被归档为外部验收 gate；它们需要具备网络、token、磁盘、Linux GPU 或分布式环境后执行，不阻塞 Mac 本机开发闭环。
 - 继续执行 P0/P1 优化任务：
   - `ModelCache.reserve` 会为缓存目录写入 `.auto_harness_asset.json`，记录 source、repo id、revision、origin、asset id 和 cache key。

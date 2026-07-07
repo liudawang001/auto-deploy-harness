@@ -36,7 +36,9 @@ policy-constrained deployment agent with auditable observe-decide-act-verify loo
 - `RepairApplier` 执行命令前已接入 `allowed_commands` command policy；orchestrator 调用 repair apply 时传入全局命令白名单。
 - 已补充针对性单测，并加强 `llm_verify_hint_recovery` benchmark 对双 evidence 文件的检查。
 
-下一阶段应进入 Phase 1：实现 `AgentLoopController`，把诊断、policy、repair apply、rerun/verify 决策收敛为统一 observe-decide-act-verify loop。
+Phase 1 已完成第一版：新增 `AgentLoopController`，把诊断、policy、repair apply、stop reason 和 auto-resume 判定收敛为统一 observe-decide-act-verify loop 控制器；`TaskRunner._remember()` 已接入该控制器，stage result 会持久化 `agent_loop` 摘要，完整 loop trace 写入 `logs/agent_loop/`。当前版本默认不主动递归重跑 pipeline，而是给出受 policy 约束的 `should_auto_resume` 和 `next_rerun_from`，为后续安全自动重跑打基础。
+
+下一阶段应进入 Phase 2：提升 LLM 在入口排序、冲突解释、unknown log 和 repair rerun_from 选择中的必要性。
 
 ## 1. 当前项目基线
 

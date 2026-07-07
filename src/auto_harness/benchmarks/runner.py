@@ -15,7 +15,7 @@ from auto_harness.config import HarnessConfig
 from auto_harness.dashboard import DashboardGenerator, DashboardServer
 from auto_harness.diagnostics import LogClassifier
 from auto_harness.memory import MemoryPromoter
-from auto_harness.models.base import read_json, write_json
+from auto_harness.models.base import read_json, to_plain, write_json
 from auto_harness.modules.env_deploy import EnvDeployModule
 from auto_harness.modules.env_solve import EnvSolveModule
 from auto_harness.modules.model_prepare import ModelPrepareModule
@@ -25,7 +25,7 @@ from auto_harness.modules.resource_plan import ResourcePlanner
 from auto_harness.modules.runner import RunnerModule
 from auto_harness.modules.verify import VerifyModule
 from auto_harness.models.result import StageResult
-from auto_harness.models.task import RuntimePolicy
+from auto_harness.models.task import ProjectSpec, RuntimePolicy, TaskSpec
 from auto_harness.providers import LLMResult
 from auto_harness.repair import RepairApplier, RepairLoopController, RepairPlanner, RepairPolicy
 from auto_harness.orchestrator import TaskRunner
@@ -223,6 +223,8 @@ class BenchmarkRunner:
                 return self._case_llm_repair_dependency_execute_loop(case)
             if case_id == "llm_verify_hint_recovery":
                 return self._case_llm_verify_hint_recovery(case)
+            if case_id == "agent_loop_dependency_self_repair_e2e":
+                return self._case_agent_loop_dependency_self_repair_e2e(case)
             return self._result(case, "skipped", "unknown benchmark case")
         except Exception as exc:  # noqa: BLE001 - benchmark report should continue
             return self._result(case, "failed", str(exc))
@@ -1814,6 +1816,87 @@ class BenchmarkRunner:
                 and bool(list((run_dir / "logs" / "agent_calls").glob("verify_*.json")))
             )
         return self._result(case, "passed" if ok else "failed", "LLM verify hint recovery verified")
+
+    def _case_agent_loop_dependency_self_repair_e2e(self, case: Dict) -> Dict:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = HarnessConfig(
+                runs_dir=str(root / "runs"),
+                memory_dir=str(root / "memory"),
+                model_cache_dir=str(root / "model_cache"),
+                agent_mode="gated_actor",
+                agent_enable_log_diagnosis=True,
+                agent_enable_repair_actions=True,
+                agent_auto_resume_after_repair=True,
+            )
+            runner = TaskRunner(config)
+            task_id = "bench-agent-loop"
+            runtime = RuntimePolicy(
+                workspace_root=str(root / "runs" / task_id / "workspace"),
+                allow_dependency_install=True,
+            )
+            runner.store.create_task(TaskSpec(
+                task_id=task_id,
+                project=ProjectSpec(name="agent-loop-demo", repo_url="local"),
+                runtime=runtime,
+                created_at="2026-07-07T00:00:00Z",
+            ))
+            provider = _FakeLLMProvider(json.dumps({
+                "stage": "runner",
+                "status": "ok",
+                "confidence": 0.86,
+                "diagnosis": {
+                    "category": "dependency_missing",
+                    "root_cause": "ModuleNotFoundError: cv2",
+                    "confidence": 0.86,
+                },
+                "actions": [
+                    {
+                        "type": "install_package",
+                        "confidence": 0.8,
+                        "payload": {"package": "opencv-python-headless"},
+                        "requires": {"dependency_install": True, "network": True, "source_edit": False},
+                    }
+                ],
+                "plan_delta": {"rerun_from": "env_deploy"},
+            }))
+            runner._agent_provider = lambda: provider
+            stage_result = StageResult("runner", "failed", "service failed", {"diagnosis": {"category": "unknown", "confidence": 0.2}})
+            summary = runner._agent_loop_controller().handle_stage_result(
+                task_id,
+                "runner",
+                stage_result,
+                {"frameworks": ["gradio"]},
+                runtime,
+                "env_deploy",
+                command_runner=lambda cmd, cwd, timeout_seconds: {"exit_code": 0, "stdout": "installed", "stderr": "", "timed_out": False},
+            )
+            run_dir = root / "runs" / task_id
+            write_json(run_dir / "reports" / "pipeline_results.json", {"runner": to_plain(stage_result)})
+
+            def trace_urlopen(req, timeout):
+                trace = req.full_url.split("_auto_harness_trace=")[1]
+                return _FakeResponse("handled %s" % trace)
+
+            verify_result = VerifyModule(urlopen=trace_urlopen).verify(
+                run_dir,
+                {"verify_hint": {"endpoint": "http://127.0.0.1:8000", "request": {"method": "GET"}}},
+                {"pid": 1234, "expected_port": 8000, "service_ready": True},
+            )
+            pipeline = read_json(run_dir / "reports" / "pipeline_results.json")
+            trace_files = list((run_dir / "logs" / "agent_calls").glob("runner_*.json"))
+            trace_has_policy = bool(trace_files) and bool(read_json(trace_files[0]).get("policy_result"))
+            ok = (
+                stage_result.status == "failed"
+                and summary.get("policy", {}).get("allowed") is True
+                and summary.get("apply_result", {}).get("executed") is True
+                and summary.get("should_auto_resume") is True
+                and verify_result.status == "passed"
+                and pipeline.get("runner", {}).get("data", {}).get("agent_loop", {}).get("should_auto_resume") is True
+                and trace_has_policy
+                and bool(list((run_dir / "logs" / "agent_loop").glob("runner_*.json")))
+            )
+        return self._result(case, "passed" if ok else "failed", "Agent loop dependency self-repair verified")
 
     def _stage_update_count(self, run_dir: Path) -> Dict[str, int]:
         counts: Dict[str, int] = {}

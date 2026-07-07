@@ -264,6 +264,11 @@
       "id": "llm_verify_hint_recovery",
       "purpose": "验证默认 verify uncertain 后，LLM verify planner 能生成新的 trace request hint，并由 Python verify 重新验证成功",
       "expected_signal": "first verify uncertain, second verify pass with trace evidence"
+    },
+    {
+      "id": "agent_loop_dependency_self_repair_e2e",
+      "purpose": "验证 AgentLoopController 能把失败观察、LLM 诊断、policy、repair apply 和 verify pass 串成可审计闭环",
+      "expected_signal": "agent_loop summary, repair execution, policy trace, and final verify pass are recorded"
     }
   ]
 }

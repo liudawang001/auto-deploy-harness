@@ -57,6 +57,7 @@ class ReadinessAuditor:
         "llm_planner_policy_merge",
         "llm_repair_dependency_execute_loop",
         "llm_verify_hint_recovery",
+        "agent_loop_dependency_self_repair_e2e",
     ]
 
     EXTERNAL_GATES = [

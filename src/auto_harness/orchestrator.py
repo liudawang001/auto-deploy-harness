@@ -4,7 +4,7 @@ import subprocess
 from pathlib import Path
 from typing import Dict
 
-from auto_harness.agent import AgentDecisionEngine, AgentDiagnoser, AgentObservation, AgentTraceWriter, AgentVerifyPlanner
+from auto_harness.agent import AgentDecisionEngine, AgentDiagnoser, AgentLoopController, AgentObservation, AgentTraceWriter, AgentVerifyPlanner
 from auto_harness.config import HarnessConfig
 from auto_harness.agents.claude_code import ClaudeCodeExecutor
 from auto_harness.assets import HuggingFaceDownloader, ModelCache, ModelScopeDownloader
@@ -56,7 +56,7 @@ class TaskRunner:
         self.repair_policy = RepairPolicy()
         self.repair_applier = RepairApplier()
         self.repair_overlay = RepairOverlay()
-        self.repair_loop = RepairLoopController(config.max_repair_attempts)
+        self.repair_loop = RepairLoopController(config.agent_max_loop_iterations or config.max_repair_attempts)
 
     def create_spec(
         self,
@@ -374,6 +374,18 @@ class TaskRunner:
     def _agent_decision_engine(self, trace_writer: AgentTraceWriter) -> AgentDecisionEngine:
         return AgentDecisionEngine(self._agent_provider(), config=self.config, trace_writer=trace_writer)
 
+    def _agent_loop_controller(self) -> AgentLoopController:
+        return AgentLoopController(
+            self.config,
+            self.store,
+            self.memory,
+            self.repair_planner,
+            self.repair_policy,
+            self.repair_applier,
+            self.repair_loop,
+            self._agent_provider,
+        )
+
     def _agent_planner_enabled(self, stage: str) -> bool:
         return (
             self.config.agent_mode in ("planner", "gated_actor")
@@ -431,31 +443,32 @@ class TaskRunner:
         if entry:
             task = self.store.load_task(task_id)
             run_dir = self.store.run_dir(task_id)
-            self._maybe_agent_diagnose(task_id, stage, result, analysis, task.runtime, run_dir)
+            state = self.store.load_state(task_id)
+            loop_result = self._agent_loop_controller().handle_stage_result(
+                task_id,
+                stage,
+                result,
+                analysis,
+                task.runtime,
+                state.last_safe_stage,
+                memory_entry=entry,
+            )
             if results is not None:
                 results[stage] = to_plain(result)
             self._save_stage(task_id, stage, result)
-            repair_plan = self.repair_planner.propose(stage, result, analysis)
-            approval = self.repair_loop.load_approval(run_dir)
-            policy_result = self.repair_policy.check(repair_plan, task.runtime, operator_approval=approval)
-            state = self.store.load_state(task_id)
-            effective_policy = self.repair_loop.gate(run_dir, stage, entry, repair_plan, policy_result, state.last_safe_stage)
-            apply_result = self.repair_applier.apply(
-                run_dir,
-                repair_plan,
-                effective_policy,
-                execute=self._agent_repair_execute_enabled(task.runtime),
-                timeout_seconds=self.config.default_timeout_seconds,
-                allowed_commands=self.config.allowed_commands,
-            )
             self.store.events(task_id).append(
                 stage,
                 "memory_recorded",
                 {
                     "memory_id": entry["id"],
                     "signature": entry["signature"],
-                    "repair_plan": repair_plan,
-                    "repair_policy": effective_policy,
-                    "repair_apply": apply_result,
+                    "repair_plan": loop_result.get("repair_plan", {}),
+                    "repair_policy": loop_result.get("policy", {}),
+                    "repair_apply": loop_result.get("apply_result", {}),
+                    "agent_loop": {
+                        "next_rerun_from": loop_result.get("next_rerun_from"),
+                        "should_auto_resume": loop_result.get("should_auto_resume"),
+                        "stop_reason": loop_result.get("stop_reason"),
+                    },
                 },
             )

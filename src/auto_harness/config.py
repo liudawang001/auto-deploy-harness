@@ -32,6 +32,8 @@ class HarnessConfig:
     agent_enable_log_diagnosis: bool = False
     agent_enable_verify_planner: bool = False
     agent_enable_repair_actions: bool = False
+    agent_auto_resume_after_repair: bool = False
+    agent_max_loop_iterations: int = 2
     skills_dir: str = "skills"
     memory_dir: str = "memory"
     model_cache_dir: str = "model_cache"
@@ -86,6 +88,10 @@ class HarnessConfig:
             known["agent_enable_verify_planner"] = os.environ.get("AUTO_HARNESS_ENABLE_VERIFY_PLANNER") == "1"
         if os.environ.get("AUTO_HARNESS_ENABLE_REPAIR_ACTIONS"):
             known["agent_enable_repair_actions"] = os.environ.get("AUTO_HARNESS_ENABLE_REPAIR_ACTIONS") == "1"
+        if os.environ.get("AUTO_HARNESS_AGENT_AUTO_RESUME_AFTER_REPAIR"):
+            known["agent_auto_resume_after_repair"] = os.environ.get("AUTO_HARNESS_AGENT_AUTO_RESUME_AFTER_REPAIR") == "1"
+        if os.environ.get("AUTO_HARNESS_AGENT_MAX_LOOP_ITERATIONS"):
+            known["agent_max_loop_iterations"] = int(os.environ["AUTO_HARNESS_AGENT_MAX_LOOP_ITERATIONS"])
         return cls(**known)
 
     @property

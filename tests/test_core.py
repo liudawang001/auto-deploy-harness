@@ -2,6 +2,7 @@ import json
 import hashlib
 import io
 import os
+import shutil
 import tarfile
 import tempfile
 import threading
@@ -11,7 +12,7 @@ from contextlib import redirect_stdout
 from pathlib import Path
 
 from auto_harness.config import HarnessConfig
-from auto_harness.agent import AgentActionPolicy, AgentDecisionEngine, AgentDiagnoser, AgentTraceWriter, AgentVerifyPlanner
+from auto_harness.agent import AgentActionPolicy, AgentDecisionEngine, AgentDiagnoser, AgentLoopController, AgentTraceWriter, AgentVerifyPlanner
 from auto_harness.agent.schemas import AgentAction, AgentDecision, AgentObservation
 from auto_harness.benchmarks import BenchmarkRunner, LiveSmokePlanner
 from auto_harness.cli import _apply_cli_overrides, build_parser, main as cli_main
@@ -2312,11 +2313,12 @@ class CoreTests(unittest.TestCase):
         self.assertIn("llm_planner_policy_merge", ids)
         self.assertIn("llm_repair_dependency_execute_loop", ids)
         self.assertIn("llm_verify_hint_recovery", ids)
+        self.assertIn("agent_loop_dependency_self_repair_e2e", ids)
 
     def test_benchmark_runner_executes_all_fixture_cases(self):
         report = BenchmarkRunner().run(Path("tests/fixtures/benchmarks/manifest.json"))
         self.assertEqual(report["status"], "passed")
-        self.assertEqual(len(report["cases"]), 53)
+        self.assertEqual(len(report["cases"]), 54)
         self.assertTrue(all(case["status"] == "passed" for case in report["cases"]))
 
     def test_benchmark_cli_writes_output(self):
@@ -2836,6 +2838,136 @@ class CoreTests(unittest.TestCase):
             stored = json.loads((root / "runs" / "task-agent-diagnosis" / "reports" / "runner_result.json").read_text(encoding="utf-8"))
             self.assertEqual(stored["data"]["agent_diagnosis"]["diagnosis"]["category"], "dependency_missing")
             self.assertEqual(results["runner"]["data"]["agent_diagnosis"]["diagnosis"]["category"], "dependency_missing")
+
+    def test_agent_loop_repairs_dependency_and_auto_resumes(self):
+        runner, task_id, runtime, provider = self._agent_loop_fixture(
+            allow_dependency_install=True,
+            auto_resume=True,
+        )
+        runner._agent_provider = lambda: provider
+        result = StageResult("runner", "failed", "service failed", {"diagnosis": {"category": "unknown", "confidence": 0.2}})
+        summary = runner._agent_loop_controller().handle_stage_result(
+            task_id,
+            "runner",
+            result,
+            {"frameworks": ["gradio"]},
+            runtime,
+            "env_deploy",
+            command_runner=lambda cmd, cwd, timeout_seconds: {"exit_code": 0, "stdout": "installed", "stderr": "", "timed_out": False},
+        )
+        self.assertTrue(summary["should_auto_resume"])
+        self.assertEqual(summary["next_rerun_from"], "env_deploy")
+        self.assertEqual(summary["apply_result"]["executed_action_count"], 1)
+        self.assertEqual(result.data["agent_loop"]["stop_reason"], "")
+
+    def test_agent_loop_stops_after_max_iterations(self):
+        runner, task_id, runtime, provider = self._agent_loop_fixture(
+            allow_dependency_install=True,
+            auto_resume=True,
+            max_loop_iterations=1,
+        )
+        runner._agent_provider = lambda: provider
+        first = StageResult("runner", "failed", "service failed", {"diagnosis": {"category": "unknown", "confidence": 0.2}})
+        controller = runner._agent_loop_controller()
+        controller.handle_stage_result(
+            task_id,
+            "runner",
+            first,
+            {"frameworks": ["gradio"]},
+            runtime,
+            "env_deploy",
+            command_runner=lambda cmd, cwd, timeout_seconds: {"exit_code": 0, "stdout": "", "stderr": "", "timed_out": False},
+        )
+        second = StageResult("runner", "failed", "service failed", {"diagnosis": {"category": "unknown", "confidence": 0.2}})
+        summary = controller.handle_stage_result(task_id, "runner", second, {"frameworks": ["gradio"]}, runtime, "env_deploy")
+        self.assertEqual(summary["stop_reason"], "max_iterations")
+        self.assertFalse(summary["should_auto_resume"])
+
+    def test_agent_loop_does_not_resume_when_policy_rejected(self):
+        runner, task_id, runtime, provider = self._agent_loop_fixture(
+            allow_dependency_install=False,
+            auto_resume=True,
+        )
+        runner._agent_provider = lambda: provider
+        result = StageResult("runner", "failed", "service failed", {"diagnosis": {"category": "unknown", "confidence": 0.2}})
+        summary = runner._agent_loop_controller().handle_stage_result(task_id, "runner", result, {"frameworks": ["gradio"]}, runtime, "env_deploy")
+        self.assertEqual(summary["stop_reason"], "policy_rejected")
+        self.assertFalse(summary["should_auto_resume"])
+
+    def test_agent_loop_does_not_resume_when_action_failed(self):
+        runner, task_id, runtime, provider = self._agent_loop_fixture(
+            allow_dependency_install=True,
+            auto_resume=True,
+        )
+        runner._agent_provider = lambda: provider
+        result = StageResult("runner", "failed", "service failed", {"diagnosis": {"category": "unknown", "confidence": 0.2}})
+        summary = runner._agent_loop_controller().handle_stage_result(
+            task_id,
+            "runner",
+            result,
+            {"frameworks": ["gradio"]},
+            runtime,
+            "env_deploy",
+            command_runner=lambda cmd, cwd, timeout_seconds: {"exit_code": 1, "stdout": "", "stderr": "failed", "timed_out": False},
+        )
+        self.assertEqual(summary["stop_reason"], "action_failed")
+        self.assertFalse(summary["should_auto_resume"])
+
+    def test_agent_loop_records_stop_reason(self):
+        runner, task_id, runtime, provider = self._agent_loop_fixture(
+            allow_dependency_install=False,
+            auto_resume=True,
+        )
+        runner._agent_provider = lambda: provider
+        result = StageResult("runner", "failed", "service failed", {"diagnosis": {"category": "unknown", "confidence": 0.2}})
+        runner._agent_loop_controller().handle_stage_result(task_id, "runner", result, {"frameworks": ["gradio"]}, runtime, "env_deploy")
+        self.assertEqual(result.data["agent_loop"]["stop_reason"], "policy_rejected")
+
+    def _agent_loop_fixture(self, allow_dependency_install: bool, auto_resume: bool, max_loop_iterations: int = 2):
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: shutil.rmtree(root, ignore_errors=True))
+        config = HarnessConfig(
+            runs_dir=str(root / "runs"),
+            memory_dir=str(root / "memory"),
+            model_cache_dir=str(root / "model_cache"),
+            agent_mode="gated_actor",
+            agent_enable_log_diagnosis=True,
+            agent_enable_repair_actions=True,
+            agent_auto_resume_after_repair=auto_resume,
+            agent_max_loop_iterations=max_loop_iterations,
+        )
+        runner = TaskRunner(config)
+        task_id = "task-agent-loop"
+        runtime = RuntimePolicy(
+            workspace_root=str(root / "runs" / task_id / "workspace"),
+            allow_dependency_install=allow_dependency_install,
+        )
+        runner.store.create_task(TaskSpec(
+            task_id=task_id,
+            project=ProjectSpec(name="demo", repo_url="local"),
+            runtime=runtime,
+            created_at=utc_now_iso(),
+        ))
+        provider = FakeLLMProvider(json.dumps({
+            "stage": "runner",
+            "status": "ok",
+            "confidence": 0.86,
+            "diagnosis": {
+                "category": "dependency_missing",
+                "root_cause": "ModuleNotFoundError: cv2",
+                "confidence": 0.86,
+            },
+            "actions": [
+                {
+                    "type": "install_package",
+                    "confidence": 0.8,
+                    "payload": {"package": "opencv-python-headless"},
+                    "requires": {"dependency_install": True, "network": True, "source_edit": False},
+                }
+            ],
+            "plan_delta": {"rerun_from": "env_deploy"},
+        }))
+        return runner, task_id, runtime, provider
 
     def test_resume_uses_repair_rerun_from_effective_stage(self):
         with tempfile.TemporaryDirectory() as tmp:
