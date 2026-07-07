@@ -50,7 +50,9 @@ Phase 4 已完成基础可执行入口：新增 `agent-live-smoke` CLI、`tests/
 
 Phase 5 已完成：新增 `AgentMetricsCollector`，每次 pipeline 会写出 `reports/agent_metrics.json`；新增 `agent-metrics` CLI 汇总 runs；report 会展示 LLM calls、accepted/rejected actions、executed actions、repair attempts、auto resume、verify candidates、agent_helped 和 help_type。Benchmark 新增 `agent_metrics_paired_comparison`。
 
-下一阶段应进入 Phase 6：Memory 和 Skill Promotion 只吸收成功经验。
+Phase 6 已完成：`MemoryStore.remember_issue()` 默认把普通失败记忆标记为 `verified_success=false`；`MemoryPromoter` 只聚类满足 verified success、trace id、repair action hash、regression case 和无 high-risk policy reject 的条目。未验证 LLM diagnosis 只能用于相似问题检索，不能生成 skill promotion。新增 `test_memory_promotion_requires_verified_agent_success` 和 `test_memory_promotion_rejects_unverified_llm_suggestion`。
+
+下一阶段应进入 Phase 7：文档与面试证据整理。
 
 ## 1. 当前项目基线
 
@@ -1085,6 +1087,15 @@ memory promotion 会不会把错误修复固化？
 test_memory_promotion_requires_verified_agent_success
 test_memory_promotion_rejects_unverified_llm_suggestion
 ```
+
+### 11.5 当前完成状态
+
+已完成。关键落点：
+
+- `src/auto_harness/memory/store.py`：普通 issue memory 默认写入 `verified_success=false`、空 `verification_trace_id`、空 `repair_action_hash`、空 `regression_case_ids` 和 `policy_rejected_high_risk=false`。
+- `src/auto_harness/memory/promotion.py`：proposal 聚类前执行 verified success gate；缺少 trace、repair hash、regression case、verify pass、regression pass 或出现 high-risk policy reject 的条目不会被提升。
+- proposal cluster 会记录 `verified_success_count`、`verification_trace_ids`、`repair_action_hashes` 和 `regression_case_ids`，方便人工 review 追溯证据。
+- 相关 memory promotion 单测和 benchmark case 已按 verified success 语义更新。
 
 ## 12. Phase 7：文档与面试证据整理
 

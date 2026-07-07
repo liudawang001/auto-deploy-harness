@@ -132,12 +132,12 @@
     },
     {
       "id": "memory_promotion_approval_regression",
-      "purpose": "验证 memory promotion 必须先审批，并绑定 apply 后应运行的 fixture 回归用例",
-      "expected_signal": "apply is rejected before approval and succeeds after approval with regression binding"
+      "purpose": "验证 verified success memory promotion 必须先审批，并绑定 apply 后应运行的 fixture 回归用例",
+      "expected_signal": "only verified success memories generate proposal; apply is rejected before approval and succeeds after approval with regression binding"
     },
     {
       "id": "memory_promotion_apply_regression_run",
-      "purpose": "验证 memory promotion apply 后会自动执行 regression_binding 中的 benchmark case 并写出回归报告",
+      "purpose": "验证 verified success memory promotion apply 后会自动执行 regression_binding 中的 benchmark case 并写出回归报告",
       "expected_signal": "apply result contains passed regression report for selected case ids"
     },
     {
@@ -167,8 +167,8 @@
     },
     {
       "id": "memory_promotion_proposal",
-      "purpose": "验证高频 issue memory 会生成可审核的 skill 更新 proposal，默认不直接修改 skill",
-      "expected_signal": "memory-promote creates proposal json/md with review_required=true"
+      "purpose": "验证高频 verified success memory 会生成可审核的 skill 更新 proposal，默认不直接修改 skill",
+      "expected_signal": "memory-promote creates proposal json/md with review_required=true and verified success evidence"
     },
     {
       "id": "gradio_api_shape_variation",

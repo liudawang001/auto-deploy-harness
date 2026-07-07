@@ -467,7 +467,7 @@ PYTHONPATH=src python3 -m auto_harness.cli repair-approve --task-id <task-id> --
 
 ## Memory Promotion
 
-当 `memory/deployment_issues.jsonl` 中同类失败反复出现，可以生成可审核的 skill 更新建议：
+当 `memory/deployment_issues.jsonl` 中同类已验证成功经验反复出现，可以生成可审核的 skill 更新建议：
 
 ```bash
 PYTHONPATH=src python3 -m auto_harness.cli memory-promote --min-count 2
@@ -480,7 +480,9 @@ memory/promotions/<proposal_id>.json
 memory/promotions/<proposal_id>.md
 ```
 
-proposal 会包含 memory cluster、目标 skill、建议追加的 Markdown 片段、`approval` 审批元数据、`regression_binding` 回归 case 绑定和 `review_required=true`。先审批：
+普通失败或 LLM diagnosis 记忆仍会用于后续相似问题检索，但不会进入 skill promotion。只有同时满足 `verified_success=true`、存在 `verification_trace_id`、存在 `repair_action_hash`、绑定并通过 `regression_case_ids`，且没有 `policy_rejected_high_risk=true` 的条目，才会参与聚类生成 proposal。
+
+proposal 会包含 memory cluster、verified success evidence、目标 skill、建议追加的 Markdown 片段、`approval` 审批元数据、`regression_binding` 回归 case 绑定和 `review_required=true`。先审批：
 
 ```bash
 PYTHONPATH=src python3 -m auto_harness.cli memory-promote --approve --proposal memory/promotions/<proposal_id>.json --reviewer <name> --note "benchmarks passed"

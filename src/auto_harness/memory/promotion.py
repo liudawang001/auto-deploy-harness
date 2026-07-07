@@ -40,6 +40,7 @@ class MemoryPromoter:
             "status": "proposed" if proposals else "no_candidates",
             "min_count": min_count,
             "candidate_count": len(proposals),
+            "eligible_memory_count": sum(cluster["count"] for cluster in clusters),
             "output_dir": str(output_dir),
             "proposals": proposals,
         }
@@ -136,6 +137,8 @@ class MemoryPromoter:
                 continue
             if category and entry.get("category") != category:
                 continue
+            if not self._is_verified_success(entry):
+                continue
             frameworks = sorted(str(item) for item in (entry.get("frameworks") or []))
             key_data = {
                 "stage": entry.get("stage") or "unknown",
@@ -153,6 +156,9 @@ class MemoryPromoter:
                     "symptoms": [],
                     "root_causes": [],
                     "suggested_next_actions": [],
+                    "verification_trace_ids": [],
+                    "repair_action_hashes": [],
+                    "regression_case_ids": [],
                 },
             )
             cluster["count"] += 1
@@ -165,7 +171,37 @@ class MemoryPromoter:
                 cluster["root_causes"].append(str(entry["root_cause"]))
             if entry.get("suggested_next_action"):
                 cluster["suggested_next_actions"].append(str(entry["suggested_next_action"]))
+            if entry.get("verification_trace_id"):
+                cluster["verification_trace_ids"].append(str(entry["verification_trace_id"]))
+            if entry.get("repair_action_hash"):
+                cluster["repair_action_hashes"].append(str(entry["repair_action_hash"]))
+            for case_id in entry.get("regression_case_ids") or []:
+                if case_id:
+                    cluster["regression_case_ids"].append(str(case_id))
         return sorted(grouped.values(), key=lambda item: (-item["count"], item["key"]["stage"], item["key"]["category"]))
+
+    def _is_verified_success(self, entry: Dict) -> bool:
+        if entry.get("verified_success") is not True:
+            return False
+        if entry.get("policy_rejected_high_risk") is True or entry.get("rejected_high_risk_action") is True:
+            return False
+        if not str(entry.get("verification_trace_id") or "").strip():
+            return False
+        if not str(entry.get("repair_action_hash") or "").strip():
+            return False
+        regression_case_ids = entry.get("regression_case_ids")
+        if not isinstance(regression_case_ids, list) or not regression_case_ids:
+            return False
+        repair_status = str(entry.get("repair_action_status") or "success").lower()
+        if repair_status not in ("success", "succeeded", "passed", "executed"):
+            return False
+        verify_status = str(entry.get("verify_status") or "passed").lower()
+        if verify_status not in ("pass", "passed", "success", "succeeded"):
+            return False
+        regression_status = str(entry.get("regression_status") or "passed").lower()
+        if regression_status not in ("pass", "passed", "success", "succeeded"):
+            return False
+        return True
 
     def _proposal(self, cluster: Dict) -> Dict:
         key = cluster["key"]
@@ -182,6 +218,10 @@ class MemoryPromoter:
                 "frameworks": key["frameworks"],
                 "count": cluster["count"],
                 "memory_ids": cluster["memory_ids"],
+                "verified_success_count": cluster["count"],
+                "verification_trace_ids": self._unique_head(cluster["verification_trace_ids"], 10),
+                "repair_action_hashes": self._unique_head(cluster["repair_action_hashes"], 10),
+                "regression_case_ids": self._unique_head(cluster["regression_case_ids"], 12),
             },
             "target_skill": target_skill,
             "review_required": True,

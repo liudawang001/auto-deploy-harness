@@ -48,6 +48,11 @@ class MemoryStore:
             "symptom": symptom[-2000:],
             "root_cause": root_cause,
             "fix_status": "unresolved",
+            "verified_success": False,
+            "verification_trace_id": "",
+            "repair_action_hash": "",
+            "regression_case_ids": [],
+            "policy_rejected_high_risk": False,
             "suggested_next_action": self._suggest_next_action(stage, category),
             "source_result": {
                 "status": plain.get("status"),

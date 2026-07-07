@@ -83,6 +83,28 @@ class FakeStreamingResponse:
         return chunk
 
 
+def verified_memory_entry(memory_id: str, stage: str = "verify", category: str = "trace_not_observed", frameworks=None, **overrides):
+    entry = {
+        "id": memory_id,
+        "stage": stage,
+        "category": category,
+        "frameworks": list(frameworks or ["gradio"]),
+        "symptom": "response did not contain trace id",
+        "root_cause": "service API shape differs from fallback",
+        "suggested_next_action": "Use discovered API shape before fallback.",
+        "verified_success": True,
+        "verification_trace_id": "trace_%s" % memory_id,
+        "verify_status": "passed",
+        "repair_action_hash": hashlib.sha256(memory_id.encode("utf-8")).hexdigest()[:16],
+        "repair_action_status": "success",
+        "regression_case_ids": ["gradio_config_discovery"],
+        "regression_status": "passed",
+        "policy_rejected_high_risk": False,
+    }
+    entry.update(overrides)
+    return entry
+
+
 class FakeAgentExecutor:
     def __init__(self, text='{"risk":"low"}'):
         self.text = text
@@ -1135,6 +1157,10 @@ class CoreTests(unittest.TestCase):
             hits = store.query("verify", analysis)
             self.assertEqual(len(hits), 1)
             self.assertEqual(hits[0]["category"], "trace_not_observed")
+            self.assertIs(hits[0]["verified_success"], False)
+            self.assertEqual(hits[0]["verification_trace_id"], "")
+            self.assertEqual(hits[0]["repair_action_hash"], "")
+            self.assertEqual(hits[0]["regression_case_ids"], [])
             store.remember_issue("task1", "verify", StageResult("verify", "uncertain", "verify completed with uncertain"), analysis)
             self.assertEqual(len(store.query("verify", analysis)), 2)
 
@@ -1149,24 +1175,18 @@ class CoreTests(unittest.TestCase):
             skill_path = target_dir / "SKILL.md"
             skill_path.write_text("---\nname: verify-evidence\n---\n# Verify\n", encoding="utf-8")
             entries = [
-                {
-                    "id": "mem_1",
-                    "stage": "verify",
-                    "category": "trace_not_observed",
-                    "frameworks": ["gradio"],
-                    "symptom": "response did not contain trace id",
-                    "root_cause": "default API shape is wrong",
-                    "suggested_next_action": "Inspect /config and update verify_hint.",
-                },
-                {
-                    "id": "mem_2",
-                    "stage": "verify",
-                    "category": "trace_not_observed",
-                    "frameworks": ["gradio"],
-                    "symptom": "artifact and response did not contain trace id",
-                    "root_cause": "service endpoint differs from /api/predict",
-                    "suggested_next_action": "Use Gradio config discovery before fallback.",
-                },
+                verified_memory_entry(
+                    "mem_1",
+                    symptom="response did not contain trace id",
+                    root_cause="default API shape is wrong",
+                    suggested_next_action="Inspect /config and update verify_hint.",
+                ),
+                verified_memory_entry(
+                    "mem_2",
+                    symptom="artifact and response did not contain trace id",
+                    root_cause="service endpoint differs from /api/predict",
+                    suggested_next_action="Use Gradio config discovery before fallback.",
+                ),
             ]
             (memory_dir / "deployment_issues.jsonl").write_text(
                 "\n".join(json.dumps(entry, ensure_ascii=False) for entry in entries) + "\n",
@@ -1180,6 +1200,9 @@ class CoreTests(unittest.TestCase):
             self.assertTrue((memory_dir / "promotions" / ("%s.json" % proposal["proposal_id"])).exists())
             self.assertTrue(proposal["review_required"])
             self.assertEqual(proposal["approval"]["status"], "pending")
+            self.assertEqual(proposal["cluster"]["verified_success_count"], 2)
+            self.assertEqual(len(proposal["cluster"]["verification_trace_ids"]), 2)
+            self.assertEqual(len(proposal["cluster"]["repair_action_hashes"]), 2)
             self.assertIn("gradio_config_discovery", proposal["regression_binding"]["case_ids"])
             promoter = MemoryPromoter(memory_dir, skills_dir)
             proposal_path = memory_dir / "promotions" / ("%s.json" % proposal["proposal_id"])
@@ -1194,6 +1217,59 @@ class CoreTests(unittest.TestCase):
             self.assertTrue((memory_dir / "promotions" / ("%s.regression.json" % proposal["proposal_id"])).exists())
             self.assertIn("Memory Promotion: verify / trace_not_observed", skill_path.read_text(encoding="utf-8"))
 
+    def test_memory_promotion_requires_verified_agent_success(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            memory_dir = root / "memory"
+            memory_dir.mkdir()
+            skills_dir = root / "skills"
+            (skills_dir / "verify-evidence").mkdir(parents=True)
+            (skills_dir / "verify-evidence" / "SKILL.md").write_text("---\nname: verify-evidence\n---\n# Verify\n", encoding="utf-8")
+            entries = [
+                verified_memory_entry("mem_ok_1"),
+                verified_memory_entry("mem_ok_2"),
+                verified_memory_entry("mem_rejected", policy_rejected_high_risk=True),
+            ]
+            (memory_dir / "deployment_issues.jsonl").write_text(
+                "\n".join(json.dumps(entry, ensure_ascii=False) for entry in entries) + "\n",
+                encoding="utf-8",
+            )
+            result = MemoryPromoter(memory_dir, skills_dir).propose(min_count=2)
+            self.assertEqual(result["status"], "proposed")
+            self.assertEqual(result["eligible_memory_count"], 2)
+            self.assertEqual(result["proposals"][0]["cluster"]["verified_success_count"], 2)
+            self.assertNotIn("mem_rejected", result["proposals"][0]["cluster"]["memory_ids"])
+
+    def test_memory_promotion_rejects_unverified_llm_suggestion(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            memory_dir = root / "memory"
+            memory_dir.mkdir()
+            skills_dir = root / "skills"
+            (skills_dir / "verify-evidence").mkdir(parents=True)
+            (skills_dir / "verify-evidence" / "SKILL.md").write_text("---\nname: verify-evidence\n---\n# Verify\n", encoding="utf-8")
+            entries = [
+                {
+                    "id": "mem_llm_1",
+                    "stage": "verify",
+                    "category": "trace_not_observed",
+                    "frameworks": ["gradio"],
+                    "symptom": "LLM suggested /api/predict",
+                    "root_cause": "only diagnosis exists",
+                    "suggested_next_action": "Try LLM suggestion.",
+                    "verified_success": False,
+                },
+                verified_memory_entry("mem_missing_regression", regression_case_ids=[]),
+            ]
+            (memory_dir / "deployment_issues.jsonl").write_text(
+                "\n".join(json.dumps(entry, ensure_ascii=False) for entry in entries) + "\n",
+                encoding="utf-8",
+            )
+            result = MemoryPromoter(memory_dir, skills_dir).propose(min_count=1)
+            self.assertEqual(result["status"], "no_candidates")
+            self.assertEqual(result["eligible_memory_count"], 0)
+            self.assertEqual(result["proposals"], [])
+
     def test_memory_promote_cli_outputs_proposal(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1204,14 +1280,14 @@ class CoreTests(unittest.TestCase):
             (skills_dir / "verify-evidence" / "SKILL.md").write_text("---\nname: verify-evidence\n---\n# Verify\n", encoding="utf-8")
             for index in range(2):
                 with (memory_dir / "deployment_issues.jsonl").open("a", encoding="utf-8") as f:
-                    f.write(json.dumps({
-                        "id": "mem_%s" % index,
-                        "stage": "verify",
-                        "category": "api_shape_unknown",
-                        "frameworks": ["streamlit"],
-                        "symptom": "streamlit trace not observed %s" % index,
-                        "suggested_next_action": "Add browser verify rule.",
-                    }, ensure_ascii=False) + "\n")
+                    f.write(json.dumps(verified_memory_entry(
+                        "mem_%s" % index,
+                        category="api_shape_unknown",
+                        frameworks=["streamlit"],
+                        symptom="streamlit trace not observed %s" % index,
+                        suggested_next_action="Add browser verify rule.",
+                        regression_case_ids=["streamlit_error_page"],
+                    ), ensure_ascii=False) + "\n")
             config_path = root / "config.json"
             config_path.write_text(json.dumps({
                 "memory_dir": str(memory_dir),

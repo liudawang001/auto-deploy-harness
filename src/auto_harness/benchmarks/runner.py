@@ -56,6 +56,28 @@ class _FakeResponse:
         return chunk
 
 
+def _verified_memory_entry(memory_id: str, stage: str = "verify", category: str = "trace_not_observed", frameworks=None, **overrides) -> Dict:
+    entry = {
+        "id": memory_id,
+        "stage": stage,
+        "category": category,
+        "frameworks": list(frameworks or ["gradio"]),
+        "symptom": "trace missing after initial verify",
+        "root_cause": "service API shape changed",
+        "suggested_next_action": "Use discovered API shape before fallback.",
+        "verified_success": True,
+        "verification_trace_id": "trace_%s" % memory_id,
+        "verify_status": "passed",
+        "repair_action_hash": "repair_%s" % memory_id,
+        "repair_action_status": "success",
+        "regression_case_ids": ["gradio_config_discovery"],
+        "regression_status": "passed",
+        "policy_rejected_high_risk": False,
+    }
+    entry.update(overrides)
+    return entry
+
+
 class _FakeBrowserBackend:
     def load(self, url: str, timeout_ms: int = 15000, screenshot_path: Path = None) -> Dict:
         trace = url.split("_auto_harness_trace=", 1)[1] if "_auto_harness_trace=" in url else ""
@@ -848,24 +870,8 @@ class BenchmarkRunner:
             skill_path = skills_dir / "verify-evidence" / "SKILL.md"
             skill_path.write_text("---\nname: verify-evidence\n---\n# Verify\n", encoding="utf-8")
             entries = [
-                {
-                    "id": "mem_1",
-                    "stage": "verify",
-                    "category": "trace_not_observed",
-                    "frameworks": ["gradio"],
-                    "symptom": "trace missing",
-                    "root_cause": "api shape changed",
-                    "suggested_next_action": "use config discovery",
-                },
-                {
-                    "id": "mem_2",
-                    "stage": "verify",
-                    "category": "trace_not_observed",
-                    "frameworks": ["gradio"],
-                    "symptom": "trace missing again",
-                    "root_cause": "api shape changed",
-                    "suggested_next_action": "bind gradio regression",
-                },
+                _verified_memory_entry("mem_1", symptom="trace missing", suggested_next_action="use config discovery"),
+                _verified_memory_entry("mem_2", symptom="trace missing again", suggested_next_action="bind gradio regression"),
             ]
             (memory_dir / "deployment_issues.jsonl").write_text(
                 "\n".join(json.dumps(item, ensure_ascii=False) for item in entries) + "\n",
@@ -897,24 +903,8 @@ class BenchmarkRunner:
             skill_path = skills_dir / "verify-evidence" / "SKILL.md"
             skill_path.write_text("---\nname: verify-evidence\n---\n# Verify\n", encoding="utf-8")
             entries = [
-                {
-                    "id": "mem_apply_1",
-                    "stage": "verify",
-                    "category": "trace_not_observed",
-                    "frameworks": ["gradio"],
-                    "symptom": "trace missing",
-                    "root_cause": "api shape changed",
-                    "suggested_next_action": "run bound gradio regressions",
-                },
-                {
-                    "id": "mem_apply_2",
-                    "stage": "verify",
-                    "category": "trace_not_observed",
-                    "frameworks": ["gradio"],
-                    "symptom": "trace missing again",
-                    "root_cause": "api shape changed",
-                    "suggested_next_action": "run bound gradio regressions",
-                },
+                _verified_memory_entry("mem_apply_1", symptom="trace missing", suggested_next_action="run bound gradio regressions"),
+                _verified_memory_entry("mem_apply_2", symptom="trace missing again", suggested_next_action="run bound gradio regressions"),
             ]
             (memory_dir / "deployment_issues.jsonl").write_text(
                 "\n".join(json.dumps(item, ensure_ascii=False) for item in entries) + "\n",
@@ -1178,24 +1168,18 @@ class BenchmarkRunner:
             skill_path = target_dir / "SKILL.md"
             skill_path.write_text("---\nname: verify-evidence\n---\n# Verify\n", encoding="utf-8")
             memories = [
-                {
-                    "id": "mem_gradio_trace_1",
-                    "stage": "verify",
-                    "category": "trace_not_observed",
-                    "frameworks": ["gradio"],
-                    "symptom": "HTTP response did not contain trace id",
-                    "root_cause": "Gradio API shape differs from fallback",
-                    "suggested_next_action": "Read /config before selecting verify request.",
-                },
-                {
-                    "id": "mem_gradio_trace_2",
-                    "stage": "verify",
-                    "category": "trace_not_observed",
-                    "frameworks": ["gradio"],
-                    "symptom": "artifact did not include current trace id",
-                    "root_cause": "Default /api/predict endpoint does not match app",
-                    "suggested_next_action": "Generate a verify_hint from discovered dependency api_name.",
-                },
+                _verified_memory_entry(
+                    "mem_gradio_trace_1",
+                    symptom="HTTP response did not contain trace id",
+                    root_cause="Gradio API shape differs from fallback",
+                    suggested_next_action="Read /config before selecting verify request.",
+                ),
+                _verified_memory_entry(
+                    "mem_gradio_trace_2",
+                    symptom="artifact did not include current trace id",
+                    root_cause="Default /api/predict endpoint does not match app",
+                    suggested_next_action="Generate a verify_hint from discovered dependency api_name.",
+                ),
             ]
             (memory_dir / "deployment_issues.jsonl").write_text(
                 "\n".join(json.dumps(item, ensure_ascii=False) for item in memories) + "\n",

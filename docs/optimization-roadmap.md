@@ -648,7 +648,7 @@ memory cluster
 - memory 不是无限堆积。
 - 高频问题会沉淀为稳定部署策略。
 
-当前状态：已完成 `memory-promote` CLI。默认读取 `memory/deployment_issues.jsonl` 并按 stage/category/frameworks 聚类，生成 `memory/promotions/<proposal_id>.json` 和 `.md` 审核稿；proposal 包含审批元数据和 `regression_binding`。`--apply --proposal <path>` 在审批前会返回 `approval_required`，必须先用 `--approve --proposal <path>` 写入审批记录。审批后 apply 会默认运行绑定 benchmark 子集，并写出 `<proposal_id>.regression.json`；如回归失败 CLI 返回非 0。后续补 promotion dashboard。
+当前状态：已完成 `memory-promote` CLI。默认读取 `memory/deployment_issues.jsonl`，但只聚类 verified success 条目：必须有 `verified_success=true`、`verification_trace_id`、`repair_action_hash`、非空 `regression_case_ids`、verify/regression pass，且没有 high-risk policy reject。普通失败或未验证 LLM diagnosis 只用于相似问题检索，不会生成 skill promotion。proposal 会写入 `memory/promotions/<proposal_id>.json` 和 `.md` 审核稿，包含审批元数据、verified success evidence 和 `regression_binding`。`--apply --proposal <path>` 在审批前会返回 `approval_required`，必须先用 `--approve --proposal <path>` 写入审批记录。审批后 apply 会默认运行绑定 benchmark 子集，并写出 `<proposal_id>.regression.json`；如回归失败 CLI 返回非 0。后续补 promotion dashboard。
 
 ## 9. 测试与 Benchmark 计划
 

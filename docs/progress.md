@@ -9,7 +9,7 @@
   - Phase 2 LLM 日志诊断与受控 repair action 已完成第一版：新增 `AgentDiagnoser`，未知/低置信失败可生成结构化 diagnosis 和 repair action；`RepairPolicy` 会拒绝越权/不安全包名，`RepairApplier` 在显式 execute 条件下记录受控 `install_package` 命令结果，并对密钥值脱敏。
   - Phase 3 LLM verify planner 已完成第一版：当首次 verify uncertain 且服务存活时，`AgentVerifyPlanner` 可生成新的 GET/POST trace request hint；Python verify 会二次请求并仍以 trace evidence 判定成功，不能把 HTTP 200 作为成功。
   - 配置新增 `agent_mode`、`agent_provider`、`agent_enable_analyze_planner`、`agent_enable_log_diagnosis`、`agent_enable_verify_planner`、`agent_enable_repair_actions` 等开关，默认全部关闭或安全模式，保持现有 deterministic pipeline 行为。
-  - Benchmark cases 从 50 个扩展到 55 个，新增 `llm_planner_policy_merge`、`llm_repair_dependency_execute_loop`、`llm_verify_hint_recovery`、`agent_loop_dependency_self_repair_e2e`、`agent_prompt_injection_defense`。
+  - Benchmark cases 从 50 个扩展到 56 个，新增 `llm_planner_policy_merge`、`llm_repair_dependency_execute_loop`、`llm_verify_hint_recovery`、`agent_loop_dependency_self_repair_e2e`、`agent_prompt_injection_defense` 和 `agent_metrics_paired_comparison`。
 - Agent Loop 控制器阶段：
   - 新增 `AgentLoopController`，统一处理 failure observation、LLM diagnosis、repair plan、repair policy、repair apply、stop reason 和 auto-resume 判定。
   - 新增配置 `agent_auto_resume_after_repair` 和 `agent_max_loop_iterations`，默认关闭自动恢复，避免改变现有 deterministic pipeline 行为。
@@ -42,6 +42,11 @@
   - Orchestrator 会在 report 前写出 `reports/agent_metrics.json`，report 增加 Agent Metrics 小节。
   - CLI 新增 `agent-metrics`，可汇总本地 runs 并输出机器可读 JSON。
   - Benchmark 新增 `agent_metrics_paired_comparison`，验证 agent off/on paired run 可以生成可比较指标。
+- Phase 6 verified memory promotion：
+  - `MemoryStore.remember_issue()` 为普通失败记忆写入 `verified_success=false`、空 `verification_trace_id`、空 `repair_action_hash`、空 `regression_case_ids` 和 `policy_rejected_high_risk=false`，避免未验证诊断被误提升。
+  - `MemoryPromoter` 只聚类 verified success memory：必须有 trace id、repair action hash、regression case、verify/regression pass，并且没有 high-risk policy reject。
+  - proposal cluster 增加 `verified_success_count`、`verification_trace_ids`、`repair_action_hashes` 和 `regression_case_ids`，便于人工 review 追溯成功证据。
+  - 新增单测 `test_memory_promotion_requires_verified_agent_success`、`test_memory_promotion_rejects_unverified_llm_suggestion`；相关 memory promotion benchmark 已按 verified success 语义更新。
 - 最终完成度审计阶段：
   - 新增 `ReadinessAuditor`，从当前仓库关键代码、进度文档和 benchmark manifest 生成机器可读完成度审计报告。
   - CLI 新增 `readiness --benchmark-report <path> --output <path>`，默认输出 `reports/readiness_audit.json`；报告会区分 `local_readiness_percent` 和真实联网/GPU/Docker/vLLM 外部验收门。
@@ -220,7 +225,7 @@
 
 - 已完成 P0/P1 核心控制链路：下载缓存、断点续传、verify 防误判、OpenAPI/OpenAI-compatible verify、repair plan/policy/resume、memory promotion 审批与回归、benchmark 回归体系已经成型。
 - 已完成本机可验证的真实开源模型部署能力：Hugging Face / ModelScope 下载、Git LFS / submodule 检测与受控准备、Gradio/Streamlit/browser verify、PyTorch CPU/CUDA wheel 求解、GPU 包兼容矩阵、本地 E2E fixture matrix、Docker GPU/cache backend、静态/HTTP dashboard、本地持久化队列、并发 worker pool、跨进程 claim lock、stale lock recovery、GPU 探测调度和部署产物包已具备。
-- 新增 readiness audit 作为完成度门禁，当前 `local_readiness_percent=100`，benchmark manifest 覆盖 55 个本地 fixture case。
+- 新增 readiness audit 作为完成度门禁，当前 `local_readiness_percent=100`，benchmark manifest 覆盖 56 个本地 fixture case。
 - 真实联网长耗时 E2E、真实 Docker/GPU smoke、真实 vLLM 服务 smoke、更多模型仓库源和分布式资源锁被归档为外部验收 gate；它们需要具备网络、token、磁盘、Linux GPU 或分布式环境后执行，不阻塞 Mac 本机开发闭环。
 - 继续执行 P0/P1 优化任务：
   - `ModelCache.reserve` 会为缓存目录写入 `.auto_harness_asset.json`，记录 source、repo id、revision、origin、asset id 和 cache key。
@@ -465,13 +470,15 @@
 - 下载器目前使用 stdlib HTTP 实现，已支持并发下载、有限重试、etag 缓存失效和远端提供 sha256 时的校验；后续仍需扩展更多模型源和真实大文件 E2E。
 - Repair plan 当前会生成受控 artifacts；在 `gated_actor`、runtime policy、repair policy 和 command policy 全部通过时，可执行受控 `install_package`，但仍不会直接执行任意 shell 或修改源码。
 
-### Agent 面试向优化进度
+### Agent 优化进度
 
 - 已新增并纳入 `docs/agent-interview-optimization-execution-plan.md`，用于指导后续从 LLM-assisted workflow 升级为可审计 Agent loop。
-- 已完成 Phase 0 安全与证据补强：
-  - Agent trace 支持在 policy validate 后回写 `policy_result`，能审计 accepted / rejected action。
-  - Verify HTTP evidence 分 attempt 保存，避免 LLM verify planner 覆盖初始 uncertain evidence。
-  - `agent_diagnosis` 会持久化到 stage result，并同步更新 pipeline results。
-  - `gated_actor` 模式可启用 analyze planner，但 analyze 阶段仍不合并可执行 repair action。
-  - `RepairApplier` 执行前接入 `allowed_commands`，orchestrator repair apply 已传入全局命令白名单。
-- 下一步：进入 Phase 1，抽象 `AgentLoopController`，形成统一 observe-decide-act-verify 闭环。
+- 已完成 Phase 0-6：
+  - Phase 0：安全与证据补强。
+  - Phase 1：`AgentLoopController` 统一 observe-decide-act-verify loop。
+  - Phase 2：run candidate ranking、verify candidates、repair rerun_from schema 化。
+  - Phase 3：prompt input safety、secret redaction、prompt injection 风险标注和 trace 脱敏。
+  - Phase 4：`agent-live-smoke` 基础入口、live fixture 和无密钥 manifest。
+  - Phase 5：`AgentMetricsCollector`、`agent-metrics` CLI 和 paired comparison benchmark。
+  - Phase 6：Memory/Skill promotion 只吸收 verified success，未验证 LLM diagnosis 不能 promotion。
+- 下一步：进入 Phase 7，整理 `agent-architecture.md`、`agent-safety-model.md` 和 `agent-evaluation-report.md`。
