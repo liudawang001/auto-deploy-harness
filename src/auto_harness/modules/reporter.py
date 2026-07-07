@@ -34,6 +34,19 @@ class ReportGenerator:
                 "",
             ])
         verify = results.get("verify", {}).get("data", {})
+        run_selection = self._run_candidate_selection(results)
+        if run_selection:
+            lines.extend([
+                "## Run Candidate Selection",
+                "",
+                "- Command: `%s`" % " ".join(str(part) for part in run_selection.get("cmd", [])),
+                "- Score: `%.2f`" % float(run_selection.get("score") or 0),
+                "- Selected by: `%s`" % run_selection.get("selected_by", ""),
+                "- Reasons:",
+            ])
+            for reason in run_selection.get("score_reasons") or []:
+                lines.append("  - %s" % reason)
+            lines.append("")
         if verify:
             lines.extend([
                 "## Verify",
@@ -68,6 +81,22 @@ class ReportGenerator:
             lines.append("")
         report_path.write_text("\n".join(lines), encoding="utf-8")
         return StageResult("report", "passed", "report generated", {"report_path": str(report_path)}, evidence=[str(report_path)])
+
+    def _run_candidate_selection(self, results: Dict[str, Dict]) -> Dict:
+        runner = results.get("runner", {}).get("data", {})
+        if isinstance(runner, dict) and isinstance(runner.get("candidate_selection"), dict):
+            return runner["candidate_selection"]
+        analyze = results.get("analyze", {}).get("data", {})
+        candidates = analyze.get("run_candidates") if isinstance(analyze, dict) else []
+        if candidates:
+            candidate = candidates[0]
+            return {
+                "cmd": candidate.get("cmd", []),
+                "score": float(candidate.get("score") or candidate.get("confidence") or 0),
+                "score_reasons": list(candidate.get("score_reasons") or []),
+                "selected_by": candidate.get("selected_by") or candidate.get("preferred_by") or "deterministic",
+            }
+        return {}
 
     def _format_stage_list(self, stages) -> str:
         names = [stage for stage in stages if isinstance(stage, str) and stage]

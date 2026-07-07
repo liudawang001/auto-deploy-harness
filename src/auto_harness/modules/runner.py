@@ -48,6 +48,7 @@ class RunnerModule:
                 "dry-run run candidate selected",
                 {
                     "candidate": candidate,
+                    "candidate_selection": self._candidate_selection(candidate),
                     "effective_candidate": effective_candidate,
                     "execution_backend": execution_backend,
                     "sandbox": sandbox,
@@ -60,12 +61,13 @@ class RunnerModule:
                 "runner",
                 "failed",
                 "command rejected by policy",
-                {
-                    "cmd": effective_candidate["cmd"],
-                    "original_cmd": candidate["cmd"],
-                    "allowed_commands": list(allowed_commands),
-                    "execution_backend": execution_backend,
-                    "sandbox": sandbox,
+            {
+                "cmd": effective_candidate["cmd"],
+                "original_cmd": candidate["cmd"],
+                "candidate_selection": self._candidate_selection(candidate),
+                "allowed_commands": list(allowed_commands),
+                "execution_backend": execution_backend,
+                "sandbox": sandbox,
                 },
                 error="disallowed command: %s" % effective_candidate["cmd"][0],
             )
@@ -90,6 +92,7 @@ class RunnerModule:
             "pid": proc.pid,
             "cmd": effective_candidate["cmd"],
             "original_cmd": candidate["cmd"],
+            "candidate_selection": self._candidate_selection(candidate),
             "expected_port": port,
             "service_ready": ready,
             "log_path": str(log_path),
@@ -102,6 +105,14 @@ class RunnerModule:
             except OSError:
                 data["diagnosis"] = self.log_classifier.classify("")
         return StageResult("runner", status, "service process started" if status == "passed" else "service process exited", data)
+
+    def _candidate_selection(self, candidate: Dict) -> Dict:
+        return {
+            "cmd": candidate.get("cmd", []),
+            "score": float(candidate.get("score") or candidate.get("confidence") or 0),
+            "score_reasons": list(candidate.get("score_reasons") or []),
+            "selected_by": candidate.get("selected_by") or candidate.get("preferred_by") or "deterministic",
+        }
 
     def _effective_candidate(
         self,

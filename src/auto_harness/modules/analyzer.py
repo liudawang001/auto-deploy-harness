@@ -38,6 +38,7 @@ class ProjectAnalyzer:
         frameworks = self._detect_frameworks(repo_dir, files)
         install_plan = self._install_plan(files)
         run_candidates = self._run_candidates(repo_dir, files, frameworks)
+        self._normalize_candidate_ranking(run_candidates)
         data: Dict = {
             "files": files[:200],
             "frameworks": frameworks,
@@ -236,6 +237,7 @@ class ProjectAnalyzer:
             "verify_hint_updated": False,
             "dependency_constraints_added": 0,
             "preferred_candidate_selected": False,
+            "candidate_rank_rejections": [],
             "skipped": False,
         }
         if decision.status != "ok" or decision.confidence < 0.5:
@@ -247,13 +249,20 @@ class ProjectAnalyzer:
             action_type = action.get("type")
             payload = action.get("payload") or {}
             if action_type == "add_run_candidate":
-                candidate = self._candidate_from_payload(payload)
+                candidate = self._candidate_from_payload(payload, action)
                 if candidate:
                     analysis.setdefault("run_candidates", []).append(candidate)
                     merged["run_candidates_added"] += 1
             elif action_type == "select_run_candidate":
-                if self._select_run_candidate(analysis, payload):
+                selected = self._select_run_candidate(analysis, payload, action)
+                if selected:
                     merged["preferred_candidate_selected"] = True
+                else:
+                    merged["candidate_rank_rejections"].append({
+                        "action_type": action_type,
+                        "reason": "selected command does not match an existing run candidate",
+                        "cmd": payload.get("cmd"),
+                    })
             elif action_type == "update_verify_hint":
                 verify_hint = payload.get("verify_hint") if isinstance(payload.get("verify_hint"), dict) else payload
                 if verify_hint:
@@ -266,27 +275,73 @@ class ProjectAnalyzer:
                     merged["dependency_constraints_added"] += 1
         return merged
 
-    def _candidate_from_payload(self, payload: Dict) -> Optional[Dict]:
+    def _candidate_from_payload(self, payload: Dict, action: Dict = None) -> Optional[Dict]:
         cmd = payload.get("cmd")
         if not isinstance(cmd, list):
             return None
+        action = action or {}
+        score = self._candidate_score(payload, action, default=payload.get("confidence") or action.get("confidence") or 0.5)
+        reasons = self._score_reasons(payload, action, "LLM added candidate")
         return {
             "cmd": list(cmd),
             "expected_port": int(payload.get("expected_port") or 0),
             "confidence": float(payload.get("confidence") or 0.5),
             "source": "llm_planner",
+            "score": score,
+            "score_reasons": reasons,
+            "selected_by": "llm_planner",
         }
 
-    def _select_run_candidate(self, analysis: Dict, payload: Dict) -> bool:
+    def _select_run_candidate(self, analysis: Dict, payload: Dict, action: Dict = None) -> bool:
         cmd = payload.get("cmd")
         candidates = analysis.get("run_candidates") or []
         for index, candidate in enumerate(candidates):
             if candidate.get("cmd") == cmd:
                 selected = candidates.pop(index)
                 selected["preferred_by"] = "llm_planner"
+                selected["selected_by"] = "combined" if selected.get("source") != "llm_planner" else "llm_planner"
+                selected["score"] = max(float(selected.get("score") or selected.get("confidence") or 0), self._candidate_score(payload, action or {}, default=action.get("confidence") if action else 0.75))
+                selected.setdefault("score_reasons", [])
+                selected["score_reasons"].extend(self._score_reasons(payload, action or {}, "LLM selected candidate"))
                 candidates.insert(0, selected)
                 return True
         return False
+
+    def _normalize_candidate_ranking(self, candidates: List[Dict]) -> None:
+        for candidate in candidates:
+            confidence = float(candidate.get("confidence") or 0)
+            candidate.setdefault("score", confidence)
+            candidate.setdefault("score_reasons", self._deterministic_score_reasons(candidate))
+            candidate.setdefault("selected_by", "deterministic")
+
+    def _deterministic_score_reasons(self, candidate: Dict) -> List[str]:
+        cmd = candidate.get("cmd") or []
+        reasons = ["deterministic analyzer confidence %.2f" % float(candidate.get("confidence") or 0)]
+        if len(cmd) >= 2:
+            reasons.append("matched entrypoint %s" % cmd[-1])
+        if candidate.get("expected_port"):
+            reasons.append("expected service port %s" % candidate.get("expected_port"))
+        return reasons
+
+    def _candidate_score(self, payload: Dict, action: Dict, default=0.5) -> float:
+        raw = payload.get("score", action.get("confidence", default))
+        try:
+            return max(0.0, min(1.0, float(raw)))
+        except (TypeError, ValueError):
+            return max(0.0, min(1.0, float(default or 0)))
+
+    def _score_reasons(self, payload: Dict, action: Dict, fallback: str) -> List[str]:
+        reasons = []
+        raw_reasons = payload.get("score_reasons")
+        if isinstance(raw_reasons, list):
+            reasons.extend(str(item) for item in raw_reasons if item)
+        if payload.get("reason"):
+            reasons.append(str(payload["reason"]))
+        if action.get("reason"):
+            reasons.append(str(action["reason"]))
+        if not reasons:
+            reasons.append(fallback)
+        return reasons
 
     def _dependency_constraint_command(self, payload: Dict) -> Optional[List[str]]:
         package = str(payload.get("package") or "")

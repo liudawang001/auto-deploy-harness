@@ -15,6 +15,10 @@
   - 新增配置 `agent_auto_resume_after_repair` 和 `agent_max_loop_iterations`，默认关闭自动恢复，避免改变现有 deterministic pipeline 行为。
   - `TaskRunner._remember()` 已接入 Agent loop，stage result 会保存 `data.agent_loop` 摘要，`logs/agent_loop/` 会保存完整 loop trace。
   - 新增 `agent_loop_dependency_self_repair_e2e` benchmark，覆盖 LLM 诊断缺依赖、policy 通过、受控 repair 执行、auto-resume 判定和最终 verify pass 的可审计闭环。
+- Phase 2.1 LLM run candidate ranking：
+  - analyze 阶段所有 run candidate 增加 `score`、`score_reasons`、`selected_by` 字段。
+  - LLM 可以提升已有候选排序并记录选择理由；选择不存在的 command 会在 merge 层记录 rejection，不会改变 deterministic candidate。
+  - `RunnerModule` 会把最终候选选择原因写入 `candidate_selection`，report 增加 `Run Candidate Selection` 小节。
 - 最终完成度审计阶段：
   - 新增 `ReadinessAuditor`，从当前仓库关键代码、进度文档和 benchmark manifest 生成机器可读完成度审计报告。
   - CLI 新增 `readiness --benchmark-report <path> --output <path>`，默认输出 `reports/readiness_audit.json`；报告会区分 `local_readiness_percent` 和真实联网/GPU/Docker/vLLM 外部验收门。

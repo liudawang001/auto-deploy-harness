@@ -139,6 +139,8 @@ export AUTO_HARNESS_ENABLE_REPAIR_ACTIONS=1
 
 `AgentLoopController` 会把失败观察、LLM diagnosis、repair plan、policy gate、repair apply、stop reason 和 auto-resume 判定写入 stage result 与 `runs/<task-id>/logs/agent_loop/`。自动恢复默认关闭；只有显式设置 `agent_auto_resume_after_repair=true`，且 policy、runtime 和 repair action 都通过时，才会产生 `should_auto_resume=true` 的恢复建议。
 
+run candidate 会记录统一 ranking 信息：`score`、`score_reasons` 和 `selected_by`。LLM planner 只能添加候选或提升已有候选排序，不能删除 deterministic candidate；最终选择原因会进入 runner result 和 report。
+
 ## Skill 与 Memory
 
 Agent 控制文档写在仓库内：

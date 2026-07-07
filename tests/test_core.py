@@ -287,6 +287,74 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(result.data["verify_hint"]["request"]["path"], "/generate")
             self.assertTrue(result.data["agent_decision"]["merged"]["verify_hint_updated"])
 
+    def test_llm_ranks_existing_run_candidate_with_reason(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            (repo / "app.py").write_text("print('app')\n", encoding="utf-8")
+            (repo / "main.py").write_text("print('main')\n", encoding="utf-8")
+            provider = FakeLLMProvider(json.dumps({
+                "stage": "analyze",
+                "status": "ok",
+                "confidence": 0.9,
+                "actions": [
+                    {
+                        "type": "select_run_candidate",
+                        "reason": "README indicates main.py is the actual server",
+                        "confidence": 0.9,
+                        "payload": {
+                            "cmd": [".venv/bin/python", "main.py"],
+                            "score": 0.92,
+                            "score_reasons": ["main.py is documented as the server entrypoint"],
+                        },
+                    }
+                ],
+            }))
+            result = ProjectAnalyzer(agent_engine=AgentDecisionEngine(provider), agent_mode="planner").analyze(repo)
+            selected = result.data["run_candidates"][0]
+            self.assertEqual(selected["cmd"], [".venv/bin/python", "main.py"])
+            self.assertEqual(selected["selected_by"], "combined")
+            self.assertGreaterEqual(selected["score"], 0.9)
+            self.assertIn("main.py is documented as the server entrypoint", selected["score_reasons"])
+
+            runner_result = RunnerModule().run(repo, result.data, execute=False)
+            self.assertEqual(runner_result.data["candidate_selection"]["selected_by"], "combined")
+            report = ReportGenerator().generate(
+                root,
+                {"project": {"name": "rank-demo", "repo_url": "local"}},
+                {"analyze": result.__dict__, "runner": runner_result.__dict__},
+            )
+            report_text = Path(report.data["report_path"]).read_text(encoding="utf-8")
+            self.assertIn("## Run Candidate Selection", report_text)
+            self.assertIn("main.py is documented as the server entrypoint", report_text)
+
+    def test_llm_cannot_select_unknown_run_candidate_without_add_action(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            repo.mkdir()
+            (repo / "app.py").write_text("print('app')\n", encoding="utf-8")
+            provider = FakeLLMProvider(json.dumps({
+                "stage": "analyze",
+                "status": "ok",
+                "confidence": 0.9,
+                "actions": [
+                    {
+                        "type": "select_run_candidate",
+                        "reason": "try an unknown file",
+                        "confidence": 0.9,
+                        "payload": {"cmd": [".venv/bin/python", "missing.py"], "score": 0.95},
+                    }
+                ],
+            }))
+            result = ProjectAnalyzer(agent_engine=AgentDecisionEngine(provider), agent_mode="planner").analyze(repo)
+            self.assertEqual(result.data["run_candidates"][0]["cmd"], [".venv/bin/python", "app.py"])
+            self.assertFalse(result.data["agent_decision"]["merged"]["preferred_candidate_selected"])
+            self.assertEqual(
+                result.data["agent_decision"]["merged"]["candidate_rank_rejections"][0]["reason"],
+                "selected command does not match an existing run candidate",
+            )
+
     def test_agent_planner_rejects_shell_string_command(self):
         decision = AgentDecision(
             stage="analyze",
