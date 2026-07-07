@@ -1,0 +1,2 @@
+# Intentionally empty. The live smoke expects the agent repair path to identify
+# the missing `rich` dependency from runner logs.

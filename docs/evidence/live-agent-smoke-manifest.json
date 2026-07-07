@@ -1,0 +1,39 @@
+{
+  "task_id": "sample-live-agent-smoke",
+  "provider_name": "xunfei",
+  "model_name": "",
+  "stage_summary": {
+    "runner": {
+      "status": "failed",
+      "summary": "service process exited"
+    },
+    "verify": {
+      "status": "passed",
+      "summary": "verify completed with pass"
+    }
+  },
+  "agent_action_count": 1,
+  "rejected_action_count": 0,
+  "repair_executed_count": 1,
+  "final_verify_status": "passed",
+  "artifact_paths": [
+    "task.json",
+    "state.json",
+    "events.jsonl",
+    "reports/pipeline_results.json",
+    "repairs/repair_plan.json",
+    "repairs/repair_apply_result.json",
+    "evidence/sample_verify.json",
+    "logs/agent_calls/runner_sample.json"
+  ],
+  "sha256": {
+    "task.json": "0000000000000000000000000000000000000000000000000000000000000000",
+    "state.json": "0000000000000000000000000000000000000000000000000000000000000000",
+    "events.jsonl": "0000000000000000000000000000000000000000000000000000000000000000",
+    "reports/pipeline_results.json": "0000000000000000000000000000000000000000000000000000000000000000",
+    "repairs/repair_plan.json": "0000000000000000000000000000000000000000000000000000000000000000",
+    "repairs/repair_apply_result.json": "0000000000000000000000000000000000000000000000000000000000000000",
+    "evidence/sample_verify.json": "0000000000000000000000000000000000000000000000000000000000000000",
+    "logs/agent_calls/runner_sample.json": "0000000000000000000000000000000000000000000000000000000000000000"
+  }
+}

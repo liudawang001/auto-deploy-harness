@@ -46,7 +46,9 @@ Phase 2.3 已完成：LLM diagnoser 可以输出 `rerun_from` 和 `rerun_reason`
 
 Phase 3 已完成：新增 `AgentInputSanitizer`，支持 secret redaction、prompt injection 风险标注、文件 denylist 和 trace 脱敏；analyzer/verify 的 selected files 会先脱敏再进入 LLM prompt。`AgentActionPolicy` 会拒绝恶意 README 诱导出的 shell/network run candidate。新增 `agent_prompt_injection_defense` benchmark。
 
-下一阶段应进入 Phase 4：真实 LLM 与真实服务 E2E 证据。
+Phase 4 已完成基础可执行入口：新增 `agent-live-smoke` CLI、`tests/fixtures/live/llm_repair_missing_dependency/` fixture、`LiveAgentSmokeRunner` manifest 生成器、`docs/live-agent-smoke.md` 和无 secret 样例 manifest。真实 Xunfei live smoke 仍需要操作者在本机通过环境变量注入密钥后执行，不会把密钥写入仓库。
+
+下一阶段应进入 Phase 5：Agent 评估指标。
 
 ## 1. 当前项目基线
 

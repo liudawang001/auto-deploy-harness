@@ -13,7 +13,7 @@ AI-Auto-Harness 是一个面向 AI 开源 demo 项目的自动部署与验证 Ag
 
 当前仓库已经包含：
 
-- CLI：`init`、`deploy`、`resume`、`status`、`report`、`package`、`dashboard`、`queue`、`readiness`、`llm-test`、`benchmark`、`live-smoke-plan`、`docker-smoke`、`repair-approve`、`memory-promote`。
+- CLI：`init`、`deploy`、`resume`、`status`、`report`、`package`、`dashboard`、`queue`、`readiness`、`llm-test`、`benchmark`、`live-smoke-plan`、`agent-live-smoke`、`docker-smoke`、`repair-approve`、`memory-promote`。
 - 任务状态存储：`task.json`、`state.json`、`events.jsonl`。
 - 确定性项目分析器。
 - 安全默认的 `env_solve`、`env_deploy`、`runner`、`verify`、report 模块。
@@ -386,6 +386,7 @@ PYTHONPATH=src python3 -m auto_harness.cli benchmark --manifest tests/fixtures/b
 ```bash
 PYTHONPATH=src python3 -m auto_harness.cli live-smoke-plan --include-long-running
 PYTHONPATH=src python3 -m auto_harness.cli live-smoke-plan --execution-backend docker
+PYTHONPATH=src python3 -m auto_harness.cli agent-live-smoke --provider xunfei --execute --output runs/live_smoke/manual
 ```
 
 该命令只输出 Hugging Face、ModelScope、Git LFS 等目标的建议执行命令、环境变量和预计耗时，不会触发下载或启动服务。

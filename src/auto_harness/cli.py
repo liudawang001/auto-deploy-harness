@@ -7,11 +7,13 @@ from auto_harness.artifacts import DeploymentPackageExporter
 from auto_harness.benchmarks import BenchmarkRunner, LiveSmokePlanner
 from auto_harness.dashboard import DashboardGenerator, DashboardServer
 from auto_harness.memory import MemoryPromoter
+from auto_harness.live_smoke import LiveAgentSmokeRunner
 from auto_harness.orchestrator import TaskRunner
 from auto_harness.providers import Message, MockLLMProvider, XunfeiSparkProvider
 from auto_harness.queue import DeploymentQueue
 from auto_harness.readiness import ReadinessAuditor
 from auto_harness.runtime import DockerSmokeChecker
+from auto_harness.utils.time import compact_timestamp
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -119,6 +121,12 @@ def build_parser() -> argparse.ArgumentParser:
     live_smoke.add_argument("--include-long-running", action="store_true", default=False)
     live_smoke.add_argument("--execution-backend", choices=["local", "docker"], default="local")
     live_smoke.add_argument("--execute", action="store_true", default=False)
+
+    agent_live_smoke = sub.add_parser("agent-live-smoke", help="run optional live LLM agent smoke and write redacted manifest")
+    agent_live_smoke.add_argument("--repo", default="tests/fixtures/live/llm_repair_missing_dependency")
+    agent_live_smoke.add_argument("--provider", choices=["mock", "xunfei"], default="xunfei")
+    agent_live_smoke.add_argument("--execute", action="store_true", default=False)
+    agent_live_smoke.add_argument("--output", default="")
 
     docker_smoke = sub.add_parser("docker-smoke", help="plan or probe Docker/GPU runtime readiness")
     docker_smoke.add_argument("--probe", action="store_true", default=False)
@@ -305,6 +313,12 @@ def main(argv=None) -> int:
         )
         print(json.dumps(plan, ensure_ascii=False, indent=2))
         return 0
+
+    if args.command == "agent-live-smoke":
+        output = Path(args.output) if args.output else Path("runs") / "live_smoke" / compact_timestamp()
+        result = LiveAgentSmokeRunner().run(Path(args.repo), args.provider, execute=args.execute, output_dir=output, config=config)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0 if result.get("status") == "completed" else 2
 
     if args.command == "docker-smoke":
         result = DockerSmokeChecker().check(

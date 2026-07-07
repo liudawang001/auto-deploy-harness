@@ -33,6 +33,10 @@
   - Agent trace 写入前会脱敏 raw output、parsed decision 和 policy result，避免 trace 中保存 secret value。
   - `AgentActionPolicy` 会拒绝 shell/network executable 作为 LLM run candidate，恶意 README 无法诱导执行 shell。
   - 新增 `agent_prompt_injection_defense` benchmark，验证 prompt/trace 无 secret、风险标注存在、shell action 被拒绝。
+- Phase 4 live agent smoke 基础能力：
+  - 新增 `agent-live-smoke` CLI，可对 live fixture 执行 provider 驱动的 agent smoke，并输出无密钥 manifest。
+  - 新增 `tests/fixtures/live/llm_repair_missing_dependency/`，用于验证缺依赖诊断、repair action 和 trace verify 的真实路径。
+  - 新增 `docs/live-agent-smoke.md` 和 `docs/evidence/live-agent-smoke-manifest.json` 样例；manifest 只记录 task/provider/model、阶段摘要、action 计数、repair 执行数、final verify status、artifact paths 和 sha256。
 - 最终完成度审计阶段：
   - 新增 `ReadinessAuditor`，从当前仓库关键代码、进度文档和 benchmark manifest 生成机器可读完成度审计报告。
   - CLI 新增 `readiness --benchmark-report <path> --output <path>`，默认输出 `reports/readiness_audit.json`；报告会区分 `local_readiness_percent` 和真实联网/GPU/Docker/vLLM 外部验收门。

@@ -24,6 +24,7 @@ from auto_harness.dashboard import DashboardServer
 from auto_harness.models.task import ProjectSpec, RuntimePolicy, TaskSpec
 from auto_harness.agents.base import AgentResult
 from auto_harness.memory import MemoryPromoter, MemoryStore
+from auto_harness.live_smoke import LiveAgentSmokeRunner
 from auto_harness.assets import GitLFSDetector, GitLFSProgressParser, GitSubmoduleDetector, ModelCache, ModelAssetDetector, ModelFileSelector
 from auto_harness.modules.analyzer import ProjectAnalyzer
 from auto_harness.modules.env_deploy import EnvDeployModule
@@ -2957,6 +2958,39 @@ class CoreTests(unittest.TestCase):
         plan = json.loads(output.getvalue())
         self.assertEqual(plan["kind"], "optional_live_e2e_smoke")
         self.assertFalse(plan["runs_commands"])
+
+    def test_live_smoke_manifest_redacts_sensitive_fields(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "task-live"
+            (run_dir / "reports").mkdir(parents=True)
+            (run_dir / "repairs").mkdir()
+            (run_dir / "evidence").mkdir()
+            (run_dir / "logs" / "agent_calls").mkdir(parents=True)
+            secret = "hf_1234567890abcdefghijklmnop"
+            (run_dir / "task.json").write_text(json.dumps({"task_id": "task-live", "secret": secret}), encoding="utf-8")
+            (run_dir / "state.json").write_text(json.dumps({"task_id": "task-live"}), encoding="utf-8")
+            (run_dir / "events.jsonl").write_text(json.dumps({"message": "created", "secret": secret}) + "\n", encoding="utf-8")
+            (run_dir / "reports" / "pipeline_results.json").write_text(json.dumps({
+                "verify": {"status": "passed", "summary": "verify completed with pass"}
+            }), encoding="utf-8")
+            (run_dir / "repairs" / "repair_plan.json").write_text(json.dumps({"actions": []}), encoding="utf-8")
+            (run_dir / "repairs" / "repair_apply_result.json").write_text(json.dumps({"executed_action_count": 1}), encoding="utf-8")
+            (run_dir / "evidence" / "verify_sample.json").write_text(json.dumps({"status": "passed"}), encoding="utf-8")
+            (run_dir / "logs" / "agent_calls" / "runner_sample.json").write_text(json.dumps({
+                "model": "sample-model",
+                "parsed_decision": {"actions": [{"type": "install_package"}]},
+                "policy_result": {"rejected_actions": []},
+                "raw_output_tail": secret,
+            }), encoding="utf-8")
+            output = Path(tmp) / "manifest.json"
+            manifest = LiveAgentSmokeRunner().build_manifest(run_dir, provider_name="xunfei", output_path=output)
+            text = output.read_text(encoding="utf-8")
+            self.assertNotIn(secret, text)
+            self.assertEqual(manifest["provider_name"], "xunfei")
+            self.assertEqual(manifest["model_name"], "sample-model")
+            self.assertEqual(manifest["agent_action_count"], 1)
+            self.assertEqual(manifest["repair_executed_count"], 1)
+            self.assertIn("task.json", manifest["sha256"])
 
     def test_docker_smoke_checker_plans_without_running_commands(self):
         calls = []
