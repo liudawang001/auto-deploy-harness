@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Dict
 
 from auto_harness.models.base import to_plain, write_json
+from auto_harness.agent.safety import AgentInputSanitizer
 from auto_harness.utils.time import compact_timestamp
 
 
@@ -27,15 +28,16 @@ class AgentTraceWriter:
         if not self.trace_dir:
             return ""
         self.trace_dir.mkdir(parents=True, exist_ok=True)
+        sanitizer = AgentInputSanitizer()
         payload = {
             "stage": stage,
             "provider": provider,
             "model": model,
             "prompt_hash": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
             "observation_summary": observation_summary,
-            "raw_output_tail": raw_output[-4000:],
-            "parsed_decision": to_plain(parsed_decision),
-            "policy_result": policy_result or {},
+            "raw_output_tail": sanitizer.scan_text(raw_output[-4000:])["text"],
+            "parsed_decision": sanitizer.redact_value(to_plain(parsed_decision)),
+            "policy_result": sanitizer.redact_value(policy_result or {}),
             "latency_ms": latency_ms,
             "created_at_ms": int(time.time() * 1000),
         }
@@ -53,7 +55,7 @@ class AgentTraceWriter:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return
-        payload["policy_result"] = policy_result or {}
+        payload["policy_result"] = AgentInputSanitizer().redact_value(policy_result or {})
         payload["policy_updated_at_ms"] = int(time.time() * 1000)
         write_json(path, payload)
 

@@ -5,6 +5,7 @@ import urllib.request
 from pathlib import Path
 from typing import Dict, List, Optional
 
+from auto_harness.agent.safety import AgentInputSanitizer
 from auto_harness.agent.schemas import AgentObservation
 from auto_harness.models.result import StageResult
 from auto_harness.models.verify import VerifyResult
@@ -135,15 +136,21 @@ class VerifyModule:
         if any(check.get("status") == "pass" for check in checks if check.get("name") in {"http_trace_response", "browser_dom_probe", "artifact_download_validation"}):
             return None
         repo_dir = run_dir / "workspace" / "repo"
+        sanitizer = AgentInputSanitizer()
+        selected_files = sanitizer.sanitize_selected_files(self._verify_selected_files(repo_dir))
         observation = AgentObservation(
             task_id=run_dir.name,
             stage="verify",
             repo_dir=str(repo_dir),
             file_tree=[],
-            selected_files=self._verify_selected_files(repo_dir),
+            selected_files=selected_files,
             deterministic_result={"analysis": analysis, "service": service, "checks": checks},
             runtime_policy={},
             allowed_action_types=["update_verify_hint"],
+            extra={
+                "untrusted_content_risks": sanitizer.risks,
+                "redactions": sanitizer.redactions,
+            },
         )
         planner = self.verify_planner.plan(observation)
         if planner.get("status") != "ok":

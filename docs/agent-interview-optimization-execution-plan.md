@@ -44,7 +44,9 @@ Phase 2.2 已完成：verify planner 支持输出多个 `verify_candidates`；Py
 
 Phase 2.3 已完成：LLM diagnoser 可以输出 `rerun_from` 和 `rerun_reason`；RepairPlanner 会记录 `rerun_from_proposed`、`rerun_from_required`、`rerun_from_effective`，并按 pipeline 安全顺序降级过晚或非法的 rerun stage。Report 会展示 proposed/effective rerun 决策。
 
-下一阶段应进入 Phase 3：prompt input safety 与恶意项目防护。
+Phase 3 已完成：新增 `AgentInputSanitizer`，支持 secret redaction、prompt injection 风险标注、文件 denylist 和 trace 脱敏；analyzer/verify 的 selected files 会先脱敏再进入 LLM prompt。`AgentActionPolicy` 会拒绝恶意 README 诱导出的 shell/network run candidate。新增 `agent_prompt_injection_defense` benchmark。
+
+下一阶段应进入 Phase 4：真实 LLM 与真实服务 E2E 证据。
 
 ## 1. 当前项目基线
 

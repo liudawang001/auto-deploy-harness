@@ -145,6 +145,8 @@ verify planner 可以输出多个 `verify_candidates`。Python 会过滤 externa
 
 repair 阶段会区分 LLM 提议和 Python 裁决的 rerun stage：`rerun_from_proposed`、`rerun_from_required`、`rerun_from_effective` 都会进入 repair plan/report；过晚或非法的 LLM 提议会降级到安全阶段。
 
+发送给 LLM 的 selected files 会先经过 `AgentInputSanitizer`：secret value 会替换为 `[REDACTED_SECRET]`，prompt injection 风险会写入 observation metadata，trace 写入前也会脱敏。恶意 README 诱导出的 shell/network run candidate 会被 policy 拒绝。
+
 ## Skill 与 Memory
 
 Agent 控制文档写在仓库内：

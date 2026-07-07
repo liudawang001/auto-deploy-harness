@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from auto_harness.agent import AgentActionPolicy, AgentDecisionEngine, AgentObservation
+from auto_harness.agent import AgentActionPolicy, AgentDecisionEngine, AgentInputSanitizer, AgentObservation
 from auto_harness.agents.base import AgentExecutor, AgentRequest
 from auto_harness.models.result import StageResult
 from auto_harness.models.task import RuntimePolicy
@@ -200,12 +200,14 @@ class ProjectAnalyzer:
     def _agent_planner(self, repo_dir: Path, analysis: Dict) -> Optional[Dict]:
         if self.agent_mode not in ("planner", "gated_actor") or not self.agent_engine:
             return None
+        sanitizer = AgentInputSanitizer()
+        selected_files = sanitizer.sanitize_selected_files(self._selected_files(repo_dir, analysis.get("files", [])))
         observation = AgentObservation(
             task_id=self.task_id,
             stage="analyze",
             repo_dir=str(repo_dir),
             file_tree=analysis.get("files", [])[:200],
-            selected_files=self._selected_files(repo_dir, analysis.get("files", [])),
+            selected_files=selected_files,
             deterministic_result=analysis,
             previous_results={},
             memory_hits=self.stage_context.get("memory_hits") or [],
@@ -217,6 +219,10 @@ class ProjectAnalyzer:
                 "update_verify_hint",
                 "add_dependency_constraint",
             ],
+            extra={
+                "untrusted_content_risks": sanitizer.risks,
+                "redactions": sanitizer.redactions,
+            },
         )
         decision = self.agent_engine.decide(observation)
         policy = self.agent_policy.validate(decision, self.runtime_policy, mode=self.agent_mode)

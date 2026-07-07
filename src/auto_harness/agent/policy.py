@@ -1,5 +1,6 @@
 import json
 import re
+import os
 from typing import Dict, List
 
 from auto_harness.models.task import RuntimePolicy
@@ -24,6 +25,7 @@ class AgentActionPolicy:
         "retry_model_download",
     }
     SHELL_METACHARS = (";", "&&", "|", ">", "<", "`", "$(")
+    BLOCKED_RUN_EXECUTABLES = {"bash", "sh", "zsh", "fish", "cmd", "powershell", "curl", "wget"}
     SAFE_PACKAGE_RE = re.compile(r"^[A-Za-z0-9_.-]+([<>=!~]=?[A-Za-z0-9_.+*~-]+)?$")
 
     def validate(self, decision, runtime_policy: RuntimePolicy, mode: str = "planner") -> Dict:
@@ -66,6 +68,9 @@ class AgentActionPolicy:
                 return "command parts must be strings"
             if any(self._has_shell_metachar(part) for part in cmd):
                 return "command contains shell metacharacters"
+            executable = os.path.basename(cmd[0]) if cmd else ""
+            if executable in self.BLOCKED_RUN_EXECUTABLES:
+                return "shell or network executable is not allowed for agent run candidate"
         if action_type == "update_verify_hint":
             verify_hint = payload.get("verify_hint") if isinstance(payload.get("verify_hint"), dict) else payload
             if not self._verify_hint_has_trace(verify_hint):
