@@ -19,6 +19,11 @@
   - analyze 阶段所有 run candidate 增加 `score`、`score_reasons`、`selected_by` 字段。
   - LLM 可以提升已有候选排序并记录选择理由；选择不存在的 command 会在 merge 层记录 rejection，不会改变 deterministic candidate。
   - `RunnerModule` 会把最终候选选择原因写入 `candidate_selection`，report 增加 `Run Candidate Selection` 小节。
+- Phase 2.2 LLM verify endpoint exploration：
+  - `AgentVerifyPlanner` 支持解析多个 `verify_candidates`，并记录 accepted / rejected candidates。
+  - Verify 阶段会按 policy 最多尝试前三个合法 LLM candidate；第一个失败、第二个成功时最终仍可 pass。
+  - 每个 candidate evidence 独立保存为 `_http_trace_llm_planner_<index>.json`，不会覆盖初始 evidence。
+  - external URL、缺少 `{{trace_id}}` 或包含 token 的 request 会被拒绝并记录原因。
 - 最终完成度审计阶段：
   - 新增 `ReadinessAuditor`，从当前仓库关键代码、进度文档和 benchmark manifest 生成机器可读完成度审计报告。
   - CLI 新增 `readiness --benchmark-report <path> --output <path>`，默认输出 `reports/readiness_audit.json`；报告会区分 `local_readiness_percent` 和真实联网/GPU/Docker/vLLM 外部验收门。

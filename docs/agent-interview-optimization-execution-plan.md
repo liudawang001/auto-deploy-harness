@@ -40,7 +40,9 @@ Phase 1 已完成第一版：新增 `AgentLoopController`，把诊断、policy�
 
 Phase 2.1 已完成：run candidate 现在包含 `score`、`score_reasons`、`selected_by`；LLM 可以通过 `select_run_candidate` 提升已有候选并记录选择理由，但不能直接删除 deterministic candidate，也不能选择不存在的 command。`RunnerModule` 和 report 会展示最终候选选择依据。
 
-下一阶段应进入 Phase 2.2：将 verify planner 升级为 endpoint exploration planner。
+Phase 2.2 已完成：verify planner 支持输出多个 `verify_candidates`；Python 会逐个校验 method/path/trace/token policy，最多尝试前三个合法 candidate。每个 LLM candidate 都会写入独立 HTTP evidence 文件，最终 pass 仍必须依赖当前 trace id evidence。
+
+下一阶段应进入 Phase 2.3：让 LLM 提议 repair `rerun_from`，并由 Python 校验安全阶段。
 
 ## 1. 当前项目基线
 

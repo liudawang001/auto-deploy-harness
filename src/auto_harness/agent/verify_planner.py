@@ -1,6 +1,6 @@
 import json
 import urllib.parse
-from typing import Dict
+from typing import Dict, List
 
 from auto_harness.agent.engine import AgentDecisionEngine
 from auto_harness.agent.policy import AgentActionPolicy
@@ -17,18 +17,58 @@ class AgentVerifyPlanner:
         decision = self.engine.decide(observation)
         policy = self.policy.validate(decision, observation.runtime_policy or {}, mode="planner")
         self.engine.trace_writer.update_policy_result(decision.trace_path, policy)
-        hint = decision.verify_hint
-        valid, reason = self.validate_hint(hint)
+        candidates = self._candidate_hints(decision)
+        accepted_candidates = []
+        rejected_candidates = []
+        for index, candidate in enumerate(candidates):
+            valid, reason = self.validate_hint(candidate)
+            record = {
+                "index": index,
+                "verify_hint": candidate if valid else {},
+                "candidate": candidate,
+                "reason": candidate.get("reason") or decision.summary or decision.rationale or reason,
+                "confidence": float(candidate.get("confidence") or decision.confidence or 0),
+            }
+            if valid:
+                accepted_candidates.append(record)
+            else:
+                record["reject_reason"] = reason
+                rejected_candidates.append(record)
+        hint = accepted_candidates[0]["verify_hint"] if accepted_candidates else {}
         return {
-            "status": "ok" if decision.status == "ok" and valid else "rejected",
+            "status": "ok" if decision.status == "ok" and accepted_candidates else "rejected",
             "decision_status": decision.status,
             "confidence": decision.confidence,
-            "reason": decision.summary or decision.rationale or reason,
-            "verify_hint": hint if valid else {},
-            "reject_reason": "" if valid else reason,
+            "reason": decision.summary or decision.rationale or (rejected_candidates[0]["reject_reason"] if rejected_candidates else ""),
+            "verify_hint": hint,
+            "verify_candidates": [item["verify_hint"] for item in accepted_candidates],
+            "accepted_candidates": accepted_candidates,
+            "rejected_candidates": rejected_candidates,
+            "reject_reason": "" if accepted_candidates else (rejected_candidates[0]["reject_reason"] if rejected_candidates else "no verify candidates"),
             "accepted_actions": policy.get("accepted_actions", []),
             "rejected_actions": policy.get("rejected_actions", []),
         }
+
+    def _candidate_hints(self, decision) -> List[Dict]:
+        hints: List[Dict] = []
+        for item in decision.plan_delta.get("verify_candidates") or []:
+            if not isinstance(item, dict):
+                continue
+            request = {
+                "method": item.get("method"),
+                "path": item.get("path"),
+            }
+            if "json" in item:
+                request["json"] = item.get("json")
+            hints.append({
+                "request": request,
+                "expected_output": item.get("expected_output") or "response_contains_trace",
+                "reason": item.get("reason") or "",
+                "confidence": float(item.get("confidence") or 0),
+            })
+        if decision.verify_hint:
+            hints.append(decision.verify_hint)
+        return hints
 
     def validate_hint(self, verify_hint: Dict) -> tuple:
         if not isinstance(verify_hint, dict):

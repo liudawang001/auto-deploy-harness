@@ -141,6 +141,8 @@ export AUTO_HARNESS_ENABLE_REPAIR_ACTIONS=1
 
 run candidate 会记录统一 ranking 信息：`score`、`score_reasons` 和 `selected_by`。LLM planner 只能添加候选或提升已有候选排序，不能删除 deterministic candidate；最终选择原因会进入 runner result 和 report。
 
+verify planner 可以输出多个 `verify_candidates`。Python 会过滤 external URL、缺少 `{{trace_id}}` 或包含 token 的请求，并最多尝试前三个合法候选；每个候选都会写独立 evidence，成功仍必须由当前 trace id 证明。
+
 ## Skill 与 Memory
 
 Agent 控制文档写在仓库内：

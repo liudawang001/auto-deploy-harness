@@ -76,6 +76,15 @@ def verify_prompt(observation: AgentObservation) -> str:
             },
             "expected_output": "response_contains_trace",
         },
+        "verify_candidates": [
+            {
+                "method": "GET | POST",
+                "path": "/path",
+                "json": {"prompt": "auto harness trace {{trace_id}}"},
+                "reason": "why this endpoint/body may produce trace evidence",
+                "confidence": 0.0,
+            }
+        ],
     }
     return _prompt("verify request planner", observation, schema)
 

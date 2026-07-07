@@ -57,6 +57,7 @@ class VerifyModule:
             checks.append(browser_evidence["check"])
         status = "pass" if self._can_pass(service, checks) else "uncertain"
         planner_evidence = None
+        planner_evidences = []
         planner_result = None
         if status == "uncertain":
             planner_result = self._plan_and_execute_verify_hint(
@@ -67,10 +68,16 @@ class VerifyModule:
                 evidence_dir,
                 checks,
             )
-            if planner_result and planner_result.get("evidence"):
-                planner_evidence = planner_result["evidence"]
-                checks.append(planner_evidence["check"])
-                status = "pass" if self._can_pass(service, checks) else "uncertain"
+            if planner_result and planner_result.get("evidences"):
+                planner_evidences = planner_result["evidences"]
+                for evidence in planner_evidences:
+                    checks.append(evidence["check"])
+                    if self._can_pass(service, checks):
+                        planner_evidence = evidence
+                        status = "pass"
+                        break
+                if status != "pass":
+                    status = "pass" if self._can_pass(service, checks) else "uncertain"
         self._progress("verify_completed", {"result_status": status, "trace_id": trace_id})
         diagnosis = {
             "category": "none" if status == "pass" else "unknown",
@@ -87,7 +94,7 @@ class VerifyModule:
                 ([http_evidence["path"]] if http_evidence else [])
                 + ([streamlit_evidence["path"]] if streamlit_evidence else [])
                 + ([browser_evidence["path"]] if browser_evidence else [])
-                + ([planner_evidence["path"]] if planner_evidence else [])
+                + [evidence["path"] for evidence in planner_evidences]
             ),
             next_action="report",
         )
@@ -108,7 +115,7 @@ class VerifyModule:
                 + ([http_evidence["path"]] if http_evidence else [])
                 + ([streamlit_evidence["path"]] if streamlit_evidence else [])
                 + ([browser_evidence["path"]] if browser_evidence else [])
-                + ([planner_evidence["path"]] if planner_evidence else [])
+                + [evidence["path"] for evidence in planner_evidences]
             ),
         )
 
@@ -141,11 +148,18 @@ class VerifyModule:
         planner = self.verify_planner.plan(observation)
         if planner.get("status") != "ok":
             return {"planner": planner}
-        planned_analysis = dict(analysis)
-        planned_analysis["verify_hint"] = planner["verify_hint"]
-        self._progress("llm_verify_hint_generated", {"confidence": planner.get("confidence")})
-        evidence = self._execute_http_trace(trace_id, service, planned_analysis, evidence_dir, attempt_label="llm_planner")
-        return {"planner": planner, "evidence": evidence}
+        evidences = []
+        candidates = planner.get("verify_candidates") or ([planner["verify_hint"]] if planner.get("verify_hint") else [])
+        for index, verify_hint in enumerate(candidates[:3]):
+            planned_analysis = dict(analysis)
+            planned_analysis["verify_hint"] = verify_hint
+            self._progress("llm_verify_hint_generated", {"confidence": planner.get("confidence"), "candidate_index": index})
+            evidence = self._execute_http_trace(trace_id, service, planned_analysis, evidence_dir, attempt_label="llm_planner_%s" % index)
+            if evidence:
+                evidences.append(evidence)
+            if evidence and evidence.get("check", {}).get("status") == "pass":
+                break
+        return {"planner": planner, "evidences": evidences, "evidence": evidences[-1] if evidences else None}
 
     def _service_discovery(self, runner_result: Dict) -> Dict:
         port = int(runner_result.get("expected_port") or 0)

@@ -914,7 +914,86 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(result.status, "passed")
             evidence_names = [Path(path).name for path in result.evidence]
             self.assertTrue(any(name.endswith("_http_trace_initial.json") for name in evidence_names))
-            self.assertTrue(any(name.endswith("_http_trace_llm_planner.json") for name in evidence_names))
+            self.assertTrue(any("_http_trace_llm_planner_" in name for name in evidence_names))
+
+    def test_llm_verify_planner_tries_multiple_policy_valid_candidates(self):
+        calls = []
+
+        def fake_urlopen(req, timeout):
+            calls.append(req.full_url)
+            if req.full_url.endswith("/second"):
+                body = json.loads(req.data.decode("utf-8"))
+                return FakeHttpResponse("handled %s" % body["prompt"].rsplit(" ", 1)[-1])
+            return FakeHttpResponse("ok without trace")
+
+        provider = FakeLLMProvider(json.dumps({
+            "status": "ok",
+            "confidence": 0.8,
+            "verify_candidates": [
+                {
+                    "method": "POST",
+                    "path": "/first",
+                    "json": {"prompt": "auto harness trace {{trace_id}}"},
+                    "confidence": 0.7,
+                    "reason": "first documented endpoint",
+                },
+                {
+                    "method": "POST",
+                    "path": "/second",
+                    "json": {"prompt": "auto harness trace {{trace_id}}"},
+                    "confidence": 0.9,
+                    "reason": "fallback generate endpoint",
+                },
+            ],
+        }))
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / "workspace" / "repo").mkdir(parents=True)
+            result = VerifyModule(urlopen=fake_urlopen, verify_planner=AgentVerifyPlanner(provider)).verify(
+                run_dir,
+                analysis={"verify_hint": {"endpoint": "http://127.0.0.1:8000", "request": {"method": "GET"}}},
+                runner_result={"pid": 1234, "expected_port": 8000, "service_ready": True},
+            )
+            self.assertEqual(result.status, "passed")
+            self.assertIn("http://127.0.0.1:8000/first", calls)
+            self.assertIn("http://127.0.0.1:8000/second", calls)
+            evidence_names = [Path(path).name for path in result.evidence]
+            self.assertTrue(any(name.endswith("_http_trace_llm_planner_0.json") for name in evidence_names))
+            self.assertTrue(any(name.endswith("_http_trace_llm_planner_1.json") for name in evidence_names))
+
+    def test_llm_verify_planner_records_rejected_candidates(self):
+        provider = FakeLLMProvider(json.dumps({
+            "status": "ok",
+            "confidence": 0.8,
+            "verify_candidates": [
+                {
+                    "method": "POST",
+                    "path": "https://evil.example/generate",
+                    "json": {"prompt": "auto harness trace {{trace_id}}"},
+                    "confidence": 0.9,
+                },
+                {
+                    "method": "POST",
+                    "path": "/token",
+                    "json": {"token": "secret", "prompt": "auto harness trace {{trace_id}}"},
+                    "confidence": 0.8,
+                },
+                {
+                    "method": "POST",
+                    "path": "/valid",
+                    "json": {"prompt": "auto harness trace {{trace_id}}"},
+                    "confidence": 0.7,
+                },
+            ],
+        }))
+        planner = AgentVerifyPlanner(provider)
+        result = planner.plan(AgentObservation(task_id="task", stage="verify", allowed_action_types=["update_verify_hint"]))
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(len(result["accepted_candidates"]), 1)
+        self.assertEqual(result["accepted_candidates"][0]["verify_hint"]["request"]["path"], "/valid")
+        self.assertEqual(len(result["rejected_candidates"]), 2)
+        self.assertEqual(result["rejected_candidates"][0]["reject_reason"], "path must start with /")
+        self.assertEqual(result["rejected_candidates"][1]["reject_reason"], "request must not contain token values")
 
     def test_mock_provider(self):
         result = MockLLMProvider().complete([Message(role="user", content="hello")])
