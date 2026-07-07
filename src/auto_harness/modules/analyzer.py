@@ -197,7 +197,7 @@ class ProjectAnalyzer:
         return {"status": "invalid_shape", "raw": parsed}
 
     def _agent_planner(self, repo_dir: Path, analysis: Dict) -> Optional[Dict]:
-        if self.agent_mode != "planner" or not self.agent_engine:
+        if self.agent_mode not in ("planner", "gated_actor") or not self.agent_engine:
             return None
         observation = AgentObservation(
             task_id=self.task_id,
@@ -219,6 +219,7 @@ class ProjectAnalyzer:
         )
         decision = self.agent_engine.decide(observation)
         policy = self.agent_policy.validate(decision, self.runtime_policy, mode=self.agent_mode)
+        self.agent_engine.trace_writer.update_policy_result(decision.trace_path, policy)
         merged = self._merge_agent_decision(analysis, decision, policy)
         return {
             "status": decision.status,

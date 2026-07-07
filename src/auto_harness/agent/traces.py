@@ -43,6 +43,20 @@ class AgentTraceWriter:
         write_json(path, payload)
         return str(path)
 
+    def update_policy_result(self, trace_path: str, policy_result: Dict) -> None:
+        if not trace_path:
+            return
+        path = Path(trace_path)
+        if not path.exists():
+            return
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        payload["policy_result"] = policy_result or {}
+        payload["policy_updated_at_ms"] = int(time.time() * 1000)
+        write_json(path, payload)
+
 
 def observation_summary(observation) -> Dict:
     return {

@@ -3,6 +3,7 @@ import urllib.parse
 from typing import Dict
 
 from auto_harness.agent.engine import AgentDecisionEngine
+from auto_harness.agent.policy import AgentActionPolicy
 from auto_harness.agent.prompts import verify_prompt
 from auto_harness.agent.schemas import AgentObservation
 
@@ -10,9 +11,12 @@ from auto_harness.agent.schemas import AgentObservation
 class AgentVerifyPlanner:
     def __init__(self, provider, config=None, trace_writer=None) -> None:
         self.engine = AgentDecisionEngine(provider, config=config, trace_writer=trace_writer, prompt_builder=verify_prompt)
+        self.policy = AgentActionPolicy()
 
     def plan(self, observation: AgentObservation) -> Dict:
         decision = self.engine.decide(observation)
+        policy = self.policy.validate(decision, observation.runtime_policy or {}, mode="planner")
+        self.engine.trace_writer.update_policy_result(decision.trace_path, policy)
         hint = decision.verify_hint
         valid, reason = self.validate_hint(hint)
         return {
@@ -22,6 +26,8 @@ class AgentVerifyPlanner:
             "reason": decision.summary or decision.rationale or reason,
             "verify_hint": hint if valid else {},
             "reject_reason": "" if valid else reason,
+            "accepted_actions": policy.get("accepted_actions", []),
+            "rejected_actions": policy.get("rejected_actions", []),
         }
 
     def validate_hint(self, verify_hint: Dict) -> tuple:

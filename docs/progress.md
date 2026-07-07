@@ -431,4 +431,15 @@
 - Memory 会自动记录；`memory-promote` 已支持生成 human review proposal 和显式 apply，后续还需要把 apply 与 fixture 回归、审批人元数据绑定。
 - `model_prepare` 已接入 Hugging Face 和 ModelScope 下载器。
 - 下载器目前使用 stdlib HTTP 实现，已支持并发下载、有限重试、etag 缓存失效和远端提供 sha256 时的校验；后续仍需扩展更多模型源和真实大文件 E2E。
-- Repair plan 当前会生成受控 artifacts，但不会直接执行 shell 或修改源码。
+- Repair plan 当前会生成受控 artifacts；在 `gated_actor`、runtime policy、repair policy 和 command policy 全部通过时，可执行受控 `install_package`，但仍不会直接执行任意 shell 或修改源码。
+
+### Agent 面试向优化进度
+
+- 已新增并纳入 `docs/agent-interview-optimization-execution-plan.md`，用于指导后续从 LLM-assisted workflow 升级为可审计 Agent loop。
+- 已完成 Phase 0 安全与证据补强：
+  - Agent trace 支持在 policy validate 后回写 `policy_result`，能审计 accepted / rejected action。
+  - Verify HTTP evidence 分 attempt 保存，避免 LLM verify planner 覆盖初始 uncertain evidence。
+  - `agent_diagnosis` 会持久化到 stage result，并同步更新 pipeline results。
+  - `gated_actor` 模式可启用 analyze planner，但 analyze 阶段仍不合并可执行 repair action。
+  - `RepairApplier` 执行前接入 `allowed_commands`，orchestrator repair apply 已传入全局命令白名单。
+- 下一步：进入 Phase 1，抽象 `AgentLoopController`，形成统一 observe-decide-act-verify 闭环。

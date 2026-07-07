@@ -24,7 +24,7 @@ class AgentDecisionEngine:
             result = self.provider.complete([Message(role="user", content=prompt)], temperature=0.0)
             latency_ms = result.latency_ms or int((time.time() - started) * 1000)
             decision = self._parse_decision(observation.stage, result.text, provider_name, model)
-            self.trace_writer.write(
+            decision.trace_path = self.trace_writer.write(
                 observation.stage,
                 provider_name,
                 model,
@@ -46,7 +46,7 @@ class AgentDecisionEngine:
                 model=model,
                 rationale=str(exc),
             )
-            self.trace_writer.write(
+            decision.trace_path = self.trace_writer.write(
                 observation.stage,
                 provider_name,
                 model,

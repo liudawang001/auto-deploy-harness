@@ -121,7 +121,7 @@ export AUTO_HARNESS_ENABLE_VERIFY_PLANNER=1
 PYTHONPATH=src python3 -m auto_harness.cli deploy --repo ./demo --name demo --dry-run
 ```
 
-`planner` 模式下，LLM 只能输出 JSON decision/action。允许合并的动作包括 `add_run_candidate`、`select_run_candidate`、`update_verify_hint` 和 `add_dependency_constraint`；所有 action 都会经过 schema parsing、`AgentActionPolicy` 和 trace 写入。决策 trace 写入：
+`planner` 模式下，LLM 只能输出 JSON decision/action。允许合并的动作包括 `add_run_candidate`、`select_run_candidate`、`update_verify_hint` 和 `add_dependency_constraint`；所有 action 都会经过 schema parsing、`AgentActionPolicy` 和 trace 写入，trace 会记录 policy accepted / rejected 结果。决策 trace 写入：
 
 ```text
 runs/<task-id>/logs/agent_calls/
@@ -135,7 +135,7 @@ export AUTO_HARNESS_ENABLE_LOG_DIAGNOSIS=1
 export AUTO_HARNESS_ENABLE_REPAIR_ACTIONS=1
 ```
 
-即使在 `gated_actor` 下，LLM 也不能直接执行 shell 或修改源码。`install_package` 必须满足包名安全正则、runtime policy 允许依赖安装、repair loop 未超限，并且最终仍必须由 verify evidence 证明修复有效。
+即使在 `gated_actor` 下，LLM 也不能直接执行 shell 或修改源码。`install_package` 必须满足包名安全正则、runtime policy 允许依赖安装、repair loop 未超限、命令在 `allowed_commands` 白名单内，并且最终仍必须由 verify evidence 证明修复有效。LLM verify planner 的二次 HTTP evidence 会单独保存，不覆盖初始 uncertain evidence。
 
 ## Skill 与 Memory
 

@@ -40,5 +40,6 @@ class AgentDecision:
     raw_text: str = ""
     provider: str = ""
     model: str = ""
+    trace_path: str = ""
     diagnosis: Dict[str, Any] = field(default_factory=dict)
     verify_hint: Dict[str, Any] = field(default_factory=dict)

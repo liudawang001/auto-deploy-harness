@@ -1809,6 +1809,8 @@ class BenchmarkRunner:
                 result.status == "passed"
                 and any(url.endswith("/generate") for url in calls)
                 and result.data.get("llm_verify_planner", {}).get("status") == "ok"
+                and any(str(path).endswith("_http_trace_initial.json") for path in result.evidence)
+                and any(str(path).endswith("_http_trace_llm_planner.json") for path in result.evidence)
                 and bool(list((run_dir / "logs" / "agent_calls").glob("verify_*.json")))
             )
         return self._result(case, "passed" if ok else "failed", "LLM verify hint recovery verified")

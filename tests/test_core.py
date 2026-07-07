@@ -338,6 +338,88 @@ class CoreTests(unittest.TestCase):
             self.assertIn("prompt_hash", trace)
             self.assertEqual(trace["observation_summary"]["task_id"], "trace-task")
 
+    def test_agent_trace_records_policy_result_after_validation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            repo.mkdir()
+            (repo / "README.md").write_text("demo", encoding="utf-8")
+            trace_dir = Path(tmp) / "agent_calls"
+            provider = FakeLLMProvider(json.dumps({
+                "stage": "analyze",
+                "status": "ok",
+                "confidence": 0.9,
+                "actions": [
+                    {
+                        "type": "add_run_candidate",
+                        "confidence": 0.9,
+                        "payload": {"cmd": [".venv/bin/python", "serve.py"], "expected_port": 9000},
+                    },
+                    {
+                        "type": "add_run_candidate",
+                        "confidence": 0.9,
+                        "payload": {"cmd": "python serve.py; rm -rf /"},
+                    },
+                ],
+            }))
+            ProjectAnalyzer(
+                agent_engine=AgentDecisionEngine(provider, trace_writer=AgentTraceWriter(trace_dir)),
+                agent_mode="planner",
+                task_id="trace-policy-task",
+            ).analyze(repo)
+            trace = json.loads(next(trace_dir.glob("analyze_*.json")).read_text(encoding="utf-8"))
+            self.assertEqual(len(trace["policy_result"]["accepted_actions"]), 1)
+            self.assertEqual(len(trace["policy_result"]["rejected_actions"]), 1)
+            self.assertIn("command payload must be a list", trace["policy_result"]["rejected_actions"][0]["reason"])
+
+    def test_gated_actor_mode_enables_analyze_planner(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            repo.mkdir()
+            (repo / "README.md").write_text("Run with python serve.py", encoding="utf-8")
+            provider = FakeLLMProvider(json.dumps({
+                "stage": "analyze",
+                "status": "ok",
+                "confidence": 0.9,
+                "actions": [
+                    {
+                        "type": "add_run_candidate",
+                        "confidence": 0.9,
+                        "payload": {"cmd": [".venv/bin/python", "serve.py"], "expected_port": 9000},
+                    }
+                ],
+            }))
+            result = ProjectAnalyzer(
+                agent_engine=AgentDecisionEngine(provider),
+                agent_mode="gated_actor",
+                runtime_policy=RuntimePolicy(workspace_root=str(Path(tmp))),
+            ).analyze(repo)
+            self.assertEqual(result.data["agent_decision"]["merged"]["run_candidates_added"], 1)
+
+    def test_gated_actor_analyze_planner_still_rejects_executable_action(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            repo.mkdir()
+            provider = FakeLLMProvider(json.dumps({
+                "stage": "analyze",
+                "status": "ok",
+                "confidence": 0.9,
+                "actions": [
+                    {
+                        "type": "install_package",
+                        "confidence": 0.9,
+                        "payload": {"package": "gradio"},
+                        "requires": {"dependency_install": True},
+                    }
+                ],
+            }))
+            result = ProjectAnalyzer(
+                agent_engine=AgentDecisionEngine(provider),
+                agent_mode="gated_actor",
+                runtime_policy=RuntimePolicy(workspace_root=str(Path(tmp)), allow_dependency_install=False),
+            ).analyze(repo)
+            self.assertEqual(result.data["agent_decision"]["merged"]["dependency_constraints_added"], 0)
+            self.assertEqual(len(result.data["agent_decision"]["rejected_actions"]), 1)
+
     def test_verify_does_not_pass_without_artifact_evidence(self):
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = Path(tmp)
@@ -733,6 +815,37 @@ class CoreTests(unittest.TestCase):
                 runner_result={"pid": 1234, "expected_port": 8000, "service_ready": True},
             )
             self.assertEqual(result.status, "uncertain")
+
+    def test_llm_verify_planner_does_not_overwrite_initial_evidence(self):
+        def fake_urlopen(req, timeout):
+            if req.full_url.endswith("/generate"):
+                body = json.loads(req.data.decode("utf-8"))
+                return FakeHttpResponse("handled %s" % body["prompt"].rsplit(" ", 1)[-1])
+            return FakeHttpResponse("ok without trace")
+
+        provider = FakeLLMProvider(json.dumps({
+            "status": "ok",
+            "confidence": 0.8,
+            "verify_hint": {
+                "request": {
+                    "method": "POST",
+                    "path": "/generate",
+                    "json": {"prompt": "auto harness trace {{trace_id}}"},
+                }
+            },
+        }))
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / "workspace" / "repo").mkdir(parents=True)
+            result = VerifyModule(urlopen=fake_urlopen, verify_planner=AgentVerifyPlanner(provider)).verify(
+                run_dir,
+                analysis={"verify_hint": {"endpoint": "http://127.0.0.1:8000", "request": {"method": "GET"}}},
+                runner_result={"pid": 1234, "expected_port": 8000, "service_ready": True},
+            )
+            self.assertEqual(result.status, "passed")
+            evidence_names = [Path(path).name for path in result.evidence]
+            self.assertTrue(any(name.endswith("_http_trace_initial.json") for name in evidence_names))
+            self.assertTrue(any(name.endswith("_http_trace_llm_planner.json") for name in evidence_names))
 
     def test_mock_provider(self):
         result = MockLLMProvider().complete([Message(role="user", content="hello")])
@@ -1778,6 +1891,51 @@ class CoreTests(unittest.TestCase):
             stored = json.loads((run_dir / "repairs" / "repair_apply_result.json").read_text(encoding="utf-8"))
             self.assertEqual(stored["action_results"][0]["stdout_tail"], "installed")
 
+    def test_repair_execute_respects_allowed_commands(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / "workspace" / "repo").mkdir(parents=True)
+            plan = {
+                "actions": [
+                    {
+                        "type": "install_package",
+                        "requires": {"dependency_install": True},
+                        "payload": {"package": "opencv-python-headless"},
+                    }
+                ]
+            }
+
+            def fake_runner(cmd, cwd, timeout_seconds):
+                raise AssertionError("disallowed command must not execute")
+
+            result = RepairApplier().apply(
+                run_dir,
+                plan,
+                {"allowed": True, "decisions": []},
+                execute=True,
+                command_runner=fake_runner,
+                allowed_commands=["curl"],
+            )
+            self.assertFalse(result["executed"])
+            self.assertEqual(result["action_results"][0]["status"], "rejected")
+
+    def test_repair_execute_records_command_policy_reject(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / "workspace" / "repo").mkdir(parents=True)
+            plan = {
+                "actions": [
+                    {
+                        "type": "install_package",
+                        "requires": {"dependency_install": True},
+                        "payload": {"package": "gradio"},
+                    }
+                ]
+            }
+            RepairApplier().apply(run_dir, plan, {"allowed": True, "decisions": []}, execute=True, allowed_commands=["curl"])
+            stored = json.loads((run_dir / "repairs" / "repair_apply_result.json").read_text(encoding="utf-8"))
+            self.assertEqual(stored["action_results"][0]["reason"], "command is not allowed by command policy")
+
     def test_repair_execute_then_resume_requires_verify_pass(self):
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = Path(tmp)
@@ -2634,6 +2792,50 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(data["resource_plan"]["data"]["model_assets"][0]["repo_id"], "org/demo-model")
             self.assertIn("numpy<2", data["env_solve"]["data"]["constraints"])
             self.assertTrue(Path(data["model_prepare"]["data"]["manifest_path"]).exists())
+
+    def test_agent_diagnosis_is_persisted_in_stage_and_pipeline_results(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = HarnessConfig(
+                runs_dir=str(root / "runs"),
+                memory_dir=str(root / "memory"),
+                model_cache_dir=str(root / "model_cache"),
+                agent_mode="gated_actor",
+                agent_enable_log_diagnosis=True,
+            )
+            runner = TaskRunner(config)
+            spec = TaskSpec(
+                task_id="task-agent-diagnosis",
+                project=ProjectSpec(name="demo", repo_url="local"),
+                runtime=RuntimePolicy(workspace_root=str(root / "runs" / "task-agent-diagnosis" / "workspace")),
+                created_at=utc_now_iso(),
+            )
+            runner.store.create_task(spec)
+            provider = FakeLLMProvider(json.dumps({
+                "stage": "runner",
+                "status": "ok",
+                "confidence": 0.86,
+                "diagnosis": {
+                    "category": "dependency_missing",
+                    "root_cause": "ModuleNotFoundError: cv2",
+                    "confidence": 0.86,
+                },
+                "actions": [],
+                "plan_delta": {"rerun_from": "env_deploy"},
+            }))
+            runner._agent_provider = lambda: provider
+            result = StageResult(
+                "runner",
+                "failed",
+                "service failed",
+                {"diagnosis": {"category": "unknown", "confidence": 0.2}},
+            )
+            results = {"runner": result.__dict__.copy()}
+            runner._remember("task-agent-diagnosis", "runner", result, {"frameworks": ["gradio"]}, results)
+
+            stored = json.loads((root / "runs" / "task-agent-diagnosis" / "reports" / "runner_result.json").read_text(encoding="utf-8"))
+            self.assertEqual(stored["data"]["agent_diagnosis"]["diagnosis"]["category"], "dependency_missing")
+            self.assertEqual(results["runner"]["data"]["agent_diagnosis"]["diagnosis"]["category"], "dependency_missing")
 
     def test_resume_uses_repair_rerun_from_effective_stage(self):
         with tempfile.TemporaryDirectory() as tmp:

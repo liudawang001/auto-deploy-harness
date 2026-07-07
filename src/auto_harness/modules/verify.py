@@ -40,7 +40,7 @@ class VerifyModule:
         repo_dir = run_dir / "workspace" / "repo"
         before = snapshot_files(repo_dir)
         self._progress("first_inference_probe_started", {"probe": "http_trace"})
-        http_evidence = self._execute_http_trace(trace_id, service, analysis, evidence_dir)
+        http_evidence = self._execute_http_trace(trace_id, service, analysis, evidence_dir, attempt_label="initial")
         self._progress("first_inference_probe_completed", {"probe": "http_trace", "check": http_evidence["check"] if http_evidence else {}})
         after = snapshot_files(repo_dir)
         changed = diff_snapshot(before, after)
@@ -144,7 +144,7 @@ class VerifyModule:
         planned_analysis = dict(analysis)
         planned_analysis["verify_hint"] = planner["verify_hint"]
         self._progress("llm_verify_hint_generated", {"confidence": planner.get("confidence")})
-        evidence = self._execute_http_trace(trace_id, service, planned_analysis, evidence_dir)
+        evidence = self._execute_http_trace(trace_id, service, planned_analysis, evidence_dir, attempt_label="llm_planner")
         return {"planner": planner, "evidence": evidence}
 
     def _service_discovery(self, runner_result: Dict) -> Dict:
@@ -160,7 +160,7 @@ class VerifyModule:
             "log_path": runner_result.get("log_path"),
         }
 
-    def _execute_http_trace(self, trace_id: str, service: Dict, analysis: Dict, evidence_dir: Path) -> Optional[Dict]:
+    def _execute_http_trace(self, trace_id: str, service: Dict, analysis: Dict, evidence_dir: Path, attempt_label: str = "initial") -> Optional[Dict]:
         request_plan = self._build_request_plan(trace_id, service, analysis)
         if not request_plan:
             return None
@@ -214,6 +214,7 @@ class VerifyModule:
             "request": request_record,
             "response": response_record,
             "follow_up_response": follow_up_record,
+            "attempt_label": attempt_label,
             "check": {
                 "name": "http_trace_response",
                 "status": status,
@@ -221,7 +222,8 @@ class VerifyModule:
                 "reason": reason,
             },
         }
-        evidence_path = evidence_dir / ("%s_http_trace.json" % trace_id)
+        safe_label = "".join(ch if ch.isalnum() or ch in ("_", "-") else "_" for ch in attempt_label) or "initial"
+        evidence_path = evidence_dir / ("%s_http_trace_%s.json" % (trace_id, safe_label))
         evidence_path.write_text(json.dumps(evidence, ensure_ascii=False, indent=2), encoding="utf-8")
         return {"path": str(evidence_path), "check": evidence["check"]}
 

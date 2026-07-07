@@ -27,6 +27,7 @@ class AgentActionPolicy:
     SAFE_PACKAGE_RE = re.compile(r"^[A-Za-z0-9_.-]+([<>=!~]=?[A-Za-z0-9_.+*~-]+)?$")
 
     def validate(self, decision, runtime_policy: RuntimePolicy, mode: str = "planner") -> Dict:
+        runtime_policy = self._runtime_policy(runtime_policy)
         accepted: List[Dict] = []
         rejected: List[Dict] = []
         for action in getattr(decision, "actions", []) or []:
@@ -41,6 +42,15 @@ class AgentActionPolicy:
             "accepted_actions": accepted,
             "rejected_actions": rejected,
         }
+
+    def _runtime_policy(self, runtime_policy) -> RuntimePolicy:
+        if isinstance(runtime_policy, RuntimePolicy):
+            return runtime_policy
+        if isinstance(runtime_policy, dict):
+            known = {key: runtime_policy[key] for key in RuntimePolicy.__dataclass_fields__ if key in runtime_policy}
+            known.setdefault("workspace_root", "")
+            return RuntimePolicy(**known)
+        return RuntimePolicy(workspace_root="")
 
     def _reject_reason(self, action: Dict, runtime_policy: RuntimePolicy, mode: str) -> str:
         action_type = action.get("type", "")

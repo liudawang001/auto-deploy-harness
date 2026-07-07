@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 from typing import Dict, List
 
@@ -9,7 +10,16 @@ from auto_harness.utils.shell import run_command
 class RepairApplier:
     """Applies only non-executing repair artifacts; shell/source changes remain gated."""
 
-    def apply(self, run_dir: Path, plan: Dict, policy_result: Dict, execute: bool = False, command_runner=None, timeout_seconds: int = 900) -> Dict:
+    def apply(
+        self,
+        run_dir: Path,
+        plan: Dict,
+        policy_result: Dict,
+        execute: bool = False,
+        command_runner=None,
+        timeout_seconds: int = 900,
+        allowed_commands: List[str] = None,
+    ) -> Dict:
         repair_dir = run_dir / "repairs"
         repair_dir.mkdir(parents=True, exist_ok=True)
         result = {
@@ -41,7 +51,17 @@ class RepairApplier:
                 if command["status"] == "ready":
                     install_commands.append(command["cmd"])
                     if execute:
-                        result["action_results"].append(self._execute_command(run_dir, action_type, command["cmd"], command_runner, timeout_seconds))
+                        command_reject = self._command_policy_reject(command["cmd"], allowed_commands)
+                        if command_reject:
+                            result["action_results"].append({
+                                "action_type": action_type,
+                                "executed": False,
+                                "status": "rejected",
+                                "cmd": command["cmd"],
+                                "reason": command_reject,
+                            })
+                        else:
+                            result["action_results"].append(self._execute_command(run_dir, action_type, command["cmd"], command_runner, timeout_seconds))
                 else:
                     result["action_results"].append({
                         "action_type": action_type,
@@ -79,6 +99,15 @@ class RepairApplier:
         write_json(repair_dir / "repair_apply_result.json", result)
         result["artifacts"].append(str(repair_dir / "repair_apply_result.json"))
         return result
+
+    def _command_policy_reject(self, cmd: List[str], allowed_commands: List[str] = None) -> str:
+        if allowed_commands is None:
+            return ""
+        executable = os.path.basename(str(cmd[0] or "")) if cmd else ""
+        allowed = {os.path.basename(str(item)) for item in allowed_commands}
+        if executable not in allowed:
+            return "command is not allowed by command policy"
+        return ""
 
     def _execute_command(self, run_dir: Path, action_type: str, cmd: List[str], command_runner, timeout_seconds: int) -> Dict:
         if command_runner:

@@ -149,7 +149,7 @@ class TaskRunner:
             analyze_result = analyzer.analyze(repo_dir)
             results["analyze"] = to_plain(analyze_result)
             self._save_stage(task_id, "analyze", analyze_result)
-            self._remember(task_id, "analyze", analyze_result, analyze_result.data)
+            self._remember(task_id, "analyze", analyze_result, analyze_result.data, results)
             analyze_data = analyze_result.data
         else:
             analyze_data = results["analyze"]["data"]
@@ -162,7 +162,7 @@ class TaskRunner:
             self._attach_context(resource_result, resource_context)
             results["resource_plan"] = to_plain(resource_result)
             self._save_stage(task_id, "resource_plan", resource_result)
-            self._remember(task_id, "resource_plan", resource_result, effective_analysis)
+            self._remember(task_id, "resource_plan", resource_result, effective_analysis, results)
             resource_data = resource_result.data
         else:
             resource_data = results["resource_plan"]["data"]
@@ -173,7 +173,7 @@ class TaskRunner:
             self._attach_context(env_solve_result, env_solve_context)
             results["env_solve"] = to_plain(env_solve_result)
             self._save_stage(task_id, "env_solve", env_solve_result)
-            self._remember(task_id, "env_solve", env_solve_result, effective_analysis)
+            self._remember(task_id, "env_solve", env_solve_result, effective_analysis, results)
             deploy_analysis = env_solve_result.data.get("analysis", effective_analysis)
         else:
             deploy_analysis = results["env_solve"]["data"].get("analysis", effective_analysis)
@@ -195,7 +195,7 @@ class TaskRunner:
             self._attach_repair_overlay(env_result, repair_overlay)
             results["env_deploy"] = to_plain(env_result)
             self._save_stage(task_id, "env_deploy", env_result)
-            self._remember(task_id, "env_deploy", env_result, deploy_analysis)
+            self._remember(task_id, "env_deploy", env_result, deploy_analysis, results)
 
         if should_run("model_prepare"):
             model_context = self._stage_context("model_prepare", resource_data)
@@ -211,7 +211,7 @@ class TaskRunner:
             self._attach_context(model_result, model_context)
             results["model_prepare"] = to_plain(model_result)
             self._save_stage(task_id, "model_prepare", model_result)
-            self._remember(task_id, "model_prepare", model_result, effective_analysis)
+            self._remember(task_id, "model_prepare", model_result, effective_analysis, results)
 
         if should_run("runner"):
             runner_context = self._stage_context("runner", deploy_analysis)
@@ -229,7 +229,7 @@ class TaskRunner:
             self._attach_context(runner_result, runner_context)
             results["runner"] = to_plain(runner_result)
             self._save_stage(task_id, "runner", runner_result)
-            self._remember(task_id, "runner", runner_result, deploy_analysis)
+            self._remember(task_id, "runner", runner_result, deploy_analysis, results)
             runner_data = runner_result.data
         else:
             runner_data = results["runner"]["data"]
@@ -244,7 +244,7 @@ class TaskRunner:
         self._attach_repair_overlay(verify_result, repair_overlay)
         results["verify"] = to_plain(verify_result)
         self._save_stage(task_id, "verify", verify_result)
-        self._remember(task_id, "verify", verify_result, deploy_analysis)
+        self._remember(task_id, "verify", verify_result, deploy_analysis, results)
 
         task_data = read_json(run_dir / "task.json")
         report_result = ReportGenerator().generate(run_dir, task_data, results, execution_audit=execution_audit)
@@ -376,7 +376,7 @@ class TaskRunner:
 
     def _agent_planner_enabled(self, stage: str) -> bool:
         return (
-            self.config.agent_mode == "planner"
+            self.config.agent_mode in ("planner", "gated_actor")
             and stage == "analyze"
             and self.config.agent_enable_analyze_planner
         )
@@ -426,12 +426,15 @@ class TaskRunner:
         except (OSError, ValueError):
             return None
 
-    def _remember(self, task_id: str, stage: str, result, analysis: Dict) -> None:
+    def _remember(self, task_id: str, stage: str, result, analysis: Dict, results: Dict[str, Dict] = None) -> None:
         entry = self.memory.remember_issue(task_id, stage, result, analysis)
         if entry:
             task = self.store.load_task(task_id)
             run_dir = self.store.run_dir(task_id)
             self._maybe_agent_diagnose(task_id, stage, result, analysis, task.runtime, run_dir)
+            if results is not None:
+                results[stage] = to_plain(result)
+            self._save_stage(task_id, stage, result)
             repair_plan = self.repair_planner.propose(stage, result, analysis)
             approval = self.repair_loop.load_approval(run_dir)
             policy_result = self.repair_policy.check(repair_plan, task.runtime, operator_approval=approval)
@@ -443,6 +446,7 @@ class TaskRunner:
                 effective_policy,
                 execute=self._agent_repair_execute_enabled(task.runtime),
                 timeout_seconds=self.config.default_timeout_seconds,
+                allowed_commands=self.config.allowed_commands,
             )
             self.store.events(task_id).append(
                 stage,
