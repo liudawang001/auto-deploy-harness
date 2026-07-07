@@ -47,6 +47,10 @@
   - `MemoryPromoter` 只聚类 verified success memory：必须有 trace id、repair action hash、regression case、verify/regression pass，并且没有 high-risk policy reject。
   - proposal cluster 增加 `verified_success_count`、`verification_trace_ids`、`repair_action_hashes` 和 `regression_case_ids`，便于人工 review 追溯成功证据。
   - 新增单测 `test_memory_promotion_requires_verified_agent_success`、`test_memory_promotion_rejects_unverified_llm_suggestion`；相关 memory promotion benchmark 已按 verified success 语义更新。
+- Phase 7 文档与证据整理：
+  - 新增 `docs/agent-architecture.md`，覆盖 pipeline 图、LLM 决策点、deterministic controller、policy gate、action schema、state/resume、verify 和 failure loop。
+  - 新增 `docs/agent-safety-model.md`，覆盖 threat model、prompt injection、secret redaction、command/network/source edit/repair policy、memory promotion safety 和 audit trail。
+  - 新增 `docs/agent-evaluation-report.md`，记录测试函数静态数量、benchmark case 数量、agent vs workflow 对照、live smoke 状态、external gates 和已知限制。
 - 最终完成度审计阶段：
   - 新增 `ReadinessAuditor`，从当前仓库关键代码、进度文档和 benchmark manifest 生成机器可读完成度审计报告。
   - CLI 新增 `readiness --benchmark-report <path> --output <path>`，默认输出 `reports/readiness_audit.json`；报告会区分 `local_readiness_percent` 和真实联网/GPU/Docker/vLLM 外部验收门。
@@ -481,4 +485,5 @@
   - Phase 4：`agent-live-smoke` 基础入口、live fixture 和无密钥 manifest。
   - Phase 5：`AgentMetricsCollector`、`agent-metrics` CLI 和 paired comparison benchmark。
   - Phase 6：Memory/Skill promotion 只吸收 verified success，未验证 LLM diagnosis 不能 promotion。
-- 下一步：进入 Phase 7，整理 `agent-architecture.md`、`agent-safety-model.md` 和 `agent-evaluation-report.md`。
+  - Phase 7：架构、安全和评估证据文档已整理完成。
+- 下一步：执行真实 provider live smoke，并扩展真实开源模型仓库矩阵。

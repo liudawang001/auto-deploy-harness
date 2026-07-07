@@ -40,6 +40,7 @@ AI-Auto-Harness 是一个面向 AI 开源 demo 项目的自动部署与验证 Ag
 - Persistent queue：`queue submit/list/run` 提供本地持久化任务队列，入队与执行分离，前台 worker 显式消费任务；`queue run --max-jobs N` 会用线程池并发运行多个队列项，并通过原子 claim lock 防止多 worker 重复执行同一个 job，过期 lock 会按 TTL 回收。
 - Deployment package：`package --task-id` 会导出 `tar.gz` 审计产物包和 sidecar manifest，包含 task/state/events/reports/evidence/repairs，默认排除 workspace、模型缓存和日志。
 - Readiness audit：`readiness` 命令会生成机器可读完成度审计，区分本地已完成能力和真实联网/GPU/Docker/vLLM 外部验收门，不保存任何密钥值。
+- Agent 设计与评估文档：`docs/agent-architecture.md`、`docs/agent-safety-model.md`、`docs/agent-evaluation-report.md`。
 - Benchmark fixtures：`tests/fixtures/benchmarks` 覆盖下载续传、缓存命中、并发下载、etag 缓存失效、缓存清理、按来源/repo/keep-list 清理、服务启动后退出、历史 artifact 干扰、Gradio API shape 变化、token 缺失、token report 提示、Gradio `/config` discovery、OpenAPI schema discovery、OpenAI-compatible model discovery/stream verify、浏览器 DOM trace、Streamlit 错误页面、HTTP 200 false-positive 防护、repair policy 拒绝、repair loop 限流、repair resume 阶段跳转、人工审批、checksum 失败、本地 E2E fixture matrix、memory promotion proposal/审批/回归绑定、LLM planner policy merge、LLM repair execute loop、LLM verify hint recovery、静态 dashboard 导出、只读 HTTP dashboard、持久化任务队列 dry-run 调度、队列并发 worker pool、队列 claim lock、stale claim lock recovery、GPU 探测调度、部署产物包导出、readiness audit、Docker backend plan/GPU/cache/log 元数据、GPU 包矩阵、verify progress 和 Git LFS progress parse。
 - 开发进度报告：`docs/progress.md`。
 

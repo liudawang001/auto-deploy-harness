@@ -52,7 +52,9 @@ Phase 5 已完成：新增 `AgentMetricsCollector`，每次 pipeline 会写出 `
 
 Phase 6 已完成：`MemoryStore.remember_issue()` 默认把普通失败记忆标记为 `verified_success=false`；`MemoryPromoter` 只聚类满足 verified success、trace id、repair action hash、regression case 和无 high-risk policy reject 的条目。未验证 LLM diagnosis 只能用于相似问题检索，不能生成 skill promotion。新增 `test_memory_promotion_requires_verified_agent_success` 和 `test_memory_promotion_rejects_unverified_llm_suggestion`。
 
-下一阶段应进入 Phase 7：文档与面试证据整理。
+Phase 7 已完成：新增 `docs/agent-architecture.md`、`docs/agent-safety-model.md` 和 `docs/agent-evaluation-report.md`，分别覆盖架构闭环、安全边界和评估证据。文档明确区分本地 fixture/benchmark 证据与真实联网/GPU/Docker/vLLM 外部 gate，避免夸大。
+
+当前 Agent 面向优化计划的本地可验证阶段已完成到 Phase 7；后续重点是执行真实 provider live smoke 和扩展真实模型仓库矩阵。
 
 ## 1. 当前项目基线
 
@@ -1168,6 +1170,14 @@ LLM 输出只作为 policy-gated typed action。
 ```
 
 除非已有代码和真实运行证据。
+
+### 12.6 当前完成状态
+
+已完成。新增文档：
+
+- `docs/agent-architecture.md`：包含 pipeline 图、LLM 决策点、deterministic controller、policy gate、action schema、state/resume、verify 和 failure loop。
+- `docs/agent-safety-model.md`：包含 threat model、prompt injection 防护、secret redaction、command/network/source edit/repair policy 和 audit trail。
+- `docs/agent-evaluation-report.md`：记录测试函数静态数量、benchmark case 数量、agent vs workflow 对照口径、live smoke 状态、external gates 和已知限制。
 
 ## 13. 推荐执行顺序
 
