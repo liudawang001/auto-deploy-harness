@@ -3069,6 +3069,32 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(manifest["repair_executed_count"], 1)
             self.assertIn("task.json", manifest["sha256"])
 
+    def test_live_smoke_skips_xunfei_when_provider_env_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            old_env = {name: os.environ.get(name) for name in ("XUNFEI_API_URL", "XUNFEI_API_BASE", "XUNFEI_API_KEY", "XUNFEI_MODEL")}
+            for name in old_env:
+                os.environ.pop(name, None)
+            try:
+                result = LiveAgentSmokeRunner().run(
+                    Path("tests/fixtures/live/llm_repair_missing_dependency"),
+                    provider="xunfei",
+                    execute=True,
+                    output_dir=Path(tmp),
+                )
+            finally:
+                for name, value in old_env.items():
+                    if value is None:
+                        os.environ.pop(name, None)
+                    else:
+                        os.environ[name] = value
+            self.assertEqual(result["status"], "skipped")
+            self.assertIn("XUNFEI_API_KEY", result["missing_env"])
+            self.assertEqual(result["manifest"]["external_gate"]["status"], "external_required")
+            self.assertEqual(result["manifest"]["final_verify_status"], "skipped")
+            text = Path(result["manifest_path"]).read_text(encoding="utf-8")
+            self.assertNotIn("api_key=", text.lower())
+            self.assertNotIn("secret", text.lower())
+
     def test_agent_metrics_collector_counts_actions_and_help_type(self):
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = Path(tmp) / "runs" / "task-metrics"

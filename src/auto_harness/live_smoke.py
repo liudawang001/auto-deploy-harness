@@ -1,4 +1,5 @@
 import hashlib
+import os
 from pathlib import Path
 from typing import Dict, List
 
@@ -14,6 +15,17 @@ class LiveAgentSmokeRunner:
     def run(self, repo: Path, provider: str, execute: bool, output_dir: Path, config: HarnessConfig = None) -> Dict:
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
+        missing = self._missing_provider_env(provider)
+        if missing:
+            manifest_path = output_dir / "live-agent-smoke-manifest.json"
+            manifest = self._skipped_manifest(provider, missing, manifest_path)
+            return {
+                "status": "skipped",
+                "reason": "provider environment is not configured",
+                "missing_env": missing,
+                "manifest_path": str(manifest_path),
+                "manifest": manifest,
+            }
         config = config or HarnessConfig.load()
         config.runs_dir = str(output_dir / "runs")
         config.agent_mode = "gated_actor"
@@ -36,6 +48,38 @@ class LiveAgentSmokeRunner:
         manifest_path = output_dir / "live-agent-smoke-manifest.json"
         manifest = self.build_manifest(run_dir, provider_name=provider, output_path=manifest_path)
         return {"status": "completed", "task_id": task_id, "run_dir": str(run_dir), "manifest_path": str(manifest_path), "manifest": manifest}
+
+    def _missing_provider_env(self, provider: str) -> List[str]:
+        if provider != "xunfei":
+            return []
+        missing = []
+        if not (os.environ.get("XUNFEI_API_URL") or os.environ.get("XUNFEI_API_BASE")):
+            missing.append("XUNFEI_API_URL or XUNFEI_API_BASE")
+        for name in ("XUNFEI_API_KEY", "XUNFEI_MODEL"):
+            if not os.environ.get(name):
+                missing.append(name)
+        return missing
+
+    def _skipped_manifest(self, provider_name: str, missing_env: List[str], output_path: Path) -> Dict:
+        manifest = {
+            "task_id": "",
+            "provider_name": provider_name,
+            "model_name": "",
+            "stage_summary": {},
+            "agent_action_count": 0,
+            "rejected_action_count": 0,
+            "repair_executed_count": 0,
+            "final_verify_status": "skipped",
+            "artifact_paths": [],
+            "sha256": {},
+            "external_gate": {
+                "status": "external_required",
+                "reason": "provider environment is not configured",
+                "missing_env": missing_env,
+            },
+        }
+        write_json(Path(output_path), manifest)
+        return manifest
 
     def build_manifest(self, run_dir: Path, provider_name: str, output_path: Path = None) -> Dict:
         run_dir = Path(run_dir)

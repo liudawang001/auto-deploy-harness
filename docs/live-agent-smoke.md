@@ -71,4 +71,6 @@ PYTHONPATH=src python3 -m auto_harness.cli agent-live-smoke \
 - 本地端口被占用，服务未启动。
 - verify 没有观测到当前 trace id。
 
+当真实 provider 的必要环境变量缺失时，`agent-live-smoke` 会直接写出 skipped manifest，其中 `final_verify_status=skipped`，`external_gate.status=external_required`，`missing_env` 只包含环境变量名，不包含任何密钥值。
+
 已提交的样例 manifest 位于 `docs/evidence/live-agent-smoke-manifest.json`，只保留 metadata、artifact paths、计数、状态和哈希。
