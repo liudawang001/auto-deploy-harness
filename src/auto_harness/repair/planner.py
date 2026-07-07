@@ -6,6 +6,8 @@ from auto_harness.repair.schema import RepairAction, RepairPlan
 
 
 class RepairPlanner:
+    RERUN_STAGES = ("analyze", "resource_plan", "env_solve", "env_deploy", "model_prepare", "runner", "verify")
+
     def propose(self, stage: str, result: StageResult, analysis: Dict = None) -> Dict:
         analysis = analysis or {}
         plain = to_plain(result)
@@ -18,22 +20,44 @@ class RepairPlanner:
                 diagnosis["recommended_actions"] = agent_diagnosis.get("actions")
             if agent_diagnosis.get("rerun_from"):
                 diagnosis["rerun_from"] = agent_diagnosis.get("rerun_from")
+                diagnosis["rerun_from_proposed"] = agent_diagnosis.get("rerun_from")
+            if agent_diagnosis.get("rerun_reason"):
+                diagnosis["rerun_reason"] = agent_diagnosis.get("rerun_reason")
             data["diagnosis"] = diagnosis
         diagnosis = data.get("diagnosis") or {}
         category = diagnosis.get("category") or self._category_from_result(plain)
         root_cause = diagnosis.get("root_cause") or diagnosis.get("signal") or plain.get("error") or plain.get("summary") or "unknown"
         confidence = float(diagnosis.get("confidence") or 0.5)
         actions = self._actions_for(stage, category, data, analysis)
+        required_rerun = self._rerun_from(stage, category)
+        proposed_rerun = diagnosis.get("rerun_from_proposed") or diagnosis.get("rerun_from")
+        effective_rerun = self._safe_rerun_from(proposed_rerun, required_rerun)
         plan = RepairPlan(
             root_cause=root_cause,
             confidence=confidence,
             actions=actions,
             rollback={"type": "rerun_from_last_safe_stage"},
-            rerun_from=diagnosis.get("rerun_from") or self._rerun_from(stage, category),
+            rerun_from=effective_rerun,
             verification_required=True,
             status="proposed" if actions else "needs_manual_review",
         )
-        return to_plain(plan)
+        plain_plan = to_plain(plan)
+        plain_plan["rerun_from_required"] = required_rerun
+        plain_plan["rerun_from_proposed"] = proposed_rerun or ""
+        plain_plan["rerun_reason"] = diagnosis.get("rerun_reason", "")
+        plain_plan["rerun_from_source"] = "llm" if proposed_rerun else "deterministic"
+        if proposed_rerun and proposed_rerun != effective_rerun:
+            plain_plan["rerun_from_adjustment_reason"] = "proposed rerun_from is not safe or is later than required safe stage"
+        return plain_plan
+
+    def _safe_rerun_from(self, proposed: str, required: str) -> str:
+        if required not in self.RERUN_STAGES:
+            required = "analyze"
+        if proposed not in self.RERUN_STAGES:
+            return required
+        if self.RERUN_STAGES.index(proposed) <= self.RERUN_STAGES.index(required):
+            return proposed
+        return required
 
     def _actions_for(self, stage: str, category: str, data: Dict, analysis: Dict) -> List[RepairAction]:
         diagnosis = data.get("diagnosis") or {}

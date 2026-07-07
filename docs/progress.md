@@ -24,6 +24,10 @@
   - Verify 阶段会按 policy 最多尝试前三个合法 LLM candidate；第一个失败、第二个成功时最终仍可 pass。
   - 每个 candidate evidence 独立保存为 `_http_trace_llm_planner_<index>.json`，不会覆盖初始 evidence。
   - external URL、缺少 `{{trace_id}}` 或包含 token 的 request 会被拒绝并记录原因。
+- Phase 2.3 LLM repair rerun_from：
+  - `AgentDiagnoser` 会保留 LLM 提议的 `rerun_from` 和 `rerun_reason`。
+  - `RepairPlanner` 会计算 `rerun_from_proposed`、`rerun_from_required` 和 `rerun_from_effective`；非法或晚于安全阶段的提议会降级。
+  - Report 增加 repair rerun decision 展示，方便审计 LLM 建议与 Python 裁决差异。
 - 最终完成度审计阶段：
   - 新增 `ReadinessAuditor`，从当前仓库关键代码、进度文档和 benchmark manifest 生成机器可读完成度审计报告。
   - CLI 新增 `readiness --benchmark-report <path> --output <path>`，默认输出 `reports/readiness_audit.json`；报告会区分 `local_readiness_percent` 和真实联网/GPU/Docker/vLLM 外部验收门。

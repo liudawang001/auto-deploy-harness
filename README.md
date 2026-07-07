@@ -143,6 +143,8 @@ run candidate 会记录统一 ranking 信息：`score`、`score_reasons` 和 `se
 
 verify planner 可以输出多个 `verify_candidates`。Python 会过滤 external URL、缺少 `{{trace_id}}` 或包含 token 的请求，并最多尝试前三个合法候选；每个候选都会写独立 evidence，成功仍必须由当前 trace id 证明。
 
+repair 阶段会区分 LLM 提议和 Python 裁决的 rerun stage：`rerun_from_proposed`、`rerun_from_required`、`rerun_from_effective` 都会进入 repair plan/report；过晚或非法的 LLM 提议会降级到安全阶段。
+
 ## Skill 与 Memory
 
 Agent 控制文档写在仓库内：

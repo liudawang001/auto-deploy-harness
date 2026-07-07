@@ -2015,6 +2015,77 @@ class CoreTests(unittest.TestCase):
         self.assertFalse(result["allowed"])
         self.assertIn("unsafe package spec", result["decisions"][0]["reasons"])
 
+    def test_llm_rerun_from_is_recorded_and_safely_applied(self):
+        provider = FakeLLMProvider(json.dumps({
+            "stage": "runner",
+            "status": "ok",
+            "confidence": 0.86,
+            "diagnosis": {
+                "category": "dependency_missing",
+                "root_cause": "ModuleNotFoundError: cv2",
+                "confidence": 0.86,
+            },
+            "actions": [
+                {
+                    "type": "install_package",
+                    "reason": "cv2 requires opencv-python-headless",
+                    "confidence": 0.8,
+                    "payload": {"package": "opencv-python-headless"},
+                    "requires": {"dependency_install": True, "network": True, "source_edit": False},
+                }
+            ],
+            "rerun_from": "env_deploy",
+            "rerun_reason": "dependency install changed environment only",
+        }))
+        diagnosis = AgentDiagnoser(provider).diagnose(AgentObservation(task_id="task", stage="runner"))
+        result = StageResult("runner", "failed", "service failed", {"agent_diagnosis": diagnosis})
+        plan = RepairPlanner().propose("runner", result, {})
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            policy = RepairLoopController(max_attempts=2).gate(run_dir, "runner", {"signature": "sig"}, plan, {"allowed": True, "decisions": []})
+            RepairApplier().apply(run_dir, plan, policy)
+            report = ReportGenerator().generate(
+                run_dir,
+                {"project": {"name": "rerun-demo", "repo_url": "local"}},
+                {"runner": result.__dict__},
+            )
+            report_text = Path(report.data["report_path"]).read_text(encoding="utf-8")
+        self.assertEqual(diagnosis["rerun_reason"], "dependency install changed environment only")
+        self.assertEqual(plan["rerun_from_proposed"], "env_deploy")
+        self.assertEqual(plan["rerun_from"], "env_deploy")
+        self.assertEqual(plan["rerun_from_effective"], "env_deploy")
+        self.assertEqual(policy["loop"]["rerun_from_effective"], "env_deploy")
+        self.assertIn("Proposed rerun_from: `env_deploy`", report_text)
+        self.assertIn("Effective rerun_from: `env_deploy`", report_text)
+
+    def test_llm_unsafe_rerun_from_falls_back_to_safe_stage(self):
+        provider = FakeLLMProvider(json.dumps({
+            "stage": "runner",
+            "status": "ok",
+            "confidence": 0.86,
+            "diagnosis": {
+                "category": "dependency_missing",
+                "root_cause": "ModuleNotFoundError: cv2",
+                "confidence": 0.86,
+            },
+            "actions": [
+                {
+                    "type": "install_package",
+                    "confidence": 0.8,
+                    "payload": {"package": "opencv-python-headless"},
+                    "requires": {"dependency_install": True, "network": True, "source_edit": False},
+                }
+            ],
+            "rerun_from": "verify",
+            "rerun_reason": "try only verify",
+        }))
+        diagnosis = AgentDiagnoser(provider).diagnose(AgentObservation(task_id="task", stage="runner"))
+        plan = RepairPlanner().propose("runner", StageResult("runner", "failed", "service failed", {"agent_diagnosis": diagnosis}), {})
+        self.assertEqual(plan["rerun_from_proposed"], "verify")
+        self.assertEqual(plan["rerun_from_required"], "env_deploy")
+        self.assertEqual(plan["rerun_from"], "env_deploy")
+        self.assertEqual(plan["rerun_from_adjustment_reason"], "proposed rerun_from is not safe or is later than required safe stage")
+
     def test_repair_execute_records_command_result(self):
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = Path(tmp)

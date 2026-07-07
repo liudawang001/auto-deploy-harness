@@ -59,6 +59,7 @@ def diagnosis_prompt(observation: AgentObservation) -> str:
             }
         ],
         "rerun_from": "env_deploy | runner | verify | analyze",
+        "rerun_reason": "why this rerun stage is sufficient and safe",
     }
     return _prompt("deployment failure diagnoser", observation, schema)
 

@@ -42,7 +42,9 @@ Phase 2.1 已完成：run candidate 现在包含 `score`、`score_reasons`、`se
 
 Phase 2.2 已完成：verify planner 支持输出多个 `verify_candidates`；Python 会逐个校验 method/path/trace/token policy，最多尝试前三个合法 candidate。每个 LLM candidate 都会写入独立 HTTP evidence 文件，最终 pass 仍必须依赖当前 trace id evidence。
 
-下一阶段应进入 Phase 2.3：让 LLM 提议 repair `rerun_from`，并由 Python 校验安全阶段。
+Phase 2.3 已完成：LLM diagnoser 可以输出 `rerun_from` 和 `rerun_reason`；RepairPlanner 会记录 `rerun_from_proposed`、`rerun_from_required`、`rerun_from_effective`，并按 pipeline 安全顺序降级过晚或非法的 rerun stage。Report 会展示 proposed/effective rerun 决策。
+
+下一阶段应进入 Phase 3：prompt input safety 与恶意项目防护。
 
 ## 1. 当前项目基线
 

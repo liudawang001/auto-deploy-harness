@@ -31,6 +31,7 @@ class AgentDiagnoser:
                 for action in decision.actions
             ],
             "rerun_from": decision.plan_delta.get("rerun_from") or decision.diagnosis.get("rerun_from"),
+            "rerun_reason": decision.plan_delta.get("rerun_reason") or decision.diagnosis.get("rerun_reason") or "",
             "raw_text": decision.raw_text,
             "accepted_actions": policy.get("accepted_actions", []),
             "rejected_actions": policy.get("rejected_actions", []),

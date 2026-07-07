@@ -56,6 +56,21 @@ class ReportGenerator:
                 "- Next action: `%s`" % verify.get("next_action", ""),
                 "",
             ])
+        repair_rerun = self._repair_rerun_summary(run_dir, results)
+        if repair_rerun:
+            lines.extend([
+                "## Repair Rerun Decision",
+                "",
+                "- Proposed rerun_from: `%s`" % repair_rerun.get("rerun_from_proposed", ""),
+                "- Required safe rerun_from: `%s`" % repair_rerun.get("rerun_from_required", ""),
+                "- Effective rerun_from: `%s`" % repair_rerun.get("rerun_from_effective", ""),
+                "- Source: `%s`" % repair_rerun.get("rerun_from_source", ""),
+            ])
+            if repair_rerun.get("rerun_reason"):
+                lines.append("- Reason: %s" % repair_rerun["rerun_reason"])
+            if repair_rerun.get("rerun_from_adjustment_reason"):
+                lines.append("- Adjustment: %s" % repair_rerun["rerun_from_adjustment_reason"])
+            lines.append("")
         execution_audit = execution_audit or self._read_optional(run_dir / "reports" / "execution_audit.json")
         if isinstance(execution_audit, dict) and execution_audit:
             lines.extend([
@@ -81,6 +96,31 @@ class ReportGenerator:
             lines.append("")
         report_path.write_text("\n".join(lines), encoding="utf-8")
         return StageResult("report", "passed", "report generated", {"report_path": str(report_path)}, evidence=[str(report_path)])
+
+    def _repair_rerun_summary(self, run_dir: Path, results: Dict[str, Dict]) -> Dict:
+        plan = self._read_optional(run_dir / "repairs" / "repair_plan.json")
+        if isinstance(plan, dict) and (plan.get("rerun_from_proposed") or plan.get("rerun_from_effective") or plan.get("rerun_from")):
+            return {
+                "rerun_from_proposed": plan.get("rerun_from_proposed", ""),
+                "rerun_from_required": plan.get("rerun_from_required", ""),
+                "rerun_from_effective": plan.get("rerun_from_effective") or plan.get("rerun_from", ""),
+                "rerun_from_source": plan.get("rerun_from_source", ""),
+                "rerun_reason": plan.get("rerun_reason", ""),
+                "rerun_from_adjustment_reason": plan.get("rerun_from_adjustment_reason", ""),
+            }
+        for result in results.values():
+            data = result.get("data") if isinstance(result, dict) else {}
+            loop = data.get("agent_loop") if isinstance(data, dict) else {}
+            if isinstance(loop, dict) and loop.get("next_rerun_from"):
+                return {
+                    "rerun_from_proposed": "",
+                    "rerun_from_required": "",
+                    "rerun_from_effective": loop.get("next_rerun_from", ""),
+                    "rerun_from_source": "agent_loop",
+                    "rerun_reason": "",
+                    "rerun_from_adjustment_reason": "",
+                }
+        return {}
 
     def _run_candidate_selection(self, results: Dict[str, Dict]) -> Dict:
         runner = results.get("runner", {}).get("data", {})
