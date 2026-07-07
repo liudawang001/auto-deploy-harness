@@ -201,7 +201,7 @@
   - E2E matrix 会断言 framework 识别、run candidate 端口、env_solve 约束、Git LFS pointer/size、Torch solution、manifest 和 report 输出，防止 pipeline 接线回归。
   - Benchmark cases 从 27 个扩展到 28 个。
 - 下一阶段优化任务：
-  - 新增 `MemoryPromoter`，读取 `memory/deployment_issues.jsonl`，按 stage / category / frameworks 聚类高频失败记忆。
+  - 新增 `MemoryPromoter`，读取 `memory/deployment_issues.jsonl`，按 stage / category / frameworks 聚类高频记忆；当前版本已在 Phase 6 收紧为只聚类 verified success memory，普通失败记忆仅用于检索。
   - 新增 CLI 子命令 `memory-promote`：默认生成 `memory/promotions/<proposal_id>.json` 和 `.md` 审核稿，包含 cluster、目标 skill、建议追加片段和 `review_required=true`。
   - `memory-promote --apply --proposal <path>` 才会把审核后的片段追加到目标 `skills/*/SKILL.md`，并使用 marker 防止重复应用；默认 proposal 模式不会修改 skill。
   - Promotion 会按阶段选择目标 skill：verify -> `verify-evidence`，resource/model -> `prepare-model-assets`，env_solve/dependency -> `solve-python-cuda-env`，env_deploy/runner -> `deploy-python-webui`。
