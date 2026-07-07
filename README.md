@@ -147,6 +147,8 @@ repair 阶段会区分 LLM 提议和 Python 裁决的 rerun stage：`rerun_from_
 
 发送给 LLM 的 selected files 会先经过 `AgentInputSanitizer`：secret value 会替换为 `[REDACTED_SECRET]`，prompt injection 风险会写入 observation metadata，trace 写入前也会脱敏。恶意 README 诱导出的 shell/network run candidate 会被 policy 拒绝。
 
+每次 run 会生成 `reports/agent_metrics.json`，记录 LLM 调用数、accepted/rejected action、执行动作数、repair attempts、verify candidates、final status 和 `help_type`。可用 `agent-metrics --runs-dir runs` 汇总本地所有任务。
+
 ## Skill 与 Memory
 
 Agent 控制文档写在仓库内：

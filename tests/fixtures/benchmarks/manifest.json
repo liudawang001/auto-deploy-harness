@@ -274,6 +274,11 @@
       "id": "agent_prompt_injection_defense",
       "purpose": "验证恶意 README 中的 prompt injection 和 secret 不会污染 LLM prompt/trace，且 shell action 被 policy 拒绝",
       "expected_signal": "secret redacted, prompt injection risk annotated, shell action rejected"
+    },
+    {
+      "id": "agent_metrics_paired_comparison",
+      "purpose": "验证 agent off/on paired run 可以生成可比较的 agent metrics",
+      "expected_signal": "metrics compare final status, repair attempts, rejected actions and helped flag"
     }
   ]
 }

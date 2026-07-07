@@ -4,7 +4,7 @@ import subprocess
 from pathlib import Path
 from typing import Dict
 
-from auto_harness.agent import AgentDecisionEngine, AgentDiagnoser, AgentLoopController, AgentObservation, AgentTraceWriter, AgentVerifyPlanner
+from auto_harness.agent import AgentDecisionEngine, AgentDiagnoser, AgentLoopController, AgentMetricsCollector, AgentObservation, AgentTraceWriter, AgentVerifyPlanner
 from auto_harness.config import HarnessConfig
 from auto_harness.agents.claude_code import ClaudeCodeExecutor
 from auto_harness.assets import HuggingFaceDownloader, ModelCache, ModelScopeDownloader
@@ -246,6 +246,7 @@ class TaskRunner:
         self._save_stage(task_id, "verify", verify_result)
         self._remember(task_id, "verify", verify_result, deploy_analysis, results)
 
+        AgentMetricsCollector().collect(run_dir, results, output_path=run_dir / "reports" / "agent_metrics.json")
         task_data = read_json(run_dir / "task.json")
         report_result = ReportGenerator().generate(run_dir, task_data, results, execution_audit=execution_audit)
         results["report"] = to_plain(report_result)

@@ -37,6 +37,11 @@
   - 新增 `agent-live-smoke` CLI，可对 live fixture 执行 provider 驱动的 agent smoke，并输出无密钥 manifest。
   - 新增 `tests/fixtures/live/llm_repair_missing_dependency/`，用于验证缺依赖诊断、repair action 和 trace verify 的真实路径。
   - 新增 `docs/live-agent-smoke.md` 和 `docs/evidence/live-agent-smoke-manifest.json` 样例；manifest 只记录 task/provider/model、阶段摘要、action 计数、repair 执行数、final verify status、artifact paths 和 sha256。
+- Phase 5 Agent metrics：
+  - 新增 `AgentMetricsCollector`，从 run artifacts 统计 LLM call、accepted/rejected action、executed action、repair attempt、auto resume、verify candidate、final status 和 help_type。
+  - Orchestrator 会在 report 前写出 `reports/agent_metrics.json`，report 增加 Agent Metrics 小节。
+  - CLI 新增 `agent-metrics`，可汇总本地 runs 并输出机器可读 JSON。
+  - Benchmark 新增 `agent_metrics_paired_comparison`，验证 agent off/on paired run 可以生成可比较指标。
 - 最终完成度审计阶段：
   - 新增 `ReadinessAuditor`，从当前仓库关键代码、进度文档和 benchmark manifest 生成机器可读完成度审计报告。
   - CLI 新增 `readiness --benchmark-report <path> --output <path>`，默认输出 `reports/readiness_audit.json`；报告会区分 `local_readiness_percent` 和真实联网/GPU/Docker/vLLM 外部验收门。

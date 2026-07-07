@@ -12,7 +12,7 @@ from contextlib import redirect_stdout
 from pathlib import Path
 
 from auto_harness.config import HarnessConfig
-from auto_harness.agent import AgentActionPolicy, AgentDecisionEngine, AgentDiagnoser, AgentLoopController, AgentTraceWriter, AgentVerifyPlanner
+from auto_harness.agent import AgentActionPolicy, AgentDecisionEngine, AgentDiagnoser, AgentLoopController, AgentMetricsCollector, AgentTraceWriter, AgentVerifyPlanner
 from auto_harness.agent.schemas import AgentAction, AgentDecision, AgentObservation
 from auto_harness.benchmarks import BenchmarkRunner, LiveSmokePlanner
 from auto_harness.cli import _apply_cli_overrides, build_parser, main as cli_main
@@ -2603,11 +2603,12 @@ class CoreTests(unittest.TestCase):
         self.assertIn("llm_verify_hint_recovery", ids)
         self.assertIn("agent_loop_dependency_self_repair_e2e", ids)
         self.assertIn("agent_prompt_injection_defense", ids)
+        self.assertIn("agent_metrics_paired_comparison", ids)
 
     def test_benchmark_runner_executes_all_fixture_cases(self):
         report = BenchmarkRunner().run(Path("tests/fixtures/benchmarks/manifest.json"))
         self.assertEqual(report["status"], "passed")
-        self.assertEqual(len(report["cases"]), 55)
+        self.assertEqual(len(report["cases"]), 56)
         self.assertTrue(all(case["status"] == "passed" for case in report["cases"]))
 
     def test_benchmark_cli_writes_output(self):
@@ -2991,6 +2992,63 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(manifest["agent_action_count"], 1)
             self.assertEqual(manifest["repair_executed_count"], 1)
             self.assertIn("task.json", manifest["sha256"])
+
+    def test_agent_metrics_collector_counts_actions_and_help_type(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "runs" / "task-metrics"
+            (run_dir / "reports").mkdir(parents=True)
+            (run_dir / "repairs").mkdir()
+            (run_dir / "logs" / "agent_calls").mkdir(parents=True)
+            (run_dir / "reports" / "pipeline_results.json").write_text(json.dumps({
+                "analyze": {
+                    "status": "passed",
+                    "data": {
+                        "run_candidates": [
+                            {"cmd": ["python", "app.py"], "selected_by": "combined"}
+                        ]
+                    },
+                },
+                "verify": {
+                    "status": "passed",
+                    "data": {
+                        "llm_verify_planner": {
+                            "accepted_candidates": [{"verify_hint": {"request": {"method": "GET"}}}]
+                        }
+                    },
+                },
+            }), encoding="utf-8")
+            (run_dir / "repairs" / "repair_apply_result.json").write_text(json.dumps({"executed_action_count": 1}), encoding="utf-8")
+            (run_dir / "repairs" / "repair_loop_state.json").write_text(json.dumps({"history": [{"stage": "runner"}]}), encoding="utf-8")
+            (run_dir / "logs" / "agent_calls" / "analyze.json").write_text(json.dumps({
+                "policy_result": {"accepted_actions": [{"type": "select_run_candidate"}], "rejected_actions": [{"type": "bad"}]},
+            }), encoding="utf-8")
+            output = run_dir / "reports" / "agent_metrics.json"
+            report = AgentMetricsCollector().collect(run_dir, output_path=output)
+            metrics = report["agent_metrics"]
+            self.assertEqual(metrics["llm_call_count"], 1)
+            self.assertEqual(metrics["accepted_action_count"], 1)
+            self.assertEqual(metrics["rejected_action_count"], 1)
+            self.assertEqual(metrics["executed_action_count"], 1)
+            self.assertIn("selected_run_candidate", metrics["help_type"])
+            self.assertIn("repaired_dependency", metrics["help_type"])
+            self.assertTrue(output.exists())
+
+    def test_agent_metrics_cli_writes_summary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            run_dir = runs / "task"
+            (run_dir / "reports").mkdir(parents=True)
+            (run_dir / "reports" / "pipeline_results.json").write_text(json.dumps({
+                "verify": {"status": "uncertain", "data": {}},
+            }), encoding="utf-8")
+            output = Path(tmp) / "agent_metrics.json"
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                code = cli_main(["agent-metrics", "--runs-dir", str(runs), "--output", str(output)])
+            self.assertEqual(code, 0)
+            data = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(data["status"], "generated")
+            self.assertEqual(data["run_count"], 1)
 
     def test_docker_smoke_checker_plans_without_running_commands(self):
         calls = []

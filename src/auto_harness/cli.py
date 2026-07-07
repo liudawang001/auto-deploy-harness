@@ -2,6 +2,7 @@ import argparse
 import json
 from pathlib import Path
 
+from auto_harness.agent import AgentMetricsCollector
 from auto_harness.config import HarnessConfig
 from auto_harness.artifacts import DeploymentPackageExporter
 from auto_harness.benchmarks import BenchmarkRunner, LiveSmokePlanner
@@ -98,6 +99,10 @@ def build_parser() -> argparse.ArgumentParser:
     readiness = sub.add_parser("readiness", help="audit local project readiness and list external smoke gates")
     readiness.add_argument("--benchmark-report", default="")
     readiness.add_argument("--output", default="")
+
+    agent_metrics = sub.add_parser("agent-metrics", help="collect agent metrics from local runs")
+    agent_metrics.add_argument("--runs-dir", default="")
+    agent_metrics.add_argument("--output", default="")
 
     queue = sub.add_parser("queue", help="submit and run persistent deployment queue jobs")
     queue_sub = queue.add_subparsers(dest="queue_command", required=True)
@@ -281,6 +286,13 @@ def main(argv=None) -> int:
         result = ReadinessAuditor().audit(Path.cwd(), benchmark_report=benchmark_report, output_path=output)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0 if result.get("status") == "ready_for_external_smoke" else 2
+
+    if args.command == "agent-metrics":
+        runs_dir = Path(args.runs_dir) if args.runs_dir else config.runs_path
+        output = Path(args.output) if args.output else None
+        result = AgentMetricsCollector().collect_many(runs_dir, output_path=output)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0
 
     if args.command == "queue":
         queue = DeploymentQueue(config.task_queue_path, runner, claim_ttl_seconds=config.queue_claim_ttl_seconds)

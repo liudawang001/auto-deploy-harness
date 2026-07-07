@@ -1,6 +1,7 @@
 from auto_harness.agent.diagnoser import AgentDiagnoser
 from auto_harness.agent.engine import AgentDecisionEngine
 from auto_harness.agent.loop import AgentLoopController
+from auto_harness.agent.metrics import AgentMetricsCollector
 from auto_harness.agent.policy import AgentActionPolicy
 from auto_harness.agent.schemas import AgentAction, AgentDecision, AgentObservation
 from auto_harness.agent.safety import AgentInputSanitizer
@@ -13,6 +14,7 @@ __all__ = [
     "AgentDecisionEngine",
     "AgentDiagnoser",
     "AgentLoopController",
+    "AgentMetricsCollector",
     "AgentObservation",
     "AgentInputSanitizer",
     "AgentActionPolicy",

@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Dict, List
 
 from auto_harness.agent import AgentDecisionEngine, AgentDiagnoser, AgentObservation, AgentTraceWriter, AgentVerifyPlanner
+from auto_harness.agent.metrics import AgentMetricsCollector
 from auto_harness.artifacts import DeploymentPackageExporter
 from auto_harness.assets import GitLFSDetector, GitSubmoduleDetector, HuggingFaceDownloader, ModelCache
 from auto_harness.assets.manifest import ModelAsset
@@ -229,6 +230,8 @@ class BenchmarkRunner:
                 return self._case_agent_loop_dependency_self_repair_e2e(case)
             if case_id == "agent_prompt_injection_defense":
                 return self._case_agent_prompt_injection_defense(case)
+            if case_id == "agent_metrics_paired_comparison":
+                return self._case_agent_metrics_paired_comparison(case)
             return self._result(case, "skipped", "unknown benchmark case")
         except Exception as exc:  # noqa: BLE001 - benchmark report should continue
             return self._result(case, "failed", str(exc))
@@ -1940,6 +1943,36 @@ class BenchmarkRunner:
                 and len(result.data.get("agent_decision", {}).get("rejected_actions", [])) == 1
             )
         return self._result(case, "passed" if ok else "failed", "Agent prompt injection defense verified")
+
+    def _case_agent_metrics_paired_comparison(self, case: Dict) -> Dict:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            off = root / "runs" / "agent-off"
+            on = root / "runs" / "agent-on"
+            for run_dir, verify_status in ((off, "uncertain"), (on, "passed")):
+                (run_dir / "reports").mkdir(parents=True)
+                (run_dir / "repairs").mkdir()
+                (run_dir / "logs" / "agent_calls").mkdir(parents=True)
+                write_json(run_dir / "reports" / "pipeline_results.json", {
+                    "verify": {"status": verify_status, "summary": "verify %s" % verify_status, "data": {}},
+                })
+                write_json(run_dir / "repairs" / "repair_apply_result.json", {"executed_action_count": 1 if run_dir == on else 0})
+                write_json(run_dir / "repairs" / "repair_loop_state.json", {"history": [{"stage": "runner"}] if run_dir == on else []})
+            write_json(on / "logs" / "agent_calls" / "runner.json", {
+                "parsed_decision": {"actions": [{"type": "install_package"}]},
+                "policy_result": {"accepted_actions": [{"type": "install_package"}], "rejected_actions": []},
+            })
+            report = AgentMetricsCollector().collect_many(root / "runs")
+            runs = {item["task_id"]: item["agent_metrics"] for item in report["runs"]}
+            ok = (
+                report["run_count"] == 2
+                and runs["agent-off"]["final_status"] == "uncertain"
+                and runs["agent-on"]["final_status"] == "passed"
+                and runs["agent-on"]["executed_action_count"] == 1
+                and runs["agent-on"]["agent_helped"] is True
+                and report["totals"]["llm_call_count"] == 1
+            )
+        return self._result(case, "passed" if ok else "failed", "Agent metrics paired comparison verified")
 
     def _stage_update_count(self, run_dir: Path) -> Dict[str, int]:
         counts: Dict[str, int] = {}

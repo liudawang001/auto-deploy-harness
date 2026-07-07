@@ -71,6 +71,23 @@ class ReportGenerator:
             if repair_rerun.get("rerun_from_adjustment_reason"):
                 lines.append("- Adjustment: %s" % repair_rerun["rerun_from_adjustment_reason"])
             lines.append("")
+        agent_metrics = self._read_optional(run_dir / "reports" / "agent_metrics.json")
+        metrics = agent_metrics.get("agent_metrics") if isinstance(agent_metrics, dict) else {}
+        if metrics:
+            lines.extend([
+                "## Agent Metrics",
+                "",
+                "- LLM calls: `%s`" % metrics.get("llm_call_count", 0),
+                "- Accepted actions: `%s`" % metrics.get("accepted_action_count", 0),
+                "- Rejected actions: `%s`" % metrics.get("rejected_action_count", 0),
+                "- Executed actions: `%s`" % metrics.get("executed_action_count", 0),
+                "- Repair attempts: `%s`" % metrics.get("repair_attempt_count", 0),
+                "- Auto resume count: `%s`" % metrics.get("auto_resume_count", 0),
+                "- Verify candidate count: `%s`" % metrics.get("verify_candidate_count", 0),
+                "- Agent helped: `%s`" % str(bool(metrics.get("agent_helped"))).lower(),
+                "- Help type: %s" % (", ".join("`%s`" % item for item in metrics.get("help_type") or []) or "`none`"),
+                "",
+            ])
         execution_audit = execution_audit or self._read_optional(run_dir / "reports" / "execution_audit.json")
         if isinstance(execution_audit, dict) and execution_audit:
             lines.extend([

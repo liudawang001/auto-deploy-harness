@@ -18,8 +18,11 @@ class ReadinessAuditor:
         "src/auto_harness/agent/engine.py",
         "src/auto_harness/agent/policy.py",
         "src/auto_harness/agent/traces.py",
+        "src/auto_harness/agent/safety.py",
+        "src/auto_harness/agent/metrics.py",
         "src/auto_harness/agent/diagnoser.py",
         "src/auto_harness/agent/verify_planner.py",
+        "src/auto_harness/live_smoke.py",
         "src/auto_harness/orchestrator.py",
         "src/auto_harness/modules/verify.py",
         "src/auto_harness/modules/model_prepare.py",
@@ -59,6 +62,7 @@ class ReadinessAuditor:
         "llm_verify_hint_recovery",
         "agent_loop_dependency_self_repair_e2e",
         "agent_prompt_injection_defense",
+        "agent_metrics_paired_comparison",
     ]
 
     EXTERNAL_GATES = [

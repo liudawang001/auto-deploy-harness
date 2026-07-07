@@ -48,7 +48,9 @@ Phase 3 已完成：新增 `AgentInputSanitizer`，支持 secret redaction、pro
 
 Phase 4 已完成基础可执行入口：新增 `agent-live-smoke` CLI、`tests/fixtures/live/llm_repair_missing_dependency/` fixture、`LiveAgentSmokeRunner` manifest 生成器、`docs/live-agent-smoke.md` 和无 secret 样例 manifest。真实 Xunfei live smoke 仍需要操作者在本机通过环境变量注入密钥后执行，不会把密钥写入仓库。
 
-下一阶段应进入 Phase 5：Agent 评估指标。
+Phase 5 已完成：新增 `AgentMetricsCollector`，每次 pipeline 会写出 `reports/agent_metrics.json`；新增 `agent-metrics` CLI 汇总 runs；report 会展示 LLM calls、accepted/rejected actions、executed actions、repair attempts、auto resume、verify candidates、agent_helped 和 help_type。Benchmark 新增 `agent_metrics_paired_comparison`。
+
+下一阶段应进入 Phase 6：Memory 和 Skill Promotion 只吸收成功经验。
 
 ## 1. 当前项目基线
 
