@@ -51,6 +51,13 @@
   - 新增 `docs/agent-architecture.md`，覆盖 pipeline 图、LLM 决策点、deterministic controller、policy gate、action schema、state/resume、verify 和 failure loop。
   - 新增 `docs/agent-safety-model.md`，覆盖 threat model、prompt injection、secret redaction、command/network/source edit/repair policy、memory promotion safety 和 audit trail。
   - 新增 `docs/agent-evaluation-report.md`，记录测试函数静态数量、benchmark case 数量、agent vs workflow 对照、live smoke 状态、external gates 和已知限制。
+- 真实 Xunfei live smoke：
+  - 2026-07-08 使用真实 Xunfei provider 执行 repair-mode live smoke，密钥仅通过一次性进程环境变量注入，没有写入仓库。
+  - 修复 deterministic analyzer 对 `http.server.HTTPServer` 端口识别不足的问题，标准库 HTTP fixture 可直接识别 `127.0.0.1:8000` 并生成 GET trace verify hint。
+  - 修复本机系统代理导致 localhost verify 被代理为 502 的问题，`VerifyModule` 对 `127.0.0.1` / `localhost` / `::1` 强制绕过代理。
+  - `RepairPlanner` 现在会把 LLM diagnoser 的 policy-accepted actions 合并进 repair plan，即使 LLM decision status 为 failed，也不会使用 rejected action。
+  - `agent-live-smoke` 支持 `--disable-analyze-planner` 和 `--resume-attempts`，可验证“先失败 -> repair install -> resume -> verify pass”闭环。
+  - 已归档无密钥 manifest 到 `docs/evidence/live-agent-smoke-manifest.json`，当前 `final_verify_status=passed`、`repair_executed_count=1`、`resume_attempt_count=1`。
 - 最终完成度审计阶段：
   - 新增 `ReadinessAuditor`，从当前仓库关键代码、进度文档和 benchmark manifest 生成机器可读完成度审计报告。
   - CLI 新增 `readiness --benchmark-report <path> --output <path>`，默认输出 `reports/readiness_audit.json`；报告会区分 `local_readiness_percent` 和真实联网/GPU/Docker/vLLM 外部验收门。
@@ -486,4 +493,4 @@
   - Phase 5：`AgentMetricsCollector`、`agent-metrics` CLI 和 paired comparison benchmark。
   - Phase 6：Memory/Skill promotion 只吸收 verified success，未验证 LLM diagnosis 不能 promotion。
   - Phase 7：架构、安全和评估证据文档已整理完成。
-- 下一步：执行真实 provider live smoke，并扩展真实开源模型仓库矩阵。
+- 下一步：扩展真实开源模型仓库矩阵，覆盖 Hugging Face / ModelScope / Git LFS / vLLM / Docker GPU 外部环境。

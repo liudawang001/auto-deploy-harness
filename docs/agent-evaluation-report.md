@@ -71,7 +71,16 @@ PYTHONPATH=src python3 -m auto_harness.cli benchmark \
 - `docs/live-agent-smoke.md`
 - `docs/evidence/live-agent-smoke-manifest.json`
 
-真实 provider live smoke 需要操作者在本机通过环境变量注入密钥后执行。本次没有运行真实联网 provider smoke，因此不能声称真实外部 provider 已通过。
+2026-07-08 已使用真实 Xunfei provider 通过一次 repair-mode live smoke。密钥通过一次性进程环境变量注入，未写入仓库文件或命令输出。归档 manifest 位于 `docs/evidence/live-agent-smoke-manifest.json`，关键信号：
+
+- `provider_name=xunfei`
+- `model_name=astron-code-latest`
+- `final_verify_status=passed`
+- `repair_executed_count=1`
+- `resume_attempt_count=1`
+- HTTP trace evidence 包含当前 trace id，证明服务真实处理了验证请求。
+
+仍不能据此宣称所有真实开源模型仓库都已验证；该 smoke 只证明真实 provider + 小型 live fixture 的 Agent repair/resume/verify 闭环成立。
 
 ## External Gates
 
@@ -87,7 +96,7 @@ readiness report 会把这些标记为 `external_required` 或 `future_scale_gat
 
 ## 已知限制
 
-- Agent 当前主要在 fixture 和本地 mock provider 场景完成验证，真实复杂仓库仍需要更多 live smoke 矩阵。
+- Agent 当前已有真实 Xunfei live smoke 通过记录，但真实复杂仓库仍需要更多 live smoke 矩阵。
 - auto-resume 已有受控判定，但默认仍强调审计和安全门禁。
 - LLM advice 已 schema 化进入 planner/diagnoser/verify planner，但价值取决于日志质量、项目文档质量和 provider 输出稳定性。
 - Memory promotion 现在只吸收 verified success，但自动写入 verified success memory 的更完整闭环仍可继续加强。

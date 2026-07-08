@@ -13,10 +13,13 @@ class RepairPlanner:
         plain = to_plain(result)
         data = plain.get("data") if isinstance(plain.get("data"), dict) else {}
         agent_diagnosis = data.get("agent_diagnosis") if isinstance(data.get("agent_diagnosis"), dict) else {}
-        if agent_diagnosis.get("status") == "ok":
+        accepted_agent_actions = agent_diagnosis.get("accepted_actions") or []
+        if agent_diagnosis.get("status") in ("ok", "failed") or accepted_agent_actions:
             data = dict(data)
             diagnosis = dict(agent_diagnosis.get("diagnosis") or {})
-            if agent_diagnosis.get("actions"):
+            if accepted_agent_actions:
+                diagnosis["recommended_actions"] = accepted_agent_actions
+            elif agent_diagnosis.get("status") == "ok" and agent_diagnosis.get("actions"):
                 diagnosis["recommended_actions"] = agent_diagnosis.get("actions")
             if agent_diagnosis.get("rerun_from"):
                 diagnosis["rerun_from"] = agent_diagnosis.get("rerun_from")
@@ -44,6 +47,7 @@ class RepairPlanner:
         plain_plan = to_plain(plan)
         plain_plan["rerun_from_required"] = required_rerun
         plain_plan["rerun_from_proposed"] = proposed_rerun or ""
+        plain_plan["rerun_from_effective"] = effective_rerun
         plain_plan["rerun_reason"] = diagnosis.get("rerun_reason", "")
         plain_plan["rerun_from_source"] = "llm" if proposed_rerun else "deterministic"
         if proposed_rerun and proposed_rerun != effective_rerun:

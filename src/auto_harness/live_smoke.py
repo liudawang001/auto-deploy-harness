@@ -1,4 +1,5 @@
 import hashlib
+import json
 import os
 from pathlib import Path
 from typing import Dict, List
@@ -12,7 +13,16 @@ from auto_harness.utils.time import compact_timestamp
 class LiveAgentSmokeRunner:
     """Runs optional live agent smoke and writes a redacted manifest."""
 
-    def run(self, repo: Path, provider: str, execute: bool, output_dir: Path, config: HarnessConfig = None) -> Dict:
+    def run(
+        self,
+        repo: Path,
+        provider: str,
+        execute: bool,
+        output_dir: Path,
+        config: HarnessConfig = None,
+        analyze_planner: bool = True,
+        resume_attempts: int = 1,
+    ) -> Dict:
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         missing = self._missing_provider_env(provider)
@@ -30,7 +40,7 @@ class LiveAgentSmokeRunner:
         config.runs_dir = str(output_dir / "runs")
         config.agent_mode = "gated_actor"
         config.agent_provider = provider
-        config.agent_enable_analyze_planner = True
+        config.agent_enable_analyze_planner = bool(analyze_planner)
         config.agent_enable_log_diagnosis = True
         config.agent_enable_verify_planner = True
         config.agent_enable_repair_actions = True
@@ -44,9 +54,18 @@ class LiveAgentSmokeRunner:
             allow_install=execute,
             allow_start=execute,
         )
+        resumed = 0
+        for _ in range(max(0, int(resume_attempts or 0))):
+            run_dir = Path(config.runs_dir) / task_id
+            if not self._should_resume(run_dir):
+                break
+            runner.resume(task_id, dry_run=not execute)
+            resumed += 1
         run_dir = Path(config.runs_dir) / task_id
         manifest_path = output_dir / "live-agent-smoke-manifest.json"
         manifest = self.build_manifest(run_dir, provider_name=provider, output_path=manifest_path)
+        manifest["resume_attempt_count"] = resumed
+        write_json(manifest_path, manifest)
         return {"status": "completed", "task_id": task_id, "run_dir": str(run_dir), "manifest_path": str(manifest_path), "manifest": manifest}
 
     def _missing_provider_env(self, provider: str) -> List[str]:
@@ -69,6 +88,7 @@ class LiveAgentSmokeRunner:
             "agent_action_count": 0,
             "rejected_action_count": 0,
             "repair_executed_count": 0,
+            "resume_attempt_count": 0,
             "final_verify_status": "skipped",
             "artifact_paths": [],
             "sha256": {},
@@ -93,7 +113,8 @@ class LiveAgentSmokeRunner:
             "stage_summary": {stage: {"status": result.get("status"), "summary": result.get("summary")} for stage, result in pipeline.items() if isinstance(result, dict)},
             "agent_action_count": agent_counts["action_count"],
             "rejected_action_count": agent_counts["rejected_action_count"],
-            "repair_executed_count": int(repair_apply.get("executed_action_count") or 0),
+            "repair_executed_count": self._repair_executed_count(run_dir, repair_apply),
+            "resume_attempt_count": self._resume_attempt_count(run_dir),
             "final_verify_status": pipeline.get("verify", {}).get("status", ""),
             "artifact_paths": self._artifact_paths(run_dir),
         }
@@ -101,6 +122,47 @@ class LiveAgentSmokeRunner:
         if output_path:
             write_json(Path(output_path), manifest)
         return manifest
+
+    def _repair_executed_count(self, run_dir: Path, latest_apply: Dict) -> int:
+        count = int(latest_apply.get("executed_action_count") or 0)
+        events_path = run_dir / "events.jsonl"
+        if not events_path.exists():
+            return count
+        for line in events_path.read_text(encoding="utf-8").splitlines():
+            if '"memory_recorded"' not in line:
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            data = event.get("data") if isinstance(event.get("data"), dict) else {}
+            repair_apply = data.get("repair_apply") if isinstance(data.get("repair_apply"), dict) else {}
+            count += int(repair_apply.get("executed_action_count") or 0)
+        return count
+
+    def _should_resume(self, run_dir: Path) -> bool:
+        pipeline = self._read_optional(run_dir / "reports" / "pipeline_results.json") or {}
+        verify = pipeline.get("verify") if isinstance(pipeline.get("verify"), dict) else {}
+        if verify.get("status") in ("pass", "passed"):
+            return False
+        for result in pipeline.values():
+            if not isinstance(result, dict):
+                continue
+            data = result.get("data") if isinstance(result.get("data"), dict) else {}
+            loop = data.get("agent_loop") if isinstance(data.get("agent_loop"), dict) else {}
+            if loop.get("should_auto_resume"):
+                return True
+        return False
+
+    def _resume_attempt_count(self, run_dir: Path) -> int:
+        events_path = run_dir / "events.jsonl"
+        if not events_path.exists():
+            return 0
+        count = 0
+        for line in events_path.read_text(encoding="utf-8").splitlines():
+            if '"resume_requested"' in line:
+                count += 1
+        return count
 
     def _agent_counts(self, run_dir: Path) -> Dict:
         action_count = 0

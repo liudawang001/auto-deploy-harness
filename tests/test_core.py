@@ -234,6 +234,20 @@ class CoreTests(unittest.TestCase):
             self.assertTrue(result.data["run_candidates"])
             self.assertEqual(result.data["verify_hint"]["request"]["method"], "POST")
 
+    def test_analyzer_detects_stdlib_http_server_port_and_verify_hint(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "requirements.txt").write_text("", encoding="utf-8")
+            (repo / "app.py").write_text(
+                "from http.server import BaseHTTPRequestHandler, HTTPServer\n"
+                "HTTPServer(('127.0.0.1', 8000), BaseHTTPRequestHandler).serve_forever()\n",
+                encoding="utf-8",
+            )
+            result = ProjectAnalyzer().analyze(repo)
+            self.assertIn("http.server", result.data["frameworks"])
+            self.assertEqual(result.data["run_candidates"][0]["expected_port"], 8000)
+            self.assertEqual(result.data["verify_hint"]["request"]["path"], "/?_auto_harness_trace={{trace_id}}")
+
     def test_analyzer_detects_vllm_openai_compatible_service(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
@@ -328,6 +342,7 @@ class CoreTests(unittest.TestCase):
                         "confidence": 0.9,
                         "payload": {
                             "cmd": [".venv/bin/python", "main.py"],
+                            "expected_port": 8000,
                             "score": 0.92,
                             "score_reasons": ["main.py is documented as the server entrypoint"],
                         },
@@ -337,6 +352,7 @@ class CoreTests(unittest.TestCase):
             result = ProjectAnalyzer(agent_engine=AgentDecisionEngine(provider), agent_mode="planner").analyze(repo)
             selected = result.data["run_candidates"][0]
             self.assertEqual(selected["cmd"], [".venv/bin/python", "main.py"])
+            self.assertEqual(selected["expected_port"], 8000)
             self.assertEqual(selected["selected_by"], "combined")
             self.assertGreaterEqual(selected["score"], 0.9)
             self.assertIn("main.py is documented as the server entrypoint", selected["score_reasons"])
@@ -612,6 +628,26 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(result.status, "passed")
             self.assertEqual(result.data["status"], "pass")
             self.assertIn("_auto_harness_trace=", captured["url"])
+
+    def test_verify_local_http_trace_bypasses_system_proxy(self):
+        module = VerifyModule()
+        calls = []
+
+        def base_urlopen(req, timeout):
+            calls.append(("base", getattr(req, "full_url", req)))
+            return FakeHttpResponse("base")
+
+        def no_proxy_urlopen(req, timeout):
+            calls.append(("no_proxy", getattr(req, "full_url", req)))
+            return FakeHttpResponse("no_proxy")
+
+        module._base_urlopen = base_urlopen
+        module._no_proxy_urlopen = no_proxy_urlopen
+        module._custom_urlopen = False
+        module.urlopen(urllib.request.Request("http://127.0.0.1:8000/"), timeout=1)
+        module.urlopen(urllib.request.Request("https://example.com/"), timeout=1)
+        self.assertEqual(calls[0][0], "no_proxy")
+        self.assertEqual(calls[1][0], "base")
 
     def test_verify_post_json_trace(self):
         captured = {}
@@ -2204,6 +2240,40 @@ class CoreTests(unittest.TestCase):
         self.assertIn("Proposed rerun_from: `env_deploy`", report_text)
         self.assertIn("Effective rerun_from: `env_deploy`", report_text)
 
+    def test_repair_planner_uses_policy_accepted_llm_actions_when_status_failed(self):
+        diagnosis = {
+            "status": "failed",
+            "confidence": 0.9,
+            "diagnosis": {
+                "category": "dependency_missing",
+                "root_cause": "ModuleNotFoundError: rich",
+                "confidence": 0.9,
+            },
+            "actions": [
+                {"type": "install_package", "payload": {"package": "https://evil.example/pkg.whl"}},
+            ],
+            "accepted_actions": [
+                {
+                    "type": "install_package",
+                    "reason": "rich is required by app.py",
+                    "confidence": 0.9,
+                    "payload": {"package": "rich"},
+                    "requires": {"dependency_install": True, "network": True, "source_edit": False},
+                }
+            ],
+            "rejected_actions": [
+                {"action_type": "install_package", "reason": "unsafe package spec"},
+            ],
+            "rerun_from": "runner",
+            "rerun_reason": "restart service after dependency repair",
+        }
+        result = StageResult("runner", "failed", "service failed", {"agent_diagnosis": diagnosis})
+        plan = RepairPlanner().propose("runner", result, {})
+        self.assertEqual(len(plan["actions"]), 1)
+        self.assertEqual(plan["actions"][0]["payload"]["package"], "rich")
+        self.assertEqual(plan["rerun_from_proposed"], "runner")
+        self.assertEqual(plan["rerun_from_effective"], "env_deploy")
+
     def test_llm_unsafe_rerun_from_falls_back_to_safe_stage(self):
         provider = FakeLLMProvider(json.dumps({
             "stage": "runner",
@@ -3068,6 +3138,27 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(manifest["agent_action_count"], 1)
             self.assertEqual(manifest["repair_executed_count"], 1)
             self.assertIn("task.json", manifest["sha256"])
+
+    def test_live_smoke_manifest_counts_historical_repair_execution(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "task-live"
+            (run_dir / "reports").mkdir(parents=True)
+            (run_dir / "repairs").mkdir()
+            (run_dir / "evidence").mkdir()
+            (run_dir / "logs" / "agent_calls").mkdir(parents=True)
+            (run_dir / "task.json").write_text(json.dumps({"task_id": "task-live"}), encoding="utf-8")
+            (run_dir / "state.json").write_text(json.dumps({"task_id": "task-live"}), encoding="utf-8")
+            (run_dir / "events.jsonl").write_text(json.dumps({
+                "type": "memory_recorded",
+                "data": {"repair_apply": {"executed_action_count": 1}},
+            }) + "\n", encoding="utf-8")
+            (run_dir / "reports" / "pipeline_results.json").write_text(json.dumps({
+                "verify": {"status": "passed", "summary": "verify completed with pass"}
+            }), encoding="utf-8")
+            (run_dir / "repairs" / "repair_plan.json").write_text(json.dumps({"actions": []}), encoding="utf-8")
+            (run_dir / "repairs" / "repair_apply_result.json").write_text(json.dumps({"executed_action_count": 0}), encoding="utf-8")
+            manifest = LiveAgentSmokeRunner().build_manifest(run_dir, provider_name="xunfei")
+            self.assertEqual(manifest["repair_executed_count"], 1)
 
     def test_live_smoke_skips_xunfei_when_provider_env_missing(self):
         with tempfile.TemporaryDirectory() as tmp:

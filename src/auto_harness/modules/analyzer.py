@@ -1,4 +1,5 @@
 import json
+import re
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -83,9 +84,17 @@ class ProjectAnalyzer:
                     text += "\n" + path.read_text(encoding="utf-8", errors="ignore").lower()
                 except OSError:
                     pass
+        for name in files:
+            if name.endswith(".py"):
+                try:
+                    text += "\n" + (repo_dir / name).read_text(encoding="utf-8", errors="ignore").lower()
+                except OSError:
+                    pass
         for key in ("gradio", "streamlit", "fastapi", "flask", "torch", "transformers", "vllm"):
             if key in text:
                 frameworks.append(key)
+        if "httpserver" in text or "basehttprequesthandler" in text or "from http.server" in text:
+            frameworks.append("http.server")
         if "openai-compatible" in text or "openai compatible" in text or "/v1/chat/completions" in text:
             frameworks.append("openai_compatible")
         if "package.json" in files:
@@ -110,7 +119,9 @@ class ProjectAnalyzer:
         candidates: List[Dict] = []
         for entry in ("app.py", "main.py", "server.py", "webui.py", "demo.py"):
             if entry in files:
-                candidates.append({"cmd": [".venv/bin/python", entry], "expected_port": 7860, "confidence": 0.7})
+                port = self._python_entry_port(repo_dir / entry) or 7860
+                confidence = 0.75 if port != 7860 else 0.7
+                candidates.append({"cmd": [".venv/bin/python", entry], "expected_port": port, "confidence": confidence})
         if "streamlit" in frameworks:
             for entry in ("app.py", "main.py", "demo.py"):
                 if entry in files:
@@ -131,6 +142,22 @@ class ProjectAnalyzer:
             })
         return candidates
 
+    def _python_entry_port(self, path: Path) -> int:
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            return 0
+        patterns = (
+            r"HTTPServer\(\s*\(\s*['\"][^'\"]*['\"]\s*,\s*(\d+)\s*\)",
+            r"uvicorn\.run\([^)]*port\s*=\s*(\d+)",
+            r"\.run\([^)]*port\s*=\s*(\d+)",
+        )
+        for pattern in patterns:
+            match = re.search(pattern, text, flags=re.DOTALL)
+            if match:
+                return int(match.group(1))
+        return 0
+
     def _verify_hint(self, frameworks: List[str]) -> Dict:
         if "gradio" in frameworks:
             return {
@@ -147,6 +174,15 @@ class ProjectAnalyzer:
                 "service_type": "api",
                 "expected_output": "json_or_text",
                 "request": {"method": "GET"},
+            }
+        if "http.server" in frameworks:
+            return {
+                "service_type": "http",
+                "expected_output": "trace_echo",
+                "request": {
+                    "method": "GET",
+                    "path": "/?_auto_harness_trace={{trace_id}}",
+                },
             }
         if "vllm" in frameworks or "openai_compatible" in frameworks:
             return {
@@ -306,6 +342,10 @@ class ProjectAnalyzer:
                 selected = candidates.pop(index)
                 selected["preferred_by"] = "llm_planner"
                 selected["selected_by"] = "combined" if selected.get("source") != "llm_planner" else "llm_planner"
+                if payload.get("expected_port"):
+                    selected["expected_port"] = int(payload["expected_port"])
+                if payload.get("service_type"):
+                    selected["service_type"] = str(payload["service_type"])
                 selected["score"] = max(float(selected.get("score") or selected.get("confidence") or 0), self._candidate_score(payload, action or {}, default=action.get("confidence") if action else 0.75))
                 selected.setdefault("score_reasons", [])
                 selected["score_reasons"].extend(self._score_reasons(payload, action or {}, "LLM selected candidate"))

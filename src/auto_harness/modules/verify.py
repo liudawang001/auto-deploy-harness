@@ -24,12 +24,25 @@ class VerifyModule:
         progress_callback=None,
         verify_planner=None,
     ) -> None:
-        self.urlopen = urlopen or urllib.request.urlopen
+        self._base_urlopen = urlopen or urllib.request.urlopen
+        self._custom_urlopen = urlopen is not None
+        self._no_proxy_urlopen = urllib.request.build_opener(urllib.request.ProxyHandler({})).open
+        self.urlopen = self._open_url
         self.stage_context = stage_context or {}
         self.streamlit_verifier = StreamlitVerifier(urlopen=self.urlopen)
         self.browser_verifier = browser_verifier or BrowserVerifier()
         self.progress_callback = progress_callback
         self.verify_planner = verify_planner
+
+    def _open_url(self, req, timeout=10):
+        url = getattr(req, "full_url", req)
+        if not self._custom_urlopen and self._is_local_url(str(url)):
+            return self._no_proxy_urlopen(req, timeout=timeout)
+        return self._base_urlopen(req, timeout=timeout)
+
+    def _is_local_url(self, url: str) -> bool:
+        host = urllib.parse.urlparse(url).hostname or ""
+        return host in {"127.0.0.1", "localhost", "::1"}
 
     def verify(self, run_dir: Path, analysis: Dict, runner_result: Dict) -> StageResult:
         trace_id = "verify_%s_%s" % (compact_timestamp(), short_hash(str(run_dir), 6))

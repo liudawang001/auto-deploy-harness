@@ -132,6 +132,8 @@ def build_parser() -> argparse.ArgumentParser:
     agent_live_smoke.add_argument("--provider", choices=["mock", "xunfei"], default="xunfei")
     agent_live_smoke.add_argument("--execute", action="store_true", default=False)
     agent_live_smoke.add_argument("--output", default="")
+    agent_live_smoke.add_argument("--disable-analyze-planner", action="store_true", default=False)
+    agent_live_smoke.add_argument("--resume-attempts", type=int, default=1)
 
     docker_smoke = sub.add_parser("docker-smoke", help="plan or probe Docker/GPU runtime readiness")
     docker_smoke.add_argument("--probe", action="store_true", default=False)
@@ -328,7 +330,15 @@ def main(argv=None) -> int:
 
     if args.command == "agent-live-smoke":
         output = Path(args.output) if args.output else Path("runs") / "live_smoke" / compact_timestamp()
-        result = LiveAgentSmokeRunner().run(Path(args.repo), args.provider, execute=args.execute, output_dir=output, config=config)
+        result = LiveAgentSmokeRunner().run(
+            Path(args.repo),
+            args.provider,
+            execute=args.execute,
+            output_dir=output,
+            config=config,
+            analyze_planner=not args.disable_analyze_planner,
+            resume_attempts=args.resume_attempts,
+        )
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0 if result.get("status") == "completed" else 2
 
