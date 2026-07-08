@@ -10,7 +10,7 @@ from auto_harness.agents.claude_code import ClaudeCodeExecutor
 from auto_harness.assets import HuggingFaceDownloader, ModelCache, ModelScopeDownloader
 from auto_harness.models.base import read_json, to_plain, write_json
 from auto_harness.models.task import ProjectSpec, RuntimePolicy, TaskSpec
-from auto_harness.memory import MemoryStore
+from auto_harness.memory import MemoryStore, VerifiedMemoryRecorder
 from auto_harness.modules import (
     EnvDeployModule,
     EnvSolveModule,
@@ -117,6 +117,18 @@ class TaskRunner:
         return self.run_existing(spec.task_id, dry_run=dry_run)
 
     def run_existing(self, task_id: str, dry_run: bool = True, start_stage: str = "analyze") -> str:
+        current_start_stage = start_stage
+        max_iterations = int(self.config.agent_max_loop_iterations or 0)
+        for iteration in range(max_iterations + 1):
+            self._run_existing_once(task_id, dry_run=dry_run, start_stage=current_start_stage)
+            decision = self._next_agent_resume_decision(task_id, iteration)
+            if not decision.get("should_resume"):
+                break
+            self.store.events(task_id).append("task", "agent_auto_resume", decision)
+            current_start_stage = decision["start_stage"]
+        return task_id
+
+    def _run_existing_once(self, task_id: str, dry_run: bool = True, start_stage: str = "analyze") -> str:
         task = self.store.load_task(task_id)
         run_dir = self.store.run_dir(task_id)
         repo_dir = run_dir / "workspace" / "repo"
@@ -169,7 +181,14 @@ class TaskRunner:
 
         if should_run("env_solve"):
             env_solve_context = self._stage_context("env_solve", effective_analysis)
-            env_solve_result = EnvSolveModule().solve(repo_dir, effective_analysis, resource_data)
+            env_solve_result = EnvSolveModule(
+                env_backend=self.config.env_backend,
+                conda_envs_dir=self.config.conda_envs_dir,
+                conda_prefer_mamba=self.config.conda_prefer_mamba,
+                conda_allowed_channels=self.config.conda_allowed_channels,
+                conda_python_default=self.config.conda_python_default,
+                torch_cuda_preference=self.config.torch_cuda_preference,
+            ).solve(repo_dir, effective_analysis, resource_data)
             self._attach_context(env_solve_result, env_solve_context)
             results["env_solve"] = to_plain(env_solve_result)
             self._save_stage(task_id, "env_solve", env_solve_result)
@@ -246,7 +265,14 @@ class TaskRunner:
         self._save_stage(task_id, "verify", verify_result)
         self._remember(task_id, "verify", verify_result, deploy_analysis, results)
 
-        AgentMetricsCollector().collect(run_dir, results, output_path=run_dir / "reports" / "agent_metrics.json")
+        metrics_payload = AgentMetricsCollector().collect(run_dir, results, output_path=run_dir / "reports" / "agent_metrics.json")
+        verified_memory = VerifiedMemoryRecorder(self.config.memory_path).record_if_verified(
+            run_dir,
+            results,
+            metrics_payload.get("agent_metrics", {}),
+        )
+        if verified_memory:
+            self.store.events(task_id).append("memory", "verified_success_recorded", {"memory_id": verified_memory.get("id")})
         task_data = read_json(run_dir / "task.json")
         report_result = ReportGenerator().generate(run_dir, task_data, results, execution_audit=execution_audit)
         results["report"] = to_plain(report_result)
@@ -257,6 +283,64 @@ class TaskRunner:
 
         write_json(run_dir / "reports" / "pipeline_results.json", results)
         return task_id
+
+    def _next_agent_resume_decision(self, task_id: str, iteration: int) -> Dict:
+        if not self.config.agent_auto_resume_after_repair:
+            return {"should_resume": False, "reason": "config_disabled", "loop_iteration": iteration}
+        if iteration >= int(self.config.agent_max_loop_iterations or 0):
+            return {"should_resume": False, "reason": "max_iterations", "loop_iteration": iteration}
+        run_dir = self.store.run_dir(task_id)
+        pipeline = self._load_previous_results(run_dir)
+        verify = pipeline.get("verify") if isinstance(pipeline.get("verify"), dict) else {}
+        if self.config.agent_stop_on_verify_pass and verify.get("status") in ("pass", "passed"):
+            return {"should_resume": False, "reason": "verify_passed", "loop_iteration": iteration}
+        apply_result = self._read_optional(run_dir / "repairs" / "repair_apply_result.json")
+        if not isinstance(apply_result, dict) or apply_result.get("status") != "applied":
+            return {"should_resume": False, "reason": "repair_not_applied", "loop_iteration": iteration}
+        policy = apply_result.get("policy") if isinstance(apply_result.get("policy"), dict) else {}
+        if not policy.get("allowed"):
+            return {"should_resume": False, "reason": "policy_rejected", "loop_iteration": iteration}
+        if not self._repair_apply_effective(apply_result):
+            return {"should_resume": False, "reason": "no_effective_repair_action", "loop_iteration": iteration}
+        requested = self._resume_request_from_pipeline(pipeline)
+        if not requested.get("should_auto_resume"):
+            return {"should_resume": False, "reason": "agent_loop_not_requesting_resume", "loop_iteration": iteration}
+        start_stage = requested.get("next_rerun_from") or self._repair_resume_stage(run_dir)
+        allowed_stages = set(self.config.agent_auto_resume_stages or [])
+        if start_stage not in self.RERUN_STAGES or start_stage not in allowed_stages:
+            return {
+                "should_resume": False,
+                "reason": "start_stage_not_allowed",
+                "requested_start_stage": start_stage,
+                "loop_iteration": iteration,
+            }
+        return {
+            "should_resume": True,
+            "start_stage": start_stage,
+            "reason": "agent_loop_requested_resume",
+            "source_stage": requested.get("source_stage"),
+            "loop_iteration": iteration + 1,
+        }
+
+    def _repair_apply_effective(self, apply_result: Dict) -> bool:
+        if any(item.get("executed") and int(item.get("exit_code") or 0) == 0 for item in apply_result.get("action_results", [])):
+            return True
+        metadata_actions = {"update_verify_hint", "rerun_from_stage"}
+        return any(item.get("action_type") in metadata_actions and item.get("status") == "metadata_only" for item in apply_result.get("action_results", []))
+
+    def _resume_request_from_pipeline(self, pipeline: Dict) -> Dict:
+        for stage, result in pipeline.items():
+            if not isinstance(result, dict):
+                continue
+            data = result.get("data") if isinstance(result.get("data"), dict) else {}
+            loop = data.get("agent_loop") if isinstance(data.get("agent_loop"), dict) else {}
+            if loop.get("should_auto_resume"):
+                return {
+                    "should_auto_resume": True,
+                    "next_rerun_from": loop.get("next_rerun_from"),
+                    "source_stage": stage,
+                }
+        return {"should_auto_resume": False}
 
     def resume(self, task_id: str, dry_run: bool = True) -> str:
         run_dir = self.store.run_dir(task_id)

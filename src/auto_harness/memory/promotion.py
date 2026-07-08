@@ -74,18 +74,35 @@ class MemoryPromoter:
                 "target_skill": str(target),
                 "regression": regression_result,
             }
+        regression_result = self._run_regression(proposal, proposal_path, benchmark_runner) if run_regression else self._skipped_regression(proposal)
+        if run_regression and regression_result.get("status") == "failed":
+            return {
+                "status": "failed",
+                "proposal_id": proposal["proposal_id"],
+                "target_skill": str(target),
+                "regression": regression_result,
+                "error": "regression failed; skill was not modified",
+            }
+        previous_sha = self._sha256(raw)
+        history_dir = target.parent / "history"
+        history_dir.mkdir(parents=True, exist_ok=True)
+        rollback_path = history_dir / ("%s_%s.md" % (utc_now_iso().replace(":", "").replace("-", ""), proposal["proposal_id"]))
+        rollback_path.write_text(raw, encoding="utf-8")
         block = "\n\n<!-- %s -->\n%s\n<!-- /%s -->\n" % (
             marker,
             proposal["suggested_skill_section"].strip(),
             marker,
         )
-        target.write_text(raw.rstrip() + block, encoding="utf-8")
-        regression_result = self._run_regression(proposal, proposal_path, benchmark_runner) if run_regression else self._skipped_regression(proposal)
+        new_raw = raw.rstrip() + block
+        target.write_text(new_raw, encoding="utf-8")
         applied = dict(proposal)
         applied["status"] = "applied"
         applied["applied_at"] = utc_now_iso()
         applied["applied_target"] = str(target)
         applied["regression"] = regression_result
+        applied["previous_sha256"] = previous_sha
+        applied["new_sha256"] = self._sha256(new_raw)
+        applied["rollback_path"] = str(rollback_path)
         write_json(proposal_path, applied)
         return {
             "status": "applied",
@@ -93,6 +110,9 @@ class MemoryPromoter:
             "target_skill": str(target),
             "regression_binding": proposal.get("regression_binding", {}),
             "regression": regression_result,
+            "previous_sha256": applied["previous_sha256"],
+            "new_sha256": applied["new_sha256"],
+            "rollback_path": str(rollback_path),
         }
 
     def approve(self, proposal_path: Path, reviewer: str = "operator", note: str = "") -> Dict:
@@ -290,6 +310,18 @@ class MemoryPromoter:
         lines.append("")
         lines.append("### 建议规则")
         lines.extend("- %s" % item for item in actions or ["将该复发模式转成阶段内的显式诊断或 verify 规则。"])
+        lines.extend([
+            "",
+            "### Verified Self-Healing Evidence",
+            "- Failure pattern: `%s / %s`" % (key["stage"], key["category"]),
+            "- Normalized repair action: see linked `repair_action_hashes` in proposal JSON.",
+            "- Environment backend: derive from verified memory entries; do not assume local shell activation.",
+            "- PyTorch/CUDA strategy: preserve the recorded torch variant or conda package envelope.",
+            "- Rerun rule: resume from the policy-computed safe `rerun_from_effective` stage.",
+            "- Verification trace rule: only promote when final verify observed the recorded trace id.",
+            "- Regression binding: run proposal `regression_binding.case_ids` before apply.",
+            "- Rollback note: apply writes a history copy with sha256 metadata before modifying the skill.",
+        ])
         lines.append("- 该规则来自 memory promotion，应用前必须由人确认，不得记录密钥值或一次性路径。")
         return "\n".join(lines)
 
@@ -360,3 +392,7 @@ class MemoryPromoter:
             "reason": "regression execution disabled by caller",
             "binding": proposal.get("regression_binding", {}),
         }
+
+    def _sha256(self, text: str) -> str:
+        import hashlib
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()

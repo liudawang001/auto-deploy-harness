@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Dict, List
 
 from auto_harness.models.result import StageResult
+from auto_harness.env import CondaBackend
 from auto_harness.diagnostics import LogClassifier
 from auto_harness.runtime import DockerSandboxBackend
 from auto_harness.utils.commands import is_allowed_command
@@ -31,7 +32,8 @@ class RunnerModule:
         candidates: List[Dict] = analysis.get("run_candidates", [])
         if not candidates:
             return StageResult("runner", "uncertain", "no run candidate detected", {"run_candidates": []})
-        candidate = candidates[0]
+        candidate = dict(candidates[0])
+        candidate["env_solution"] = analysis.get("env_solution") if isinstance(analysis.get("env_solution"), dict) else {}
         effective_candidate, sandbox = self._effective_candidate(
             repo_dir,
             candidate,
@@ -125,7 +127,13 @@ class RunnerModule:
         docker_model_cache_dir: str,
     ):
         if execution_backend != "docker":
-            return dict(candidate), {"backend": "local"}
+            effective = dict(candidate)
+            env_solution = candidate.get("env_solution") or {}
+            if env_solution.get("backend") in ("conda", "mamba") and env_solution.get("environment_prefix"):
+                spec = CondaBackend(backend=env_solution["backend"]).build_spec(repo_dir, env_solution, conda_file=(env_solution.get("conda_file") or {}))
+                spec.prefix = env_solution["environment_prefix"]
+                effective["cmd"] = CondaBackend(backend=env_solution["backend"]).run_cmd(spec, candidate.get("cmd", []))
+            return effective, {"backend": "local", "environment_backend": env_solution.get("backend", "venv")}
         port = int(candidate.get("expected_port") or 0)
         container_name = "auto-harness-%s-%s" % (short_hash(str(repo_dir), 8), port or "svc")
         sandbox_command = DockerSandboxBackend(

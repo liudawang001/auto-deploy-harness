@@ -4,6 +4,18 @@
 
 ### 已完成
 
+- Self-healing memory + Conda 优化阶段：
+  - 普通 `TaskRunner.run_existing()` 已接入 bounded self-healing loop；当配置打开 `agent_auto_resume_after_repair` 且 repair policy/apply 有效时，会写入 `agent_auto_resume` 事件并从 `env_deploy` / `model_prepare` / `runner` / `verify` allowlist 中的安全阶段重跑，不再只依赖 `agent-live-smoke` wrapper。
+  - 新增 `RepairActionNormalizer`，统一消费 LLM 输出的 `payload.package` 与 `payload.packages`，多包逐个 policy check；package spec 支持 `numpy<2`、`torch==2.3.1`、`pydantic>=1.10,<2`，仍拒绝 URL、path、shell metachar 和 pip index 注入。
+  - 新增 `src/auto_harness/env/`，包含 `EnvironmentSpec`、`CondaEnvironmentParser`、`CondaProbe`、`CondaBackend`；支持解析 `environment.yml` / `environment.yaml` 的 name/channels/dependencies/nested pip/python/pytorch-cuda，并生成 `conda|mamba create/install/run -p` 命令，不依赖 shell activation。
+  - `ProjectAnalyzer` 会在发现 `environment.yml` 时 deterministic 选择 conda strategy；LLM planner 可通过 `select_environment_backend` / `select_torch_variant` 提供环境策略，但 channel/backend/variant 都经过 policy allowlist 后才合并。
+  - `EnvSolveModule` 支持 `env_backend=auto|venv|conda|mamba`、conda channels、PyTorch CUDA conda package 方案和 `deepspeed` / `accelerate` 兼容矩阵；`EnvDeployModule` 消费 conda command plan，`RunnerModule` 会把 `.venv/bin/python app.py` 改写为 `conda run -p <prefix> python app.py`。
+  - `RepairApplier` 在 conda/mamba 环境下会使用 `conda|mamba run -p <prefix> python -m pip install <package>` 执行缺依赖 repair，避免修复打到错误环境。
+  - 新增 `VerifiedMemoryRecorder`：只有最终 verify pass、repair applied、repair action 有效、存在 trace id 且无高风险 policy reject 时，才写入 `memory_type=verified_success`；report 新增 Verified Memory 小节展示 memory id、repair action hash 和 verification trace id。
+  - `MemoryPromoter.apply()` 改为回归通过后再修改 skill，并在 `skills/<name>/history/` 写入 rollback copy，同时记录 `previous_sha256`、`new_sha256`、`rollback_path`；proposal markdown 补充 failure pattern、normalized repair action、environment backend、PyTorch/CUDA strategy、rerun_from rule、trace rule、regression binding 和 rollback note。
+  - 新增 `tests/fixtures/e2e/conda_pytorch_demo/`，用于本地 dry-run/fake runner 验证 Conda + PyTorch + trace echo 场景，不下载真实模型。
+  - Benchmark manifest 新增 `agent_full_self_healing_pipeline`、`conda_backend_environment_yml_plan`、`conda_backend_pytorch_cuda_plan`、`conda_runner_command_rewrite`、`verified_memory_after_self_healing`、`skill_evolution_from_verified_self_healing`、`conda_pytorch_env_solve_plan`、`conda_pytorch_env_deploy_fake_execute`、`conda_self_healing_missing_package_resume`、`conda_verified_memory_skill_promotion`。
+  - 定向单测 24 个通过；新增 benchmark 子集 10 个通过。
 - LLM Agent 化升级 Phase 1-3：
   - Phase 1 结构化 planner 已完成：新增 `src/auto_harness/agent/` 子系统，包含 schema、engine、policy、prompt、trace；`agent_mode=planner` 时可将 LLM 输出的 `add_run_candidate`、`select_run_candidate`、`update_verify_hint`、`add_dependency_constraint` 通过 policy 后合并进 analyze 结果。
   - Phase 2 LLM 日志诊断与受控 repair action 已完成第一版：新增 `AgentDiagnoser`，未知/低置信失败可生成结构化 diagnosis 和 repair action；`RepairPolicy` 会拒绝越权/不安全包名，`RepairApplier` 在显式 execute 条件下记录受控 `install_package` 命令结果，并对密钥值脱敏。

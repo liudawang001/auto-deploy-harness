@@ -26,6 +26,10 @@ class EnvDeployModule:
         docker_model_cache_dir: str = "",
     ) -> StageResult:
         plan: List[List[str]] = analysis.get("install_plan", [])
+        env_solution = analysis.get("env_solution") if isinstance(analysis.get("env_solution"), dict) else {}
+        conda_plan = env_solution.get("conda") if isinstance(env_solution.get("conda"), dict) else {}
+        if env_solution.get("backend") in ("conda", "mamba") and conda_plan.get("commands"):
+            plan = [list(cmd) for cmd in conda_plan.get("commands") or []]
         if not plan:
             return StageResult("env_deploy", "uncertain", "no install plan detected", {"commands": []})
         effective_plan, sandbox = self._effective_plan(repo_dir, plan, execution_backend, docker_image, docker_network, docker_gpus, docker_model_cache_dir)
@@ -38,6 +42,10 @@ class EnvDeployModule:
                     "commands": plan,
                     "effective_commands": effective_plan,
                     "execution_backend": execution_backend,
+                    "environment_backend": env_solution.get("backend", "venv"),
+                    "environment_prefix": env_solution.get("environment_prefix", ""),
+                    "environment_python": env_solution.get("environment_python", ""),
+                    "environment_solution": env_solution,
                     "sandbox": sandbox,
                     "executed": False,
                 },
@@ -56,6 +64,9 @@ class EnvDeployModule:
                         "original_cmd": original_cmd,
                         "allowed_commands": list(allowed_commands),
                         "execution_backend": execution_backend,
+                        "environment_backend": env_solution.get("backend", "venv"),
+                        "environment_prefix": env_solution.get("environment_prefix", ""),
+                        "environment_python": env_solution.get("environment_python", ""),
                         "sandbox": sandbox,
                     },
                     error="disallowed command: %s" % (cmd[0] if cmd else ""),
@@ -75,7 +86,7 @@ class EnvDeployModule:
                     "env_deploy",
                     "failed",
                     "dependency installation failed",
-                    {"commands": command_results, "diagnosis": diagnosis},
+                {"commands": command_results, "diagnosis": diagnosis},
                     error=result.stderr[-2000:],
                 )
         return StageResult(
@@ -85,6 +96,10 @@ class EnvDeployModule:
             {
                 "commands": command_results,
                 "execution_backend": execution_backend,
+                "environment_backend": env_solution.get("backend", "venv"),
+                "environment_prefix": env_solution.get("environment_prefix", ""),
+                "environment_python": env_solution.get("environment_python", ""),
+                "environment_solution": env_solution,
                 "sandbox": sandbox,
             },
         )

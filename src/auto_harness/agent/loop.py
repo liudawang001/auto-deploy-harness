@@ -61,6 +61,7 @@ class AgentLoopController:
             command_runner=command_runner,
             timeout_seconds=self.config.default_timeout_seconds,
             allowed_commands=self.config.allowed_commands,
+            env_context=self._env_context(analysis),
         )
         next_rerun_from = (
             (effective_policy.get("loop") or {}).get("rerun_from_effective")
@@ -114,6 +115,17 @@ class AgentLoopController:
             and self.config.agent_enable_repair_actions
             and bool(getattr(runtime_policy, "allow_dependency_install", False))
         )
+
+    def _env_context(self, analysis: Dict) -> Dict:
+        env_solution = analysis.get("env_solution") if isinstance(analysis.get("env_solution"), dict) else {}
+        backend = env_solution.get("backend") or "venv"
+        return {
+            "backend": backend,
+            "python_executable": env_solution.get("environment_python") or ".venv/bin/python",
+            "environment_backend": backend,
+            "environment_prefix": env_solution.get("environment_prefix") or "",
+            "conda_prefix": env_solution.get("environment_prefix") or "",
+        }
 
     def _stop_reason(self, result, repair_plan: Dict, effective_policy: Dict, apply_result: Dict) -> str:
         if result.status in ("passed", "pass"):

@@ -4,11 +4,15 @@ from typing import Dict, List
 
 from auto_harness.agent.repair_actions import install_package_command
 from auto_harness.models.base import write_json
+from auto_harness.repair.actions import RepairActionNormalizer
 from auto_harness.utils.shell import run_command
 
 
 class RepairApplier:
     """Applies only non-executing repair artifacts; shell/source changes remain gated."""
+
+    def __init__(self) -> None:
+        self.normalizer = RepairActionNormalizer()
 
     def apply(
         self,
@@ -19,6 +23,7 @@ class RepairApplier:
         command_runner=None,
         timeout_seconds: int = 900,
         allowed_commands: List[str] = None,
+        env_context: Dict = None,
     ) -> Dict:
         repair_dir = run_dir / "repairs"
         repair_dir.mkdir(parents=True, exist_ok=True)
@@ -43,11 +48,11 @@ class RepairApplier:
         install_commands: List[List[str]] = []
         required_env: List[str] = []
         verify_hints: List[Dict] = []
-        for action in plan.get("actions", []):
+        for action in self.normalizer.normalize_many(plan.get("actions", [])):
             action_type = action.get("type")
             payload = action.get("payload") or {}
-            if action_type == "install_package" and payload.get("package"):
-                command = install_package_command(str(payload["package"]))
+            if action_type in ("install_package", "install_pip_package") and payload.get("package"):
+                command = install_package_command(str(payload["package"]), env_context=env_context)
                 if command["status"] == "ready":
                     install_commands.append(command["cmd"])
                     if execute:
@@ -69,6 +74,21 @@ class RepairApplier:
                         "status": "rejected",
                         "reason": command["reason"],
                     })
+            elif action_type == "install_conda_package" and payload.get("package"):
+                command = self._install_conda_package_command(str(payload["package"]), payload, env_context or {})
+                install_commands.append(command)
+                if execute:
+                    command_reject = self._command_policy_reject(command, allowed_commands)
+                    if command_reject:
+                        result["action_results"].append({
+                            "action_type": action_type,
+                            "executed": False,
+                            "status": "rejected",
+                            "cmd": command,
+                            "reason": command_reject,
+                        })
+                    else:
+                        result["action_results"].append(self._execute_command(run_dir, action_type, command, command_runner, timeout_seconds))
             elif action_type == "set_env_var_name_only":
                 required_env.extend(payload.get("env_vars") or [])
             elif action_type == "update_verify_hint":
@@ -99,6 +119,15 @@ class RepairApplier:
         write_json(repair_dir / "repair_apply_result.json", result)
         result["artifacts"].append(str(repair_dir / "repair_apply_result.json"))
         return result
+
+    def _install_conda_package_command(self, package: str, payload: Dict, env_context: Dict) -> List[str]:
+        backend = str(env_context.get("backend") or env_context.get("environment_backend") or "conda")
+        tool = "mamba" if backend == "mamba" else "conda"
+        prefix = str(env_context.get("conda_prefix") or env_context.get("environment_prefix") or ".conda/envs/auto-harness")
+        channels = []
+        for channel in payload.get("channels") or []:
+            channels.extend(["-c", str(channel)])
+        return [tool, "install", "-y", "-p", prefix] + channels + [package]
 
     def _command_policy_reject(self, cmd: List[str], allowed_commands: List[str] = None) -> str:
         if allowed_commands is None:

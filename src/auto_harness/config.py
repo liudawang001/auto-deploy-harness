@@ -34,6 +34,14 @@ class HarnessConfig:
     agent_enable_repair_actions: bool = False
     agent_auto_resume_after_repair: bool = False
     agent_max_loop_iterations: int = 2
+    agent_auto_resume_stages: List[str] = None
+    agent_stop_on_verify_pass: bool = True
+    env_backend: str = "auto"
+    conda_envs_dir: str = ".conda/envs"
+    conda_prefer_mamba: bool = True
+    conda_allowed_channels: List[str] = None
+    conda_python_default: str = "3.10"
+    torch_cuda_preference: str = "auto"
     skills_dir: str = "skills"
     memory_dir: str = "memory"
     model_cache_dir: str = "model_cache"
@@ -60,6 +68,10 @@ class HarnessConfig:
             self.model_cache_cleanup_keep_cache_keys = []
         if self.model_cache_cleanup_keep_repo_ids is None:
             self.model_cache_cleanup_keep_repo_ids = []
+        if self.agent_auto_resume_stages is None:
+            self.agent_auto_resume_stages = ["env_deploy", "model_prepare", "runner", "verify"]
+        if self.conda_allowed_channels is None:
+            self.conda_allowed_channels = ["defaults", "conda-forge", "pytorch", "nvidia", "fastai"]
 
     @classmethod
     def load(cls, path: str = None) -> "HarnessConfig":
@@ -92,6 +104,12 @@ class HarnessConfig:
             known["agent_auto_resume_after_repair"] = os.environ.get("AUTO_HARNESS_AGENT_AUTO_RESUME_AFTER_REPAIR") == "1"
         if os.environ.get("AUTO_HARNESS_AGENT_MAX_LOOP_ITERATIONS"):
             known["agent_max_loop_iterations"] = int(os.environ["AUTO_HARNESS_AGENT_MAX_LOOP_ITERATIONS"])
+        if os.environ.get("AUTO_HARNESS_ENV_BACKEND"):
+            known["env_backend"] = os.environ["AUTO_HARNESS_ENV_BACKEND"]
+        if os.environ.get("AUTO_HARNESS_CONDA_PREFER_MAMBA"):
+            known["conda_prefer_mamba"] = os.environ.get("AUTO_HARNESS_CONDA_PREFER_MAMBA") == "1"
+        if os.environ.get("AUTO_HARNESS_TORCH_CUDA_PREFERENCE"):
+            known["torch_cuda_preference"] = os.environ["AUTO_HARNESS_TORCH_CUDA_PREFERENCE"]
         return cls(**known)
 
     @property

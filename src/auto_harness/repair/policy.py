@@ -2,13 +2,17 @@ from typing import Dict, List
 
 from auto_harness.agent.repair_actions import safe_package_spec
 from auto_harness.models.task import RuntimePolicy
+from auto_harness.repair.actions import RepairActionNormalizer
 
 
 class RepairPolicy:
+    def __init__(self) -> None:
+        self.normalizer = RepairActionNormalizer()
+
     def check(self, plan: Dict, runtime: RuntimePolicy, operator_approval: Dict = None) -> Dict:
         decisions: List[Dict] = []
         allowed = True
-        for action in plan.get("actions", []):
+        for action in self.normalizer.normalize_many(plan.get("actions", [])):
             decision = self._check_action(action, runtime, operator_approval or {})
             decisions.append(decision)
             if not decision["allowed"]:
@@ -31,10 +35,14 @@ class RepairPolicy:
             reasons.append("operator secret is required")
         if requires.get("operator_approval") and not self._approved(action, operator_approval):
             reasons.append("operator approval is required")
-        if action.get("type") == "install_package":
+        if action.get("type") in ("install_package", "install_pip_package", "install_conda_package", "pin_dependency"):
             package = str((action.get("payload") or {}).get("package") or "")
             if not safe_package_spec(package):
                 reasons.append("unsafe package spec")
+        if action.get("type") in ("install_conda_package",):
+            for channel in (action.get("payload") or {}).get("channels") or []:
+                if channel not in {"defaults", "conda-forge", "pytorch", "nvidia", "fastai"}:
+                    reasons.append("unsafe conda channel")
         return {
             "action_type": action.get("type", ""),
             "allowed": not reasons,

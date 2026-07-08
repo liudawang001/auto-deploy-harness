@@ -46,6 +46,7 @@ class ProjectAnalyzer:
             "install_plan": install_plan,
             "run_candidates": run_candidates,
             "verify_hint": self._verify_hint(frameworks),
+            "environment_strategy": self._environment_strategy(files, frameworks),
         }
         if self.stage_context:
             data["control_context"] = self.stage_context
@@ -254,6 +255,9 @@ class ProjectAnalyzer:
                 "select_run_candidate",
                 "update_verify_hint",
                 "add_dependency_constraint",
+                "select_environment_backend",
+                "update_environment_spec",
+                "select_torch_variant",
             ],
             extra={
                 "untrusted_content_risks": sanitizer.risks,
@@ -279,6 +283,8 @@ class ProjectAnalyzer:
             "verify_hint_updated": False,
             "dependency_constraints_added": 0,
             "preferred_candidate_selected": False,
+            "environment_strategy_updated": False,
+            "torch_variant_updated": False,
             "candidate_rank_rejections": [],
             "skipped": False,
         }
@@ -315,7 +321,69 @@ class ProjectAnalyzer:
                 if command:
                     analysis.setdefault("install_plan", []).append(command)
                     merged["dependency_constraints_added"] += 1
+            elif action_type == "select_environment_backend":
+                strategy = self._environment_strategy_from_payload(payload, action)
+                if strategy:
+                    analysis["environment_strategy"] = strategy
+                    merged["environment_strategy_updated"] = True
+            elif action_type == "update_environment_spec":
+                strategy = dict(analysis.get("environment_strategy") or {})
+                if payload.get("python"):
+                    strategy["python"] = str(payload["python"])
+                if payload.get("channels"):
+                    strategy["channels"] = [str(item) for item in payload.get("channels") or []]
+                if payload.get("conda_dependencies"):
+                    strategy["conda_dependencies"] = [str(item) for item in payload.get("conda_dependencies") or []]
+                if payload.get("pip_dependencies") or payload.get("packages"):
+                    strategy["pip_dependencies"] = [str(item) for item in (payload.get("pip_dependencies") or payload.get("packages") or [])]
+                strategy["source"] = "llm_planner"
+                strategy.setdefault("reasons", []).append(action.get("reason") or "LLM updated environment spec")
+                analysis["environment_strategy"] = strategy
+                merged["environment_strategy_updated"] = True
+            elif action_type == "select_torch_variant":
+                variant = str(payload.get("variant") or payload.get("torch_variant") or "").lower()
+                if variant in ("cpu", "cu118", "cu121"):
+                    analysis.setdefault("environment_strategy", {})["torch_variant"] = variant
+                    analysis["environment_strategy"]["torch_variant_source"] = "llm_planner"
+                    merged["torch_variant_updated"] = True
         return merged
+
+    def _environment_strategy(self, files: List[str], frameworks: List[str]) -> Dict:
+        has_conda = "environment.yml" in files or "environment.yaml" in files
+        if has_conda:
+            return {
+                "backend": "conda",
+                "preferred_tool": "mamba",
+                "python": "3.10",
+                "channels": ["pytorch", "nvidia", "conda-forge"] if "torch" in frameworks else ["conda-forge"],
+                "source": "deterministic",
+                "confidence": 0.8,
+                "reasons": ["environment.yml detected"],
+            }
+        return {
+            "backend": "venv",
+            "preferred_tool": "venv",
+            "python": "python3",
+            "channels": [],
+            "source": "deterministic",
+            "confidence": 0.6,
+            "reasons": ["no conda environment file detected"],
+        }
+
+    def _environment_strategy_from_payload(self, payload: Dict, action: Dict) -> Dict:
+        backend = str(payload.get("backend") or "").lower()
+        if backend not in ("venv", "conda", "mamba", "docker"):
+            return {}
+        channels = [str(item) for item in payload.get("channels") or []]
+        return {
+            "backend": backend,
+            "preferred_tool": "mamba" if payload.get("prefer_mamba") or backend == "mamba" else backend,
+            "python": str(payload.get("python") or "3.10"),
+            "channels": channels,
+            "source": "llm_planner",
+            "confidence": float(action.get("confidence") or payload.get("confidence") or 0),
+            "reasons": [str(payload.get("reason") or action.get("reason") or "LLM selected environment backend")],
+        }
 
     def _candidate_from_payload(self, payload: Dict, action: Dict = None) -> Optional[Dict]:
         cmd = payload.get("cmd")

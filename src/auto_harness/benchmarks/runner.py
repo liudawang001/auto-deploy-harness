@@ -15,7 +15,8 @@ from auto_harness.assets.manifest import ModelAsset
 from auto_harness.config import HarnessConfig
 from auto_harness.dashboard import DashboardGenerator, DashboardServer
 from auto_harness.diagnostics import LogClassifier
-from auto_harness.memory import MemoryPromoter
+from auto_harness.env import CondaBackend, CondaEnvironmentParser
+from auto_harness.memory import MemoryPromoter, VerifiedMemoryRecorder
 from auto_harness.models.base import read_json, to_plain, write_json
 from auto_harness.modules.env_deploy import EnvDeployModule
 from auto_harness.modules.env_solve import EnvSolveModule
@@ -254,6 +255,18 @@ class BenchmarkRunner:
                 return self._case_agent_prompt_injection_defense(case)
             if case_id == "agent_metrics_paired_comparison":
                 return self._case_agent_metrics_paired_comparison(case)
+            if case_id in ("conda_backend_environment_yml_plan", "conda_pytorch_env_solve_plan"):
+                return self._case_conda_backend_environment_yml_plan(case)
+            if case_id in ("conda_backend_pytorch_cuda_plan", "conda_pytorch_env_deploy_fake_execute"):
+                return self._case_conda_backend_pytorch_cuda_plan(case)
+            if case_id in ("conda_runner_command_rewrite",):
+                return self._case_conda_runner_command_rewrite(case)
+            if case_id in ("agent_full_self_healing_pipeline", "conda_self_healing_missing_package_resume"):
+                return self._case_agent_full_self_healing_pipeline(case)
+            if case_id in ("verified_memory_after_self_healing",):
+                return self._case_verified_memory_after_self_healing(case)
+            if case_id in ("skill_evolution_from_verified_self_healing", "conda_verified_memory_skill_promotion"):
+                return self._case_skill_evolution_from_verified_self_healing(case)
             return self._result(case, "skipped", "unknown benchmark case")
         except Exception as exc:  # noqa: BLE001 - benchmark report should continue
             return self._result(case, "failed", str(exc))
@@ -1957,6 +1970,105 @@ class BenchmarkRunner:
                 and report["totals"]["llm_call_count"] == 1
             )
         return self._result(case, "passed" if ok else "failed", "Agent metrics paired comparison verified")
+
+    def _case_conda_backend_environment_yml_plan(self, case: Dict) -> Dict:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            repo.mkdir()
+            (repo / "environment.yml").write_text(
+                "name: conda-demo\nchannels:\n  - pytorch\n  - nvidia\ndependencies:\n  - python=3.10\n  - pip\n  - pytorch\n  - pytorch-cuda=12.1\n  - pip:\n      - gradio\n",
+                encoding="utf-8",
+            )
+            (repo / "app.py").write_text("print('trace')\n", encoding="utf-8")
+            analysis = ProjectAnalyzer().analyze(repo).data
+            env = EnvSolveModule(env_backend="auto", local_environment={"python_version": "3.10", "platform": "linux", "machine": "x86_64", "cuda": {"available": True, "version": "12.1"}}).solve(repo, analysis, {"gpu_required": True, "python_range": ">=3.10"})
+            commands = env.data.get("conda", {}).get("commands") or []
+            ok = env.data.get("backend") == "conda" and commands and commands[0][:4] == ["conda", "create", "-y", "-p"]
+        return self._result(case, "passed" if ok else "failed", "conda environment.yml plan verified")
+
+    def _case_conda_backend_pytorch_cuda_plan(self, case: Dict) -> Dict:
+        spec = CondaBackend(backend="conda").build_spec(
+            Path("/tmp/repo"),
+            {"backend": "conda", "python": "3.10", "torch_solution": {"selected": {"variant": "cu121", "packages": ["torch", "torchvision"]}}},
+            {"found": True, "name": "demo", "channels": ["pytorch", "nvidia"], "conda_dependencies": ["pip"], "pip_dependencies": []},
+        )
+        plan = CondaBackend(backend="conda").command_plan(spec)
+        text = json.dumps(plan)
+        ok = "pytorch-cuda=12.1" in text and "pytorch" in text and "torchvision" in text
+        return self._result(case, "passed" if ok else "failed", "conda PyTorch CUDA plan verified")
+
+    def _case_conda_runner_command_rewrite(self, case: Dict) -> Dict:
+        analysis = {
+            "run_candidates": [{"cmd": [".venv/bin/python", "app.py"], "expected_port": 7860}],
+            "env_solution": {"backend": "conda", "environment_prefix": ".conda/envs/demo", "environment_python": ".conda/envs/demo/bin/python"},
+        }
+        result = RunnerModule().run(Path.cwd(), analysis, execute=False)
+        cmd = result.data.get("effective_candidate", {}).get("cmd") or []
+        ok = cmd[:4] == ["conda", "run", "-p", ".conda/envs/demo"] and ".venv/bin/python" not in cmd
+        return self._result(case, "passed" if ok else "failed", "conda runner command rewrite verified")
+
+    def _case_agent_full_self_healing_pipeline(self, case: Dict) -> Dict:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = HarnessConfig(runs_dir=str(root / "runs"), memory_dir=str(root / "memory"), model_cache_dir=str(root / "model_cache"), agent_auto_resume_after_repair=True, agent_max_loop_iterations=2)
+            runner = TaskRunner(config)
+            spec = runner.create_spec(str(root / "repo"), "demo", dry_run=True)
+            runner.store.create_task(spec)
+            calls = []
+
+            def fake_once(task_id, dry_run=True, start_stage="analyze"):
+                calls.append(start_stage)
+                run_dir = runner.store.run_dir(task_id)
+                (run_dir / "reports").mkdir(parents=True, exist_ok=True)
+                (run_dir / "repairs").mkdir(parents=True, exist_ok=True)
+                if len(calls) == 1:
+                    write_json(run_dir / "reports" / "pipeline_results.json", {
+                        "runner": {"status": "failed", "data": {"agent_loop": {"should_auto_resume": True, "next_rerun_from": "env_deploy"}}},
+                        "verify": {"status": "uncertain", "data": {}},
+                    })
+                    write_json(run_dir / "repairs" / "repair_apply_result.json", {"status": "applied", "policy": {"allowed": True}, "action_results": [{"action_type": "install_package", "executed": True, "exit_code": 0}]})
+                else:
+                    write_json(run_dir / "reports" / "pipeline_results.json", {"verify": {"status": "passed", "data": {"trace_id": "trace-ok"}}})
+
+            runner._run_existing_once = fake_once
+            runner.run_existing(spec.task_id, dry_run=True)
+            ok = calls == ["analyze", "env_deploy"]
+        return self._result(case, "passed" if ok else "failed", "full self-healing resume loop verified")
+
+    def _case_verified_memory_after_self_healing(self, case: Dict) -> Dict:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            (run_dir / "reports").mkdir(parents=True)
+            (run_dir / "repairs").mkdir()
+            write_json(run_dir / "task.json", {"task_id": "task1"})
+            (run_dir / "events.jsonl").write_text(json.dumps({"stage": "runner", "type": "memory_recorded", "data": {"signature": "sig", "repair_plan": {"root_cause": "ModuleNotFoundError", "actions": [{"type": "install_package", "payload": {"package": "rich"}}], "rerun_from_effective": "env_deploy"}}}) + "\n", encoding="utf-8")
+            write_json(run_dir / "repairs" / "repair_apply_result.json", {"status": "applied", "policy": {"allowed": True}, "action_results": [{"action_type": "install_package", "executed": True, "exit_code": 0}]})
+            pipeline = {"analyze": {"status": "passed", "data": {"frameworks": ["gradio"], "files": ["app.py"]}}, "env_solve": {"status": "passed", "data": {"analysis": {"env_solution": {"backend": "conda", "torch_variant": "cu121"}}}}, "verify": {"status": "passed", "data": {"trace_id": "trace-1"}}}
+            entry = VerifiedMemoryRecorder(Path(tmp) / "memory").record_if_verified(run_dir, pipeline, {"executed_action_count": 1})
+            ok = bool(entry and entry.get("verified_success") and entry.get("environment_backend") == "conda")
+        return self._result(case, "passed" if ok else "failed", "verified memory after self-healing verified")
+
+    def _case_skill_evolution_from_verified_self_healing(self, case: Dict) -> Dict:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            memory_dir = root / "memory"
+            skills_dir = root / "skills"
+            memory_dir.mkdir()
+            (skills_dir / "solve-python-cuda-env").mkdir(parents=True)
+            skill_path = skills_dir / "solve-python-cuda-env" / "SKILL.md"
+            skill_path.write_text("---\nname: solve-python-cuda-env\n---\n# Env\n", encoding="utf-8")
+            entries = [
+                _verified_memory_entry("mem_a", stage="runner", category="dependency_missing", frameworks=["gradio"], environment_backend="conda", torch_variant="cu121"),
+                _verified_memory_entry("mem_b", stage="runner", category="dependency_missing", frameworks=["gradio"], environment_backend="conda", torch_variant="cu121"),
+            ]
+            (memory_dir / "deployment_issues.jsonl").write_text("\n".join(json.dumps(item, ensure_ascii=False) for item in entries) + "\n", encoding="utf-8")
+            promoter = MemoryPromoter(memory_dir, skills_dir)
+            proposal = promoter.propose(min_count=2)["proposals"][0]
+            proposal_path = memory_dir / "promotions" / ("%s.json" % proposal["proposal_id"])
+            promoter.approve(proposal_path, reviewer="bench")
+            applied = promoter.apply(proposal_path, run_regression=False)
+            ok = applied["status"] == "applied" and Path(applied["rollback_path"]).exists() and "previous_sha256" in applied
+        return self._result(case, "passed" if ok else "failed", "skill evolution from verified self-healing verified")
 
     def _stage_update_count(self, run_dir: Path) -> Dict[str, int]:
         counts: Dict[str, int] = {}

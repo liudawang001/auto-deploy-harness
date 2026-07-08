@@ -23,7 +23,8 @@ from auto_harness.diagnostics import LogClassifier
 from auto_harness.dashboard import DashboardServer
 from auto_harness.models.task import ProjectSpec, RuntimePolicy, TaskSpec
 from auto_harness.agents.base import AgentResult
-from auto_harness.memory import MemoryPromoter, MemoryStore
+from auto_harness.env import CondaBackend, CondaEnvironmentParser
+from auto_harness.memory import MemoryPromoter, MemoryStore, VerifiedMemoryRecorder
 from auto_harness.live_smoke import LiveAgentSmokeRunner
 from auto_harness.assets import GitLFSDetector, GitLFSProgressParser, GitSubmoduleDetector, ModelCache, ModelAssetDetector, ModelFileSelector
 from auto_harness.modules.analyzer import ProjectAnalyzer
@@ -35,6 +36,7 @@ from auto_harness.modules.reporter import ReportGenerator
 from auto_harness.modules.runner import RunnerModule
 from auto_harness.modules.verify import VerifyModule
 from auto_harness.models.result import StageResult
+from auto_harness.models.base import write_json
 from auto_harness.providers import LLMResult, Message, MockLLMProvider
 from auto_harness.skills import SkillRegistry
 from auto_harness.state import StateStore
@@ -42,6 +44,7 @@ from auto_harness.orchestrator import TaskRunner
 from auto_harness.queue import DeploymentQueue
 from auto_harness.readiness import ReadinessAuditor
 from auto_harness.repair import RepairApplier, RepairLoopController, RepairOverlay, RepairPlanner, RepairPolicy
+from auto_harness.repair.actions import RepairActionNormalizer
 from auto_harness.runtime import DockerSmokeChecker, GpuResourceProbe
 from auto_harness.verify import BrowserVerifier
 from auto_harness.utils.shell import CommandResult
@@ -3666,6 +3669,396 @@ class CoreTests(unittest.TestCase):
             events = [json.loads(line) for line in (run_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()]
             resume_events = [event for event in events if event["type"] == "resume_requested"]
             self.assertEqual(resume_events[-1]["data"]["start_stage"], "analyze")
+
+    def test_conda_environment_yml_parser_extracts_channels_and_pip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env_path = Path(tmp) / "environment.yml"
+            env_path.write_text(
+                "name: demo-env\n"
+                "channels:\n"
+                "  - pytorch\n"
+                "  - nvidia\n"
+                "  - conda-forge\n"
+                "dependencies:\n"
+                "  - python=3.10\n"
+                "  - pip\n"
+                "  - pytorch\n"
+                "  - pytorch-cuda=12.1\n"
+                "  - pip:\n"
+                "      - gradio\n",
+                encoding="utf-8",
+            )
+            parsed = CondaEnvironmentParser().parse(env_path)
+            self.assertTrue(parsed["found"])
+            self.assertEqual(parsed["name"], "demo-env")
+            self.assertIn("pytorch", parsed["channels"])
+            self.assertIn("gradio", parsed["pip_dependencies"])
+            self.assertEqual(parsed["torch"]["conda_cuda"], "12.1")
+
+    def test_conda_backend_generates_prefix_create_command(self):
+        spec = CondaBackend(backend="conda").build_spec(
+            Path("/tmp/demo"),
+            {"backend": "conda", "python": "3.10", "torch_solution": {"selected": {"variant": "cu121", "packages": ["torch", "torchvision"]}}},
+            {"found": True, "name": "demo", "channels": ["pytorch", "nvidia"], "conda_dependencies": ["pip"], "pip_dependencies": ["gradio"]},
+        )
+        plan = CondaBackend(backend="conda").command_plan(spec)
+        self.assertEqual(plan["commands"][0], ["conda", "create", "-y", "-p", ".conda/envs/demo", "python=3.10"])
+        self.assertIn("pytorch-cuda=12.1", plan["commands"][1])
+        self.assertEqual(plan["commands"][-1][:4], ["conda", "run", "-p", ".conda/envs/demo"])
+
+    def test_conda_backend_uses_mamba_when_selected_and_available(self):
+        spec = CondaBackend(backend="mamba").build_spec(
+            Path("/tmp/demo"),
+            {"backend": "mamba", "python": "3.10", "torch_solution": {}},
+            {"found": True, "name": "demo", "channels": ["conda-forge"], "conda_dependencies": ["pip"], "pip_dependencies": []},
+        )
+        plan = CondaBackend(backend="mamba").command_plan(spec)
+        self.assertEqual(plan["commands"][0][0], "mamba")
+
+    def test_env_deploy_conda_dry_run_records_effective_commands(self):
+        analysis = {
+            "install_plan": [[".venv/bin/python", "-m", "pip", "install", "-r", "requirements.txt"]],
+            "env_solution": {
+                "backend": "conda",
+                "environment_prefix": ".conda/envs/demo",
+                "environment_python": ".conda/envs/demo/bin/python",
+                "conda": {"commands": [["conda", "create", "-y", "-p", ".conda/envs/demo", "python=3.10"]]},
+            },
+        }
+        result = EnvDeployModule().deploy(Path.cwd(), analysis, execute=False)
+        self.assertEqual(result.status, "passed")
+        self.assertEqual(result.data["environment_backend"], "conda")
+        self.assertEqual(result.data["effective_commands"][0][0], "conda")
+
+    def test_env_deploy_conda_execute_respects_allowed_commands(self):
+        analysis = {
+            "env_solution": {
+                "backend": "conda",
+                "environment_prefix": ".conda/envs/demo",
+                "conda": {"commands": [["conda", "create", "-y", "-p", ".conda/envs/demo", "python=3.10"]]},
+            },
+        }
+        result = EnvDeployModule().deploy(Path.cwd(), analysis, execute=True, allowed_commands=["python"])
+        self.assertEqual(result.status, "failed")
+        self.assertIn("disallowed command", result.error)
+
+    def test_runner_rewrites_venv_python_to_conda_run(self):
+        analysis = {
+            "run_candidates": [{"cmd": [".venv/bin/python", "app.py"], "expected_port": 7860}],
+            "env_solution": {"backend": "conda", "environment_prefix": ".conda/envs/demo", "environment_python": ".conda/envs/demo/bin/python"},
+        }
+        result = RunnerModule().run(Path.cwd(), analysis, execute=False)
+        self.assertEqual(result.data["effective_candidate"]["cmd"][:4], ["conda", "run", "-p", ".conda/envs/demo"])
+        self.assertNotEqual(result.data["effective_candidate"]["cmd"][0], ".venv/bin/python")
+
+    def test_repair_normalizes_package_and_packages_payload(self):
+        actions = RepairActionNormalizer().normalize_many([
+            {"type": "install_package", "payload": {"package": "rich"}},
+            {"type": "install_package", "payload": {"packages": ["numpy<2", "pydantic>=1.10,<2"]}},
+        ])
+        self.assertEqual([item["payload"]["package"] for item in actions], ["rich", "numpy<2", "pydantic>=1.10,<2"])
+
+    def test_repair_rejects_mixed_shell_package_string(self):
+        plan = {"actions": [{"type": "install_package", "requires": {"dependency_install": True}, "payload": {"package": "rich && rm -rf /"}}]}
+        policy = RepairPolicy().check(plan, RuntimePolicy(workspace_root="", allow_dependency_install=True))
+        self.assertFalse(policy["allowed"])
+
+    def test_repair_applier_uses_conda_python_when_env_backend_is_conda(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / "workspace" / "repo").mkdir(parents=True)
+            captured = {}
+
+            def fake_runner(cmd, cwd, timeout):
+                captured["cmd"] = cmd
+                return {"exit_code": 0, "stdout": "", "stderr": "", "timed_out": False}
+
+            result = RepairApplier().apply(
+                run_dir,
+                {"actions": [{"type": "install_package", "payload": {"package": "rich"}}]},
+                {"allowed": True, "decisions": [{"allowed": True}]},
+                execute=True,
+                command_runner=fake_runner,
+                allowed_commands=["conda"],
+                env_context={"backend": "conda", "conda_prefix": ".conda/envs/demo"},
+            )
+            self.assertTrue(result["executed"])
+            self.assertEqual(captured["cmd"][:4], ["conda", "run", "-p", ".conda/envs/demo"])
+
+    def test_repair_applier_uses_conda_install_for_conda_package(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / "workspace" / "repo").mkdir(parents=True)
+            captured = {}
+
+            def fake_runner(cmd, cwd, timeout):
+                captured["cmd"] = cmd
+                return {"exit_code": 0, "stdout": "", "stderr": "", "timed_out": False}
+
+            result = RepairApplier().apply(
+                run_dir,
+                {"actions": [{"type": "install_conda_package", "payload": {"package": "pytorch-cuda=12.1", "channels": ["pytorch", "nvidia"]}}]},
+                {"allowed": True, "decisions": [{"allowed": True}]},
+                execute=True,
+                command_runner=fake_runner,
+                allowed_commands=["conda"],
+                env_context={"backend": "conda", "conda_prefix": ".conda/envs/demo"},
+            )
+            self.assertTrue(result["executed"])
+            self.assertEqual(captured["cmd"][:5], ["conda", "install", "-y", "-p", ".conda/envs/demo"])
+            self.assertIn("pytorch-cuda=12.1", captured["cmd"])
+
+    def test_deterministic_environment_yml_selects_conda_without_llm(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "environment.yml").write_text("name: demo\ndependencies:\n  - python=3.10\n", encoding="utf-8")
+            (repo / "app.py").write_text("print('x')\n", encoding="utf-8")
+            result = ProjectAnalyzer().analyze(repo)
+            self.assertEqual(result.data["environment_strategy"]["backend"], "conda")
+            env = EnvSolveModule(env_backend="auto").solve(repo, result.data, {"python_range": ">=3.10"})
+            self.assertEqual(env.data["backend"], "conda")
+            self.assertEqual(env.data["conda"]["commands"][0][0], "conda")
+
+    def test_conda_torch_solution_falls_back_to_cpuonly(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "environment.yml").write_text("name: demo\ndependencies:\n  - python=3.10\n  - pytorch\n", encoding="utf-8")
+            analysis = ProjectAnalyzer().analyze(repo).data
+            env = EnvSolveModule(env_backend="conda", local_environment={"python_version": "3.10", "platform": "linux", "machine": "x86_64", "cuda": {"available": False, "version": ""}}).solve(repo, analysis, {"gpu_required": False})
+            text = json.dumps(env.data["conda"], ensure_ascii=False)
+            self.assertIn("cpuonly", text)
+
+    def test_flash_attn_blocks_on_cpu_conda_env(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "requirements.txt").write_text("torch\nflash-attn\n", encoding="utf-8")
+            analysis = ProjectAnalyzer().analyze(repo).data
+            env = EnvSolveModule(env_backend="conda", local_environment={"python_version": "3.10", "platform": "linux", "machine": "x86_64", "cuda": {"available": False, "version": ""}}).solve(repo, analysis, {"gpu_required": True})
+            packages = {item["name"]: item for item in env.data["gpu_package_matrix"]["packages"]}
+            self.assertEqual(packages["flash-attn"]["status"], "blocked")
+
+    def test_bitsandbytes_records_linux_cuda_requirement(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "requirements.txt").write_text("torch\nbitsandbytes\n", encoding="utf-8")
+            analysis = ProjectAnalyzer().analyze(repo).data
+            env = EnvSolveModule(env_backend="conda", local_environment={"python_version": "3.10", "platform": "darwin", "machine": "arm64", "cuda": {"available": False, "version": ""}}).solve(repo, analysis, {"gpu_required": True})
+            packages = {item["name"]: item for item in env.data["gpu_package_matrix"]["packages"]}
+            self.assertEqual(packages["bitsandbytes"]["status"], "blocked")
+            self.assertTrue(any("linux" in reason.lower() or "cuda" in reason.lower() for reason in packages["bitsandbytes"]["reasons"]))
+
+    def test_llm_environment_backend_policy_rejects_unknown_channel(self):
+        decision = AgentDecision(
+            stage="analyze",
+            status="ok",
+            confidence=0.9,
+            summary="select conda",
+            actions=[AgentAction(type="select_environment_backend", confidence=0.9, payload={"backend": "conda", "channels": ["https://evil.example"]})],
+        )
+        policy = AgentActionPolicy().validate(decision, RuntimePolicy(workspace_root=""), mode="planner")
+        self.assertFalse(policy["allowed"])
+        self.assertIn("conda channel is not allowed", policy["rejected_actions"][0]["reason"])
+
+    def test_llm_update_environment_spec_is_policy_merged(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "requirements.txt").write_text("torch\n", encoding="utf-8")
+            (repo / "app.py").write_text("print('x')\n", encoding="utf-8")
+            provider = FakeLLMProvider(json.dumps({
+                "stage": "analyze",
+                "status": "ok",
+                "confidence": 0.9,
+                "actions": [
+                    {
+                        "type": "update_environment_spec",
+                        "confidence": 0.9,
+                        "payload": {"python": "3.10", "channels": ["pytorch", "nvidia"], "conda_dependencies": ["pytorch-cuda=12.1"]},
+                    }
+                ],
+            }))
+            result = ProjectAnalyzer(
+                agent_engine=AgentDecisionEngine(provider),
+                agent_mode="planner",
+                runtime_policy=RuntimePolicy(workspace_root=""),
+            ).analyze(repo)
+            strategy = result.data["environment_strategy"]
+            self.assertEqual(strategy["python"], "3.10")
+            self.assertIn("pytorch", strategy["channels"])
+            self.assertIn("pytorch-cuda=12.1", strategy["conda_dependencies"])
+
+    def test_task_runner_auto_resumes_after_agent_repair(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = HarnessConfig(
+                runs_dir=str(root / "runs"),
+                memory_dir=str(root / "memory"),
+                model_cache_dir=str(root / "model_cache"),
+                agent_auto_resume_after_repair=True,
+                agent_max_loop_iterations=2,
+            )
+            runner = TaskRunner(config)
+            spec = runner.create_spec(str(root / "repo"), "demo", dry_run=True)
+            runner.store.create_task(spec)
+            calls = []
+
+            def fake_once(task_id, dry_run=True, start_stage="analyze"):
+                calls.append(start_stage)
+                run_dir = runner.store.run_dir(task_id)
+                (run_dir / "reports").mkdir(parents=True, exist_ok=True)
+                (run_dir / "repairs").mkdir(parents=True, exist_ok=True)
+                if len(calls) == 1:
+                    (run_dir / "reports" / "pipeline_results.json").write_text(json.dumps({
+                        "runner": {"status": "failed", "data": {"agent_loop": {"should_auto_resume": True, "next_rerun_from": "env_deploy"}}},
+                        "verify": {"status": "uncertain", "data": {}},
+                    }), encoding="utf-8")
+                    (run_dir / "repairs" / "repair_apply_result.json").write_text(json.dumps({
+                        "status": "applied",
+                        "policy": {"allowed": True},
+                        "action_results": [{"action_type": "install_package", "executed": True, "exit_code": 0}],
+                    }), encoding="utf-8")
+                else:
+                    (run_dir / "reports" / "pipeline_results.json").write_text(json.dumps({
+                        "verify": {"status": "passed", "data": {"trace_id": "trace-ok"}},
+                    }), encoding="utf-8")
+
+            runner._run_existing_once = fake_once
+            runner.run_existing(spec.task_id, dry_run=True)
+            self.assertEqual(calls, ["analyze", "env_deploy"])
+            events = [json.loads(line) for line in (runner.store.run_dir(spec.task_id) / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+            self.assertTrue(any(event["type"] == "agent_auto_resume" for event in events))
+
+    def test_task_runner_does_not_auto_resume_when_config_disabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            runner = TaskRunner(HarnessConfig(runs_dir=str(root / "runs"), memory_dir=str(root / "memory"), model_cache_dir=str(root / "model_cache"), agent_auto_resume_after_repair=False))
+            spec = runner.create_spec(str(root / "repo"), "demo", dry_run=True)
+            runner.store.create_task(spec)
+            calls = []
+
+            def fake_once(task_id, dry_run=True, start_stage="analyze"):
+                calls.append(start_stage)
+                run_dir = runner.store.run_dir(task_id)
+                (run_dir / "reports").mkdir(parents=True, exist_ok=True)
+                (run_dir / "repairs").mkdir(parents=True, exist_ok=True)
+                write_json(run_dir / "reports" / "pipeline_results.json", {"runner": {"status": "failed", "data": {"agent_loop": {"should_auto_resume": True, "next_rerun_from": "env_deploy"}}}, "verify": {"status": "uncertain", "data": {}}})
+                write_json(run_dir / "repairs" / "repair_apply_result.json", {"status": "applied", "policy": {"allowed": True}, "action_results": [{"action_type": "install_package", "executed": True, "exit_code": 0}]})
+
+            runner._run_existing_once = fake_once
+            runner.run_existing(spec.task_id, dry_run=True)
+            self.assertEqual(calls, ["analyze"])
+
+    def test_task_runner_stops_auto_resume_after_max_iterations(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            runner = TaskRunner(HarnessConfig(runs_dir=str(root / "runs"), memory_dir=str(root / "memory"), model_cache_dir=str(root / "model_cache"), agent_auto_resume_after_repair=True, agent_max_loop_iterations=1))
+            spec = runner.create_spec(str(root / "repo"), "demo", dry_run=True)
+            runner.store.create_task(spec)
+            calls = []
+
+            def fake_once(task_id, dry_run=True, start_stage="analyze"):
+                calls.append(start_stage)
+                run_dir = runner.store.run_dir(task_id)
+                (run_dir / "reports").mkdir(parents=True, exist_ok=True)
+                (run_dir / "repairs").mkdir(parents=True, exist_ok=True)
+                write_json(run_dir / "reports" / "pipeline_results.json", {"runner": {"status": "failed", "data": {"agent_loop": {"should_auto_resume": True, "next_rerun_from": "env_deploy"}}}, "verify": {"status": "uncertain", "data": {}}})
+                write_json(run_dir / "repairs" / "repair_apply_result.json", {"status": "applied", "policy": {"allowed": True}, "action_results": [{"action_type": "install_package", "executed": True, "exit_code": 0}]})
+
+            runner._run_existing_once = fake_once
+            runner.run_existing(spec.task_id, dry_run=True)
+            self.assertEqual(calls, ["analyze", "env_deploy"])
+
+    def test_task_runner_stops_auto_resume_after_verify_pass(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            runner = TaskRunner(HarnessConfig(runs_dir=str(root / "runs"), memory_dir=str(root / "memory"), model_cache_dir=str(root / "model_cache"), agent_auto_resume_after_repair=True, agent_stop_on_verify_pass=True))
+            spec = runner.create_spec(str(root / "repo"), "demo", dry_run=True)
+            runner.store.create_task(spec)
+            calls = []
+
+            def fake_once(task_id, dry_run=True, start_stage="analyze"):
+                calls.append(start_stage)
+                run_dir = runner.store.run_dir(task_id)
+                (run_dir / "reports").mkdir(parents=True, exist_ok=True)
+                (run_dir / "repairs").mkdir(parents=True, exist_ok=True)
+                write_json(run_dir / "reports" / "pipeline_results.json", {"runner": {"status": "failed", "data": {"agent_loop": {"should_auto_resume": True, "next_rerun_from": "env_deploy"}}}, "verify": {"status": "passed", "data": {"trace_id": "trace-ok"}}})
+                write_json(run_dir / "repairs" / "repair_apply_result.json", {"status": "applied", "policy": {"allowed": True}, "action_results": [{"action_type": "install_package", "executed": True, "exit_code": 0}]})
+
+            runner._run_existing_once = fake_once
+            runner.run_existing(spec.task_id, dry_run=True)
+            self.assertEqual(calls, ["analyze"])
+
+    def test_task_runner_does_not_auto_resume_when_policy_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            runner = TaskRunner(HarnessConfig(runs_dir=str(root / "runs"), memory_dir=str(root / "memory"), model_cache_dir=str(root / "model_cache"), agent_auto_resume_after_repair=True))
+            spec = runner.create_spec(str(root / "repo"), "demo", dry_run=True)
+            runner.store.create_task(spec)
+            calls = []
+
+            def fake_once(task_id, dry_run=True, start_stage="analyze"):
+                calls.append(start_stage)
+                run_dir = runner.store.run_dir(task_id)
+                (run_dir / "reports").mkdir(parents=True, exist_ok=True)
+                (run_dir / "repairs").mkdir(parents=True, exist_ok=True)
+                write_json(run_dir / "reports" / "pipeline_results.json", {"runner": {"status": "failed", "data": {"agent_loop": {"should_auto_resume": True, "next_rerun_from": "env_deploy"}}}, "verify": {"status": "uncertain", "data": {}}})
+                write_json(run_dir / "repairs" / "repair_apply_result.json", {"status": "applied", "policy": {"allowed": False}, "action_results": [{"action_type": "install_package", "executed": True, "exit_code": 0}]})
+
+            runner._run_existing_once = fake_once
+            runner.run_existing(spec.task_id, dry_run=True)
+            self.assertEqual(calls, ["analyze"])
+
+    def test_verified_memory_recorded_after_agent_repair_verify_pass(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            (run_dir / "reports").mkdir(parents=True)
+            (run_dir / "repairs").mkdir()
+            (run_dir / "task.json").write_text(json.dumps({"task_id": "task1"}), encoding="utf-8")
+            (run_dir / "events.jsonl").write_text(json.dumps({
+                "stage": "runner",
+                "type": "memory_recorded",
+                "data": {"signature": "sig1", "repair_plan": {"root_cause": "ModuleNotFoundError", "actions": [{"type": "install_package", "payload": {"package": "rich"}}], "rerun_from_effective": "env_deploy"}},
+            }) + "\n", encoding="utf-8")
+            (run_dir / "repairs" / "repair_apply_result.json").write_text(json.dumps({
+                "status": "applied",
+                "policy": {"allowed": True},
+                "action_results": [{"action_type": "install_package", "executed": True, "exit_code": 0}],
+            }), encoding="utf-8")
+            pipeline = {
+                "analyze": {"status": "passed", "data": {"frameworks": ["gradio"], "files": ["app.py"]}},
+                "env_solve": {"status": "passed", "data": {"analysis": {"env_solution": {"backend": "conda", "torch_variant": "cu121"}}}},
+                "verify": {"status": "passed", "data": {"trace_id": "trace-123"}},
+            }
+            entry = VerifiedMemoryRecorder(run_dir.parent / "memory").record_if_verified(run_dir, pipeline, {"executed_action_count": 1})
+            self.assertIsNotNone(entry)
+            self.assertTrue(entry["verified_success"])
+            self.assertEqual(entry["environment_backend"], "conda")
+            self.assertEqual(entry["torch_variant"], "cu121")
+
+    def test_verified_memory_not_recorded_when_verify_uncertain(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            (run_dir / "reports").mkdir(parents=True)
+            result = VerifiedMemoryRecorder(run_dir.parent / "memory").record_if_verified(run_dir, {"verify": {"status": "uncertain", "data": {}}}, {})
+            self.assertIsNone(result)
+            status = json.loads((run_dir / "reports" / "verified_memory.json").read_text(encoding="utf-8"))
+            self.assertFalse(status["recorded"])
+
+    def test_verified_memory_not_recorded_when_policy_rejected_high_risk(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            (run_dir / "reports").mkdir(parents=True)
+            (run_dir / "repairs").mkdir()
+            (run_dir / "task.json").write_text(json.dumps({"task_id": "task1"}), encoding="utf-8")
+            (run_dir / "events.jsonl").write_text("", encoding="utf-8")
+            write_json(run_dir / "repairs" / "repair_apply_result.json", {
+                "status": "applied",
+                "policy": {"allowed": False, "decisions": [{"allowed": False, "reasons": ["source edit is not allowed"]}]},
+                "action_results": [{"action_type": "install_package", "executed": True, "exit_code": 0}],
+            })
+            result = VerifiedMemoryRecorder(run_dir.parent / "memory").record_if_verified(run_dir, {"verify": {"status": "passed", "data": {"trace_id": "trace-risk"}}}, {})
+            self.assertIsNone(result)
+            status = json.loads((run_dir / "reports" / "verified_memory.json").read_text(encoding="utf-8"))
+            self.assertFalse(status["recorded"])
 
 
 if __name__ == "__main__":

@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+from auto_harness.env import CondaBackend, CondaEnvironmentParser
 from auto_harness.models.result import StageResult
 
 
@@ -64,16 +65,38 @@ class LocalEnvironmentProbe:
 class EnvSolveModule:
     """Builds a safer dependency installation plan without executing commands."""
 
-    def __init__(self, local_environment: Optional[Dict] = None, probe: LocalEnvironmentProbe = None) -> None:
+    def __init__(
+        self,
+        local_environment: Optional[Dict] = None,
+        probe: LocalEnvironmentProbe = None,
+        env_backend: str = "auto",
+        conda_envs_dir: str = ".conda/envs",
+        conda_prefer_mamba: bool = True,
+        conda_allowed_channels: List[str] = None,
+        conda_python_default: str = "3.10",
+        torch_cuda_preference: str = "auto",
+    ) -> None:
         self.local_environment = local_environment
         self.probe = probe or LocalEnvironmentProbe()
+        self.env_backend = env_backend
+        self.conda_envs_dir = conda_envs_dir
+        self.conda_prefer_mamba = conda_prefer_mamba
+        self.conda_allowed_channels = conda_allowed_channels or ["defaults", "conda-forge", "pytorch", "nvidia", "fastai"]
+        self.conda_python_default = conda_python_default
+        self.torch_cuda_preference = torch_cuda_preference
 
     def solve(self, repo_dir: Path, analysis: Dict, resource_plan: Dict) -> StageResult:
         requirements = self._read_requirements(repo_dir)
         frameworks = set(analysis.get("frameworks") or [])
         base_plan = [list(cmd) for cmd in analysis.get("install_plan") or []]
-        constraints, reasons = self._constraints(requirements, frameworks)
         local_environment = dict(self.local_environment or self.probe.probe())
+        conda_file = CondaEnvironmentParser().parse_repo(repo_dir, default_python=self.conda_python_default)
+        if (conda_file.get("torch") or {}).get("requires_torch"):
+            frameworks.add("torch")
+            requirements = requirements + [dep for dep in (conda_file.get("conda_dependencies") or []) if str(dep).startswith(("pytorch", "torch", "torchvision", "torchaudio"))]
+            requirements = requirements + [dep for dep in (conda_file.get("pip_dependencies") or []) if str(dep).startswith(("torch", "torchvision", "torchaudio"))]
+        constraints, reasons = self._constraints(requirements, frameworks)
+        environment_strategy = self._environment_strategy(analysis, conda_file)
         torch_solution = self._torch_solution(requirements, frameworks, resource_plan, local_environment, base_plan)
         gpu_package_matrix = self._gpu_package_matrix(requirements, frameworks, resource_plan, local_environment, torch_solution)
         install_plan = self._apply_constraints(base_plan, constraints)
@@ -81,9 +104,10 @@ class EnvSolveModule:
         risk_reasons = self._risk_reasons(requirements, frameworks, resource_plan, torch_solution, gpu_package_matrix)
         solved_analysis = dict(analysis)
         solved_analysis["install_plan"] = install_plan
-        solved_analysis["env_solution"] = {
-            "backend": "local_venv" if install_plan else "unknown",
-            "python": self._python_choice(resource_plan),
+        backend = self._selected_backend(environment_strategy, conda_file)
+        env_solution = {
+            "backend": backend,
+            "python": environment_strategy.get("python") or conda_file.get("python") or self._python_choice(resource_plan),
             "python_range": resource_plan.get("python_range", "unknown"),
             "local_environment": local_environment,
             "constraints": constraints,
@@ -93,17 +117,41 @@ class EnvSolveModule:
             "gpu_package_matrix": gpu_package_matrix,
             "gpu_required": bool(resource_plan.get("gpu_required")),
             "risk_reasons": risk_reasons,
+            "environment_strategy": environment_strategy,
+            "conda_file": conda_file,
         }
-        status = "passed" if install_plan else "uncertain"
+        if backend in ("conda", "mamba"):
+            conda_plan = CondaBackend(
+                backend=backend,
+                envs_dir=self.conda_envs_dir,
+                prefer_mamba=self.conda_prefer_mamba,
+                allowed_channels=self.conda_allowed_channels,
+                default_python=self.conda_python_default,
+            )
+            spec = conda_plan.build_spec(repo_dir, env_solution, conda_file=conda_file if conda_file.get("found") else {})
+            plan = conda_plan.command_plan(spec, pip_plan=install_plan)
+            env_solution.update({
+                "conda": plan,
+                "environment_prefix": plan["environment_prefix"],
+                "environment_python": plan["environment_python"],
+                "install_plan_effective": plan["commands"],
+            })
+        solved_analysis["env_solution"] = {
+            **env_solution,
+        }
+        status = "passed" if install_plan or backend in ("conda", "mamba") else "uncertain"
         summary = "environment solution generated" if status == "passed" else "no install plan to solve"
         return StageResult(
             "env_solve",
             status,
             summary,
             {
-                "backend": solved_analysis["env_solution"]["backend"],
-                "python": solved_analysis["env_solution"]["python"],
+                "backend": env_solution["backend"],
+                "python": env_solution["python"],
                 "install_plan": install_plan,
+                "environment_strategy": environment_strategy,
+                "conda_file": conda_file,
+                "conda": env_solution.get("conda", {}),
                 "constraints": constraints,
                 "constraint_reasons": reasons,
                 "local_environment": local_environment,
@@ -113,6 +161,47 @@ class EnvSolveModule:
                 "analysis": solved_analysis,
             },
         )
+
+    def _environment_strategy(self, analysis: Dict, conda_file: Dict) -> Dict:
+        strategy = dict(analysis.get("environment_strategy") or {})
+        if self.env_backend and self.env_backend != "auto":
+            strategy["backend"] = self.env_backend
+            strategy["source"] = "config"
+        elif conda_file.get("found") and strategy.get("backend") in ("", None, "venv"):
+            strategy.update({
+                "backend": "conda",
+                "preferred_tool": "mamba" if self.conda_prefer_mamba else "conda",
+                "python": conda_file.get("python") or self.conda_python_default,
+                "channels": conda_file.get("channels") or ["conda-forge"],
+                "source": "deterministic_environment_yml",
+                "confidence": 0.85,
+                "reasons": ["environment.yml detected"],
+            })
+        strategy.setdefault("backend", "venv")
+        strategy.setdefault("python", conda_file.get("python") or self.conda_python_default)
+        strategy["channels"] = self._safe_channels(strategy.get("channels") or conda_file.get("channels") or [])
+        return strategy
+
+    def _selected_backend(self, strategy: Dict, conda_file: Dict) -> str:
+        backend = str(strategy.get("backend") or "venv").lower()
+        if backend == "auto":
+            backend = "conda" if conda_file.get("found") else "venv"
+        if backend == "local_venv":
+            backend = "venv"
+        if backend not in ("venv", "conda", "mamba"):
+            backend = "venv"
+        if conda_file.get("found") and self.env_backend == "auto" and backend == "venv":
+            backend = "conda"
+        return backend
+
+    def _safe_channels(self, channels: List[str]) -> List[str]:
+        allowed = set(self.conda_allowed_channels)
+        result = []
+        for channel in channels:
+            item = str(channel).strip()
+            if item in allowed and item not in result:
+                result.append(item)
+        return result
 
     def _read_requirements(self, repo_dir: Path) -> List[str]:
         path = repo_dir / "requirements.txt"
@@ -201,7 +290,7 @@ class EnvSolveModule:
         return reasons
 
     def _gpu_package_matrix(self, requirements: List[str], frameworks: set, resource_plan: Dict, local_environment: Dict, torch_solution: Dict) -> Dict:
-        package_names = ("xformers", "flash-attn", "flash_attn", "bitsandbytes", "triton")
+        package_names = ("xformers", "flash-attn", "flash_attn", "bitsandbytes", "triton", "deepspeed", "accelerate")
         declared = self._declared_packages(requirements)
         normalized_declared = set(declared)
         if "flash_attn" in normalized_declared:
@@ -243,7 +332,7 @@ class EnvSolveModule:
         reasons = []
         actions = []
         status = "compatible"
-        if name in {"xformers", "flash-attn", "bitsandbytes"} and (not cuda_available or torch_variant == "cpu"):
+        if name in {"xformers", "flash-attn", "bitsandbytes", "deepspeed"} and (not cuda_available or torch_variant == "cpu"):
             status = "blocked"
             reasons.append("requires CUDA torch runtime; current selected torch variant is %s" % (torch_variant or "unknown"))
             actions.append("switch torch_solution to a CUDA wheel before installing %s" % name)
@@ -272,6 +361,13 @@ class EnvSolveModule:
                 status = "risky"
                 reasons.append("triton was inferred for a GPU workload but torch selected CPU fallback")
             actions.append("let torch install the matching triton dependency unless the project pins it")
+        if name == "deepspeed":
+            if platform_name != "linux":
+                status = "blocked"
+                reasons.append("deepspeed production installs are Linux/CUDA oriented; current platform is %s" % (platform_name or "unknown"))
+            actions.append("install deepspeed only after torch CUDA runtime is selected")
+        if name == "accelerate":
+            actions.append("accelerate is pure Python but should follow the selected torch runtime")
         if not reasons:
             reasons.append("%s appears compatible with the detected Python/CUDA/Torch envelope" % name)
         return {
@@ -343,6 +439,8 @@ class EnvSolveModule:
         return any(token in normalized for token in ("==", "~=", ">=", "<=", ">", "<"))
 
     def _select_torch_variant(self, resource_plan: Dict, local_environment: Dict) -> str:
+        if self.torch_cuda_preference in {"cpu", "cu118", "cu121"}:
+            return self.torch_cuda_preference
         requested = str(resource_plan.get("torch_variant") or "").lower()
         if requested in {"cpu", "cu118", "cu121"}:
             return requested

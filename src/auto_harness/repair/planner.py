@@ -2,11 +2,15 @@ from typing import Dict, List
 
 from auto_harness.models.base import to_plain
 from auto_harness.models.result import StageResult
+from auto_harness.repair.actions import RepairActionNormalizer
 from auto_harness.repair.schema import RepairAction, RepairPlan
 
 
 class RepairPlanner:
     RERUN_STAGES = ("analyze", "resource_plan", "env_solve", "env_deploy", "model_prepare", "runner", "verify")
+
+    def __init__(self) -> None:
+        self.normalizer = RepairActionNormalizer()
 
     def propose(self, stage: str, result: StageResult, analysis: Dict = None) -> Dict:
         analysis = analysis or {}
@@ -50,6 +54,7 @@ class RepairPlanner:
         plain_plan["rerun_from_effective"] = effective_rerun
         plain_plan["rerun_reason"] = diagnosis.get("rerun_reason", "")
         plain_plan["rerun_from_source"] = "llm" if proposed_rerun else "deterministic"
+        plain_plan["actions"] = self.normalizer.normalize_many(plain_plan.get("actions", []))
         if proposed_rerun and proposed_rerun != effective_rerun:
             plain_plan["rerun_from_adjustment_reason"] = "proposed rerun_from is not safe or is later than required safe stage"
         return plain_plan

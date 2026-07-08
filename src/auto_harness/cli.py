@@ -35,6 +35,9 @@ def build_parser() -> argparse.ArgumentParser:
     deploy.add_argument("--download-retries", type=int, default=None)
     deploy.add_argument("--download-retry-backoff", type=float, default=None)
     deploy.add_argument("--execution-backend", choices=["local", "docker"], default=None)
+    deploy.add_argument("--agent-self-heal", action="store_true", default=False)
+    deploy.add_argument("--env-backend", choices=["auto", "venv", "conda", "mamba"], default=None)
+    deploy.add_argument("--prefer-mamba", action="store_true", default=False)
     deploy.add_argument("--docker-image", default=None)
     deploy.add_argument("--docker-network", default=None)
     deploy.add_argument("--docker-gpus", default=None)
@@ -48,6 +51,9 @@ def build_parser() -> argparse.ArgumentParser:
     resume.add_argument("--download-retries", type=int, default=None)
     resume.add_argument("--download-retry-backoff", type=float, default=None)
     resume.add_argument("--execution-backend", choices=["local", "docker"], default=None)
+    resume.add_argument("--agent-self-heal", action="store_true", default=False)
+    resume.add_argument("--env-backend", choices=["auto", "venv", "conda", "mamba"], default=None)
+    resume.add_argument("--prefer-mamba", action="store_true", default=False)
     resume.add_argument("--docker-image", default=None)
     resume.add_argument("--docker-network", default=None)
     resume.add_argument("--docker-gpus", default=None)
@@ -170,6 +176,16 @@ def _apply_cli_overrides(config: HarnessConfig, args) -> None:
         config.docker_gpus = args.docker_gpus
     if getattr(args, "docker_model_cache_dir", None):
         config.docker_model_cache_dir = args.docker_model_cache_dir
+    if getattr(args, "agent_self_heal", False):
+        config.agent_mode = "gated_actor"
+        config.agent_enable_log_diagnosis = True
+        config.agent_enable_repair_actions = True
+        config.agent_enable_verify_planner = True
+        config.agent_auto_resume_after_repair = True
+    if getattr(args, "env_backend", None):
+        config.env_backend = args.env_backend
+    if getattr(args, "prefer_mamba", False):
+        config.conda_prefer_mamba = True
 
 
 def main(argv=None) -> int:

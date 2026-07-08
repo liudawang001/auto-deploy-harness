@@ -88,6 +88,18 @@ class ReportGenerator:
                 "- Help type: %s" % (", ".join("`%s`" % item for item in metrics.get("help_type") or []) or "`none`"),
                 "",
             ])
+        verified_memory = self._read_optional(run_dir / "reports" / "verified_memory.json")
+        if isinstance(verified_memory, dict):
+            lines.extend([
+                "## Verified Memory",
+                "",
+                "- Recorded: `%s`" % str(bool(verified_memory.get("recorded"))).lower(),
+                "- Memory id: `%s`" % verified_memory.get("memory_id", ""),
+                "- Repair action hash: `%s`" % verified_memory.get("repair_action_hash", ""),
+                "- Verification trace id: `%s`" % verified_memory.get("verification_trace_id", ""),
+                "- Reason: %s" % verified_memory.get("reason", ""),
+                "",
+            ])
         execution_audit = execution_audit or self._read_optional(run_dir / "reports" / "execution_audit.json")
         if isinstance(execution_audit, dict) and execution_audit:
             lines.extend([

@@ -12,6 +12,9 @@ class AgentActionPolicy:
         "select_run_candidate",
         "update_verify_hint",
         "add_dependency_constraint",
+        "select_environment_backend",
+        "update_environment_spec",
+        "select_torch_variant",
     }
     TIER0_ALLOWED = {
         "update_verify_hint",
@@ -23,10 +26,16 @@ class AgentActionPolicy:
         "add_dependency_constraint",
         "switch_torch_variant",
         "retry_model_download",
+        "switch_environment_backend",
+        "pin_dependency",
+        "install_conda_package",
+        "install_pip_package",
     }
     SHELL_METACHARS = (";", "&&", "|", ">", "<", "`", "$(")
     BLOCKED_RUN_EXECUTABLES = {"bash", "sh", "zsh", "fish", "cmd", "powershell", "curl", "wget"}
-    SAFE_PACKAGE_RE = re.compile(r"^[A-Za-z0-9_.-]+([<>=!~]=?[A-Za-z0-9_.+*~-]+)?$")
+    SAFE_PACKAGE_RE = re.compile(r"^[A-Za-z0-9_.-]+([<>=!~]=?[A-Za-z0-9_.+*,-]+)?$")
+    ALLOWED_ENV_BACKENDS = {"venv", "conda", "mamba", "docker"}
+    ALLOWED_CONDA_CHANNELS = {"defaults", "conda-forge", "pytorch", "nvidia", "fastai"}
 
     def validate(self, decision, runtime_policy: RuntimePolicy, mode: str = "planner") -> Dict:
         runtime_policy = self._runtime_policy(runtime_policy)
@@ -85,9 +94,39 @@ class AgentActionPolicy:
                 return "install_package requires gated_actor mode"
             if not runtime_policy.allow_dependency_install:
                 return "dependency install is not allowed"
-            package = str(payload.get("package") or "")
-            if not self.safe_package_spec(package):
-                return "unsafe package spec"
+            for package in self._payload_packages(payload):
+                if not self.safe_package_spec(package):
+                    return "unsafe package spec"
+            if not self._payload_packages(payload):
+                return "missing package spec"
+        if action_type in ("install_pip_package", "install_conda_package", "pin_dependency"):
+            if mode != "gated_actor":
+                return "%s requires gated_actor mode" % action_type
+            if not runtime_policy.allow_dependency_install:
+                return "dependency install is not allowed"
+            for package in self._payload_packages(payload):
+                if not self.safe_package_spec(package):
+                    return "unsafe package spec"
+            if not self._payload_packages(payload):
+                return "missing package spec"
+        if action_type in ("select_environment_backend", "switch_environment_backend"):
+            backend = str(payload.get("backend") or "").lower()
+            if backend not in self.ALLOWED_ENV_BACKENDS:
+                return "environment backend is not allowed"
+            channel_reject = self._reject_channels(payload.get("channels") or [])
+            if channel_reject:
+                return channel_reject
+        if action_type == "update_environment_spec":
+            channel_reject = self._reject_channels(payload.get("channels") or [])
+            if channel_reject:
+                return channel_reject
+            for package in self._payload_packages(payload):
+                if not self.safe_package_spec(package):
+                    return "unsafe package spec"
+        if action_type in ("select_torch_variant", "switch_torch_variant"):
+            variant = str(payload.get("variant") or payload.get("torch_variant") or "").lower()
+            if variant not in ("cpu", "cu118", "cu121"):
+                return "torch variant is not allowed"
         if requires.get("source_edit") or action_type == "propose_source_patch":
             if not runtime_policy.allow_source_edit:
                 return "source edit is not allowed"
@@ -104,6 +143,23 @@ class AgentActionPolicy:
         lowered = package.lower()
         forbidden = ("--extra-index-url", "--trusted-host", " -e ", "git+", "http://", "https://", "/", "\\")
         return not any(token in lowered for token in forbidden)
+
+    def _payload_packages(self, payload: Dict) -> List[str]:
+        if isinstance(payload.get("packages"), list):
+            return [str(item).strip() for item in payload["packages"] if str(item).strip()]
+        package = str(payload.get("package") or "").strip()
+        return [package] if package else []
+
+    def _reject_channels(self, channels) -> str:
+        if not isinstance(channels, list):
+            return "channels must be a list"
+        for channel in channels:
+            item = str(channel).strip()
+            if item not in self.ALLOWED_CONDA_CHANNELS:
+                return "conda channel is not allowed"
+            if self._has_shell_metachar(item) or "://" in item or item.startswith(("/", ".")):
+                return "conda channel is unsafe"
+        return ""
 
     def _has_shell_metachar(self, value: str) -> bool:
         return any(token in value for token in self.SHELL_METACHARS)

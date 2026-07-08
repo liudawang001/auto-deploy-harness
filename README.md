@@ -20,13 +20,15 @@ AI-Auto-Harness 是一个面向 AI 开源 demo 项目的自动部署与验证 Ag
 - Mock LLM provider 和讯飞 Anthropic-compatible provider。
 - Claude Code executor wrapper。
 - Policy-constrained LLM Agent：`agent_mode=planner` 时 LLM 可通过 schema 化 action 影响 analyze plan；`agent_mode=gated_actor` 且显式开关打开时，LLM repair action 可在 policy gate 后执行安全动作；LLM 永远不能直接执行 shell、修改源码或判定成功。
+- Self-healing 主流程：`deploy/resume --agent-self-heal` 会打开 bounded repair/resume loop，普通 `TaskRunner.run_existing()` 能在 policy-approved repair 后自动从 `env_deploy` / `model_prepare` / `runner` / `verify` 安全阶段恢复，最终仍由 verify trace 判定成功。
 - HTTP trace evidence：`verify` 支持 GET 和 POST JSON；响应必须证明当前 trace 被处理，HTTP 200 本身不算成功；文件产物证据必须可读、非空并记录 size/sha256。
 - 可选 Claude Code analyzer advisor：通过 `AUTO_HARNESS_USE_AGENT_ANALYZER=1` 启用。
 - 仓库内置 skill：位于 `skills/*/SKILL.md`，按阶段选择并记录 hash。
 - 结构化问题记忆：位于 `memory/deployment_issues.jsonl`，用于检索历史相似失败。
 - Memory promotion：`memory-promote` 会把高频 issue memory 聚类为可审核的 skill 更新 proposal；默认只生成 proposal，不直接修改 skill，apply 前必须先审批，apply 后默认运行绑定 benchmark 子集并写出 regression report。
 - `resource_plan` 阶段：识别模型资产、GPU/CUDA 信号、磁盘风险和外部 token 需求。
-- `env_solve` 阶段：在安装前生成更稳定的依赖方案，识别老 Gradio 与 `numpy<2` / `pydantic<2` 兼容风险、headless OpenCV 替换建议，并根据本机 CUDA/Python 生成 PyTorch CPU/CUDA wheel 安装方案、fallback 和 `xformers` / `flash-attn` / `bitsandbytes` / `triton` GPU 包兼容矩阵。
+- `env_solve` 阶段：在安装前生成更稳定的依赖方案，识别老 Gradio 与 `numpy<2` / `pydantic<2` 兼容风险、headless OpenCV 替换建议，解析 `environment.yml` 并选择 `venv` / `conda` / `mamba` backend；根据本机 CUDA/Python 生成 PyTorch pip wheel 或 conda `pytorch-cuda` 方案、fallback 和 `xformers` / `flash-attn` / `bitsandbytes` / `triton` / `deepspeed` / `accelerate` GPU 包兼容矩阵。
+- Verified long-term memory：自修复后只有最终 verify pass、repair policy 通过、repair action 有效且存在 trace id 时，才会写入 `memory_type=verified_success` 的长期记忆；report 会展示 memory id、repair action hash 和 verification trace id。
 - Docker backend：`env_deploy` 和 `runner` 支持把安装/启动命令包装为 `docker run` 计划，包含 GPU 参数、模型缓存挂载、容器日志命令和清理命令元数据；默认仍是本地 backend，真实执行仍受 `--execute` 和命令白名单保护。
 - Git LFS / submodule 检测：识别 `.gitattributes`、LFS pointer 文件和 `.gitmodules`，估算 pointer size，缺工具时给出诊断，并生成 `git lfs` / `git submodule` 准备命令。
 - Git LFS / submodule 受控准备：`model_prepare` 在 `--execute` 且 `git` 通过命令白名单时执行 `git lfs install/pull` 和 `git submodule sync/update`，并记录命令结果、stderr/stdout tail、进度和最终状态。
@@ -42,7 +44,7 @@ AI-Auto-Harness 是一个面向 AI 开源 demo 项目的自动部署与验证 Ag
 - Readiness audit：`readiness` 命令会生成机器可读完成度审计，区分本地已完成能力和真实联网/GPU/Docker/vLLM 外部验收门，不保存任何密钥值。
 - Agent 设计与评估文档：`docs/agent-architecture.md`、`docs/agent-safety-model.md`、`docs/agent-evaluation-report.md`。
 - 真实 Agent smoke 证据：`docs/evidence/live-agent-smoke-manifest.json` 记录了无密钥 Xunfei repair-mode live smoke manifest。
-- Benchmark fixtures：`tests/fixtures/benchmarks` 覆盖下载续传、缓存命中、并发下载、etag 缓存失效、缓存清理、按来源/repo/keep-list 清理、服务启动后退出、历史 artifact 干扰、Gradio API shape 变化、token 缺失、token report 提示、Gradio `/config` discovery、OpenAPI schema discovery、OpenAI-compatible model discovery/stream verify、浏览器 DOM trace、Streamlit 错误页面、HTTP 200 false-positive 防护、repair policy 拒绝、repair loop 限流、repair resume 阶段跳转、人工审批、checksum 失败、本地 E2E fixture matrix、memory promotion proposal/审批/回归绑定、LLM planner policy merge、LLM repair execute loop、LLM verify hint recovery、静态 dashboard 导出、只读 HTTP dashboard、持久化任务队列 dry-run 调度、队列并发 worker pool、队列 claim lock、stale claim lock recovery、GPU 探测调度、部署产物包导出、readiness audit、Docker backend plan/GPU/cache/log 元数据、GPU 包矩阵、verify progress 和 Git LFS progress parse。
+- Benchmark fixtures：`tests/fixtures/benchmarks` 覆盖下载续传、缓存命中、并发下载、etag 缓存失效、缓存清理、按来源/repo/keep-list 清理、服务启动后退出、历史 artifact 干扰、Gradio API shape 变化、token 缺失、token report 提示、Gradio `/config` discovery、OpenAPI schema discovery、OpenAI-compatible model discovery/stream verify、浏览器 DOM trace、Streamlit 错误页面、HTTP 200 false-positive 防护、repair policy 拒绝、repair loop 限流、repair resume 阶段跳转、人工审批、checksum 失败、本地 E2E fixture matrix、memory promotion proposal/审批/回归绑定、LLM planner policy merge、LLM repair execute loop、LLM verify hint recovery、静态 dashboard 导出、只读 HTTP dashboard、持久化任务队列 dry-run 调度、队列并发 worker pool、队列 claim lock、stale claim lock recovery、GPU 探测调度、部署产物包导出、readiness audit、Docker backend plan/GPU/cache/log 元数据、GPU 包矩阵、verify progress、Git LFS progress parse、主流程 self-healing、conda/PyTorch backend、verified memory 和 skill evolution。
 - 开发进度报告：`docs/progress.md`。
 
 ## 快速开始
@@ -67,6 +69,19 @@ PYTHONPATH=src python3 -m auto_harness.cli deploy --repo ./demo --name demo --ex
 ```
 
 `--repo` 也可以传入本地项目路径，系统会复制到隔离的 run workspace。
+
+开启自修复和自动环境 backend：
+
+```bash
+PYTHONPATH=src python3 -m auto_harness.cli deploy \
+  --repo ./demo \
+  --name demo \
+  --execute \
+  --allow-install \
+  --allow-start \
+  --agent-self-heal \
+  --env-backend auto
+```
 
 ## 讯飞配置
 

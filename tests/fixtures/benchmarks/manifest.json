@@ -279,6 +279,56 @@
       "id": "agent_metrics_paired_comparison",
       "purpose": "验证 agent off/on paired run 可以生成可比较的 agent metrics",
       "expected_signal": "metrics compare final status, repair attempts, rejected actions and helped flag"
+    },
+    {
+      "id": "agent_full_self_healing_pipeline",
+      "purpose": "验证普通 run_existing 主流程能在 repair 后自动从安全阶段 resume，而不是只在 live-smoke wrapper 中恢复",
+      "expected_signal": "first run requests auto resume and second run starts from env_deploy"
+    },
+    {
+      "id": "conda_backend_environment_yml_plan",
+      "purpose": "验证 environment.yml 会触发 conda backend 并生成 prefix create/install plan",
+      "expected_signal": "env_solve selects conda and creates conda create -p command"
+    },
+    {
+      "id": "conda_backend_pytorch_cuda_plan",
+      "purpose": "验证 conda PyTorch CUDA 方案会生成 pytorch-cuda 包安装命令",
+      "expected_signal": "conda install plan includes pytorch-cuda=12.1 and torch packages"
+    },
+    {
+      "id": "conda_runner_command_rewrite",
+      "purpose": "验证 conda 环境下 runner 会把 .venv/bin/python 改写为 conda run -p",
+      "expected_signal": "effective runner command starts with conda run -p"
+    },
+    {
+      "id": "verified_memory_after_self_healing",
+      "purpose": "验证自修复后最终 verify pass 会写入 verified success memory",
+      "expected_signal": "memory entry has verified_success=true, trace id, repair hash and environment signature"
+    },
+    {
+      "id": "skill_evolution_from_verified_self_healing",
+      "purpose": "验证 skill promotion 可以消费 verified self-healing memory，并在 apply 时写入 history/sha/rollback metadata",
+      "expected_signal": "approved proposal applies skill section and records previous/new sha256 plus rollback path"
+    },
+    {
+      "id": "conda_pytorch_env_solve_plan",
+      "purpose": "验证 Conda + PyTorch demo 的环境求解方案",
+      "expected_signal": "environment.yml is parsed and conda backend is selected"
+    },
+    {
+      "id": "conda_pytorch_env_deploy_fake_execute",
+      "purpose": "验证 Conda + PyTorch demo 的 fake env deploy 命令计划",
+      "expected_signal": "conda command plan contains PyTorch CUDA package command"
+    },
+    {
+      "id": "conda_self_healing_missing_package_resume",
+      "purpose": "验证 Conda 场景下缺依赖 self-healing 后会从安全阶段 resume",
+      "expected_signal": "auto resume starts from env_deploy after repair"
+    },
+    {
+      "id": "conda_verified_memory_skill_promotion",
+      "purpose": "验证 Conda verified memory 可以进入 skill promotion 闭环",
+      "expected_signal": "verified memory proposal can be approved and applied with rollback metadata"
     }
   ]
 }
