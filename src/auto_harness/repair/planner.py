@@ -55,6 +55,21 @@ class RepairPlanner:
         plain_plan["rerun_reason"] = diagnosis.get("rerun_reason", "")
         plain_plan["rerun_from_source"] = "llm" if proposed_rerun else "deterministic"
         plain_plan["actions"] = self.normalizer.normalize_many(plain_plan.get("actions", []))
+        plain_plan["failure_hypothesis"] = root_cause
+        plain_plan["hypothesis_confidence"] = confidence
+        plain_plan["evidence"] = self._evidence(stage, plain, diagnosis)
+        plain_plan["expected_effect"] = self._expected_effect(category, plain_plan["actions"])
+        plain_plan["verification_plan"] = "rerun from %s, then require trace-based verify pass" % effective_rerun
+        plain_plan["rollback_plan"] = "discard current run workspace or resume from previous safe stage"
+        plain_plan["risk"] = self._risk(plain_plan["actions"])
+        plain_plan["repair_effectiveness_criteria"] = {
+            "repair_proposed": True,
+            "policy_accepted_required": True,
+            "action_executed_or_metadata_applied_required": True,
+            "rerun_performed_required": True,
+            "final_verify_pass_required": True,
+            "metadata_only_counts_as_executed": False,
+        }
         if proposed_rerun and proposed_rerun != effective_rerun:
             plain_plan["rerun_from_adjustment_reason"] = "proposed rerun_from is not safe or is later than required safe stage"
         return plain_plan
@@ -156,3 +171,34 @@ class RepairPlanner:
         if category in ("auth_required", "disk_full"):
             return "model_prepare"
         return stage
+
+    def _evidence(self, stage: str, plain: Dict, diagnosis: Dict) -> List[str]:
+        evidence = []
+        if diagnosis.get("signal"):
+            evidence.append("%s diagnosis signal: %s" % (stage, diagnosis["signal"]))
+        if diagnosis.get("root_cause"):
+            evidence.append("%s root cause: %s" % (stage, diagnosis["root_cause"]))
+        if plain.get("error"):
+            evidence.append("%s error: %s" % (stage, str(plain["error"])[-500:]))
+        if not evidence and plain.get("summary"):
+            evidence.append("%s summary: %s" % (stage, plain["summary"]))
+        return evidence
+
+    def _expected_effect(self, category: str, actions: List[Dict]) -> str:
+        if category == "dependency_missing":
+            packages = [((action.get("payload") or {}).get("package") or "") for action in actions]
+            return "missing imports resolve after installing %s and service stays alive" % ", ".join(pkg for pkg in packages if pkg)
+        if category in ("numpy_abi_conflict", "pydantic_conflict", "protobuf_conflict"):
+            return "dependency ABI/API conflict is pinned away and environment deploy succeeds"
+        if category == "auth_required":
+            return "operator provides required token via environment variable name only"
+        if actions:
+            return "policy-approved action changes the failing observation before verify"
+        return "manual review identifies a lower-risk next action"
+
+    def _risk(self, actions: List[Dict]) -> str:
+        if any((action.get("requires") or {}).get("operator_secret") or (action.get("requires") or {}).get("source_edit") for action in actions):
+            return "high"
+        if any((action.get("requires") or {}).get("dependency_install") or (action.get("requires") or {}).get("network") for action in actions):
+            return "medium"
+        return "low"

@@ -329,6 +329,21 @@
       "id": "conda_verified_memory_skill_promotion",
       "purpose": "验证 Conda verified memory 可以进入 skill promotion 闭环",
       "expected_signal": "verified memory proposal can be approved and applied with rollback metadata"
+    },
+    {
+      "id": "agent_runtime_artifacts",
+      "purpose": "验证每个 run 可生成 Agent step/state/plan/contribution 证据文件",
+      "expected_signal": "agent_steps.jsonl, agent_state.json, agent_plan.json and agent_contribution.json exist"
+    },
+    {
+      "id": "tool_registry_policy_gate",
+      "purpose": "验证 Agent tool registry 标注 risk level、side effects、policy requirement 和 allowed modes",
+      "expected_signal": "side-effect tools require policy and gated_actor mode"
+    },
+    {
+      "id": "agent_comparison_report",
+      "purpose": "验证 baseline vs agent 对照报告能统计 baseline failed / agent passed 的 LLM helped case",
+      "expected_signal": "comparison_report.json/md are generated with helped case count"
     }
   ]
 }

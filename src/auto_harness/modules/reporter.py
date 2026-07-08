@@ -70,6 +70,13 @@ class ReportGenerator:
                 lines.append("- Reason: %s" % repair_rerun["rerun_reason"])
             if repair_rerun.get("rerun_from_adjustment_reason"):
                 lines.append("- Adjustment: %s" % repair_rerun["rerun_from_adjustment_reason"])
+            effectiveness = self._repair_effectiveness(run_dir)
+            if effectiveness:
+                lines.extend([
+                    "- Repair applied: `%s`" % str(bool(effectiveness.get("repair_applied"))).lower(),
+                    "- Repair executed: `%s`" % str(bool(effectiveness.get("repair_executed"))).lower(),
+                    "- Repair verified: `%s`" % str(bool(effectiveness.get("repair_verified"))).lower(),
+                ])
             lines.append("")
         agent_metrics = self._read_optional(run_dir / "reports" / "agent_metrics.json")
         metrics = agent_metrics.get("agent_metrics") if isinstance(agent_metrics, dict) else {}
@@ -86,6 +93,19 @@ class ReportGenerator:
                 "- Verify candidate count: `%s`" % metrics.get("verify_candidate_count", 0),
                 "- Agent helped: `%s`" % str(bool(metrics.get("agent_helped"))).lower(),
                 "- Help type: %s" % (", ".join("`%s`" % item for item in metrics.get("help_type") or []) or "`none`"),
+                "",
+            ])
+        contribution = self._read_optional(run_dir / "reports" / "agent_contribution.json")
+        if isinstance(contribution, dict) and contribution:
+            lines.extend([
+                "## Agent Contribution",
+                "",
+                "- LLM required: `%s`" % str(bool(contribution.get("llm_required"))).lower(),
+                "- LLM helped: `%s`" % str(bool(contribution.get("llm_helped"))).lower(),
+                "- Selection source: `%s`" % contribution.get("selection_source", ""),
+                "- Reason: %s" % contribution.get("llm_required_reason", ""),
+                "- Help type: %s" % (", ".join("`%s`" % item for item in contribution.get("help_type") or []) or "`none`"),
+                "- Agent artifacts: `agent_steps.jsonl`, `agent_state.json`, `agent_plan.json`, `agent_plan_revisions.jsonl`",
                 "",
             ])
         verified_memory = self._read_optional(run_dir / "reports" / "verified_memory.json")
@@ -150,6 +170,10 @@ class ReportGenerator:
                     "rerun_from_adjustment_reason": "",
                 }
         return {}
+
+    def _repair_effectiveness(self, run_dir: Path) -> Dict:
+        apply_result = self._read_optional(run_dir / "repairs" / "repair_apply_result.json")
+        return apply_result if isinstance(apply_result, dict) else {}
 
     def _run_candidate_selection(self, results: Dict[str, Dict]) -> Dict:
         runner = results.get("runner", {}).get("data", {})

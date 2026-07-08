@@ -47,6 +47,19 @@ class ProjectAnalyzer:
             "run_candidates": run_candidates,
             "verify_hint": self._verify_hint(frameworks),
             "environment_strategy": self._environment_strategy(files, frameworks),
+            "deterministic_facts": {
+                "file_count": len(files),
+                "frameworks": frameworks,
+                "has_requirements": "requirements.txt" in files,
+                "has_environment_yml": "environment.yml" in files or "environment.yaml" in files,
+            },
+            "deterministic_candidates": [dict(candidate) for candidate in run_candidates],
+            "llm_hypotheses": [],
+            "llm_candidates": [],
+            "merged_candidates": run_candidates,
+            "selected_candidate": run_candidates[0] if run_candidates else {},
+            "selection_source": "deterministic" if run_candidates else "none",
+            "llm_required_reason": "LLM planner disabled or no material contribution.",
         }
         if self.stage_context:
             data["control_context"] = self.stage_context
@@ -56,6 +69,7 @@ class ProjectAnalyzer:
         agent_decision = self._agent_planner(repo_dir, data)
         if agent_decision:
             data["agent_decision"] = agent_decision
+        self._refresh_agentic_summary(data)
         return StageResult(
             stage="analyze",
             status="passed",
@@ -347,6 +361,32 @@ class ProjectAnalyzer:
                     analysis["environment_strategy"]["torch_variant_source"] = "llm_planner"
                     merged["torch_variant_updated"] = True
         return merged
+
+    def _refresh_agentic_summary(self, analysis: Dict) -> None:
+        decision = analysis.get("agent_decision") if isinstance(analysis.get("agent_decision"), dict) else {}
+        accepted = decision.get("accepted_actions") or []
+        analysis["llm_hypotheses"] = [
+            {
+                "action_type": action.get("type"),
+                "reason": action.get("reason", ""),
+                "confidence": action.get("confidence", 0),
+            }
+            for action in accepted
+            if action.get("type") in ("add_run_candidate", "select_run_candidate", "select_environment_backend", "update_environment_spec", "select_torch_variant")
+        ]
+        analysis["llm_candidates"] = [
+            action.get("payload", {})
+            for action in accepted
+            if action.get("type") in ("add_run_candidate", "select_run_candidate")
+        ]
+        analysis["merged_candidates"] = analysis.get("run_candidates") or []
+        selected = (analysis.get("run_candidates") or [{}])[0] if analysis.get("run_candidates") else {}
+        analysis["selected_candidate"] = selected
+        selected_by = selected.get("selected_by") or selected.get("preferred_by") or "deterministic"
+        analysis["selection_source"] = "hybrid" if selected_by == "combined" else selected_by
+        merged = decision.get("merged") if isinstance(decision.get("merged"), dict) else {}
+        if any(merged.get(key) for key in ("run_candidates_added", "preferred_candidate_selected", "verify_hint_updated", "environment_strategy_updated", "torch_variant_updated")):
+            analysis["llm_required_reason"] = "LLM materially changed candidate ranking, verify path, or environment strategy."
 
     def _environment_strategy(self, files: List[str], frameworks: List[str]) -> Dict:
         has_conda = "environment.yml" in files or "environment.yaml" in files

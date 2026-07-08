@@ -4,6 +4,16 @@
 
 ### 已完成
 
+- LLM 必要性与受控探索型 Agent 优化阶段：
+  - 新增 `src/auto_harness/agent_runtime/`，定义 `AgentGoal`、`AgentRuntimeStep`、`AgentRuntime`、`AgentCritic` 和 `AgentContributionAnalyzer`；普通 run 会生成 `agent_steps.jsonl`、`agent_state.json`、`agent_plan.json`、`agent_plan_revisions.jsonl` 与 `reports/agent_contribution.json`，用于证明 observe / plan / policy gate / tool call / observe / critique 的 Agent loop 证据。
+  - 新增 `src/auto_harness/tools/`，集中声明 `inspect_repo_tree`、`solve_environment`、`install_environment`、`start_service`、`probe_http`、`discover_gradio_api`、`apply_repair`、`resume_from_stage`、`verify_evidence` 等 tool schema；每个 tool 记录 risk level、side effects、policy requirement、allowed modes 和 success signal。
+  - `ProjectAnalyzer` 输出升级为双轨结构，保留 `deterministic_facts`、`deterministic_candidates`、`llm_hypotheses`、`llm_candidates`、`merged_candidates`、`selected_candidate`、`selection_source` 和 `llm_required_reason`，避免把 LLM advisor 和 deterministic pipeline 混在一起。
+  - `RepairPlanner` 输出升级为 hypothesis-driven repair，增加 `failure_hypothesis`、`evidence`、`expected_effect`、`verification_plan`、`rollback_plan`、`risk` 和 `repair_effectiveness_criteria`；`RepairApplier` 区分 `repair_applied`、`repair_executed`、`repair_effective`、`repair_verified`，metadata-only action 不计入 executed repair。
+  - `VerifiedMemoryRecorder` 在 final verify pass 后会回写 repair effectiveness 标记，保证 verified success memory 对应的是 policy-approved repair + rerun + trace verify 的闭环。
+  - 新增 `src/auto_harness/evals/` 与 CLI `eval-compare`，可基于 `eval_targets/manifest.json` 生成 `comparison_report.json` / `.md`，统计 baseline 与 agent 的 verify pass、repair、unsafe rejection 和 baseline failed / agent passed helped case。
+  - 新增 `eval_targets/manifest.json`，包含 10 个本地/半本地 target 类型，用于 off / planner / gated_actor 对照评估框架。
+  - 新增安全证据文档 `docs/agent-threat-model.md`、`docs/tool-policy.md`、`docs/prompt-injection-eval.md`。
+  - Benchmark manifest 新增 `agent_runtime_artifacts`、`tool_registry_policy_gate`、`agent_comparison_report`。
 - Self-healing memory + Conda 优化阶段：
   - 普通 `TaskRunner.run_existing()` 已接入 bounded self-healing loop；当配置打开 `agent_auto_resume_after_repair` 且 repair policy/apply 有效时，会写入 `agent_auto_resume` 事件并从 `env_deploy` / `model_prepare` / `runner` / `verify` allowlist 中的安全阶段重跑，不再只依赖 `agent-live-smoke` wrapper。
   - 新增 `RepairActionNormalizer`，统一消费 LLM 输出的 `payload.package` 与 `payload.packages`，多包逐个 policy check；package spec 支持 `numpy<2`、`torch==2.3.1`、`pydantic>=1.10,<2`，仍拒绝 URL、path、shell metachar 和 pip index 注入。

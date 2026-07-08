@@ -114,8 +114,15 @@ class RepairApplier:
             write_json(path, {"verify_hints": verify_hints})
             result["artifacts"].append(str(path))
         executed_results = [item for item in result["action_results"] if item.get("executed")]
+        metadata_results = [item for item in result["action_results"] if item.get("status") == "metadata_only"]
         result["executed"] = bool(executed_results)
         result["executed_action_count"] = len(executed_results)
+        result["metadata_action_count"] = len(metadata_results)
+        result["repair_applied"] = result["status"] == "applied"
+        result["repair_executed"] = bool(executed_results)
+        result["repair_effective"] = False
+        result["repair_verified"] = False
+        result["effectiveness_note"] = "repair is effective only after a rerun and final trace-based verify pass"
         write_json(repair_dir / "repair_apply_result.json", result)
         result["artifacts"].append(str(repair_dir / "repair_apply_result.json"))
         return result

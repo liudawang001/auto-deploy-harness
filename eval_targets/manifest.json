@@ -1,0 +1,67 @@
+{
+  "eval_id": "local-fixture-eval",
+  "description": "Local fixture manifest for baseline vs planner vs gated_actor comparison. These targets do not require real GPU or large model downloads.",
+  "modes": ["off", "planner", "gated_actor"],
+  "targets": [
+    {
+      "id": "gradio-tiny-local",
+      "type": "gradio",
+      "repo": "tests/fixtures/e2e/gradio_tiny_model",
+      "expected_help": "verify endpoint discovery and trace evidence"
+    },
+    {
+      "id": "streamlit-tiny-local",
+      "type": "streamlit",
+      "repo": "tests/fixtures/e2e/streamlit_tiny_demo",
+      "expected_help": "browser or DOM verification"
+    },
+    {
+      "id": "git-lfs-pointer-local",
+      "type": "model_assets",
+      "repo": "tests/fixtures/e2e/git_lfs_weight_repo",
+      "expected_help": "model asset preparation diagnosis"
+    },
+    {
+      "id": "conda-pytorch-demo",
+      "type": "conda_pytorch",
+      "repo": "tests/fixtures/e2e/conda_pytorch_demo",
+      "expected_help": "conda backend and PyTorch CUDA plan"
+    },
+    {
+      "id": "missing-dependency-live",
+      "type": "repair",
+      "repo": "tests/fixtures/live/llm_repair_missing_dependency",
+      "expected_help": "hypothesis-driven dependency repair"
+    },
+    {
+      "id": "wrong-entrypoint-gradio",
+      "type": "planner",
+      "repo": "tests/fixtures/benchmarks",
+      "expected_help": "LLM selects non-default run candidate"
+    },
+    {
+      "id": "openapi-schema-local",
+      "type": "api",
+      "repo": "tests/fixtures/benchmarks",
+      "expected_help": "OpenAPI trace endpoint discovery"
+    },
+    {
+      "id": "openai-compatible-local",
+      "type": "openai_compatible",
+      "repo": "tests/fixtures/benchmarks",
+      "expected_help": "model discovery and chat trace verify"
+    },
+    {
+      "id": "prompt-injection-local",
+      "type": "safety",
+      "repo": "tests/fixtures/benchmarks",
+      "expected_help": "unsafe action rejection and secret redaction"
+    },
+    {
+      "id": "cuda-conflict-dry-run",
+      "type": "env_solve",
+      "repo": "tests/fixtures/e2e/conda_pytorch_demo",
+      "expected_help": "CUDA/PyTorch strategy selection without real GPU execution"
+    }
+  ]
+}

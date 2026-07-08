@@ -70,6 +70,10 @@ class VerifiedMemoryRecorder:
         if not self._has_entry(entry["id"]):
             with self.issue_path.open("a", encoding="utf-8") as f:
                 f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        apply_result["repair_effective"] = True
+        apply_result["repair_verified"] = True
+        apply_result["verification_trace_id"] = trace_id
+        write_json(run_dir / "repairs" / "repair_apply_result.json", apply_result)
         self._write_status(run_dir, "recorded", "verified success memory recorded", entry)
         return entry
 

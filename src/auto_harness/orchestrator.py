@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Dict
 
 from auto_harness.agent import AgentDecisionEngine, AgentDiagnoser, AgentLoopController, AgentMetricsCollector, AgentObservation, AgentTraceWriter, AgentVerifyPlanner
+from auto_harness.agent_runtime import AgentContributionAnalyzer, AgentGoal, AgentRuntime
 from auto_harness.config import HarnessConfig
 from auto_harness.agents.claude_code import ClaudeCodeExecutor
 from auto_harness.assets import HuggingFaceDownloader, ModelCache, ModelScopeDownloader
@@ -273,6 +274,16 @@ class TaskRunner:
         )
         if verified_memory:
             self.store.events(task_id).append("memory", "verified_success_recorded", {"memory_id": verified_memory.get("id")})
+        contribution = AgentContributionAnalyzer().analyze(run_dir, results, output_path=run_dir / "reports" / "agent_contribution.json")
+        AgentRuntime().run(
+            AgentGoal(
+                task_id=task_id,
+                objective="Deploy and verify the target AI demo with evidence-based success criteria.",
+            ),
+            run_dir,
+            results,
+            contribution=contribution,
+        )
         task_data = read_json(run_dir / "task.json")
         report_result = ReportGenerator().generate(run_dir, task_data, results, execution_audit=execution_audit)
         results["report"] = to_plain(report_result)

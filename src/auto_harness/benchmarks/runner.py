@@ -16,6 +16,8 @@ from auto_harness.config import HarnessConfig
 from auto_harness.dashboard import DashboardGenerator, DashboardServer
 from auto_harness.diagnostics import LogClassifier
 from auto_harness.env import CondaBackend, CondaEnvironmentParser
+from auto_harness.agent_runtime import AgentContributionAnalyzer, AgentGoal, AgentRuntime
+from auto_harness.evals import AgentComparisonReporter
 from auto_harness.memory import MemoryPromoter, VerifiedMemoryRecorder
 from auto_harness.models.base import read_json, to_plain, write_json
 from auto_harness.modules.env_deploy import EnvDeployModule
@@ -267,6 +269,12 @@ class BenchmarkRunner:
                 return self._case_verified_memory_after_self_healing(case)
             if case_id in ("skill_evolution_from_verified_self_healing", "conda_verified_memory_skill_promotion"):
                 return self._case_skill_evolution_from_verified_self_healing(case)
+            if case_id == "agent_runtime_artifacts":
+                return self._case_agent_runtime_artifacts(case)
+            if case_id == "tool_registry_policy_gate":
+                return self._case_tool_registry_policy_gate(case)
+            if case_id == "agent_comparison_report":
+                return self._case_agent_comparison_report(case)
             return self._result(case, "skipped", "unknown benchmark case")
         except Exception as exc:  # noqa: BLE001 - benchmark report should continue
             return self._result(case, "failed", str(exc))
@@ -2069,6 +2077,43 @@ class BenchmarkRunner:
             applied = promoter.apply(proposal_path, run_regression=False)
             ok = applied["status"] == "applied" and Path(applied["rollback_path"]).exists() and "previous_sha256" in applied
         return self._result(case, "passed" if ok else "failed", "skill evolution from verified self-healing verified")
+
+    def _case_agent_runtime_artifacts(self, case: Dict) -> Dict:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            results = {
+                "analyze": {"status": "passed", "summary": "analysis", "data": {"run_candidates": []}},
+                "verify": {"status": "passed", "summary": "verify", "data": {"trace_id": "trace"}},
+            }
+            contribution = AgentContributionAnalyzer().analyze(run_dir, results, output_path=run_dir / "reports" / "agent_contribution.json")
+            AgentRuntime().run(AgentGoal(task_id="task-runtime", objective="deploy fixture"), run_dir, results, contribution)
+            ok = all((run_dir / name).exists() for name in ("agent_steps.jsonl", "agent_state.json", "agent_plan.json", "agent_plan_revisions.jsonl")) and (run_dir / "reports" / "agent_contribution.json").exists()
+        return self._result(case, "passed" if ok else "failed", "agent runtime artifacts verified")
+
+    def _case_tool_registry_policy_gate(self, case: Dict) -> Dict:
+        from auto_harness.tools import ToolRegistry
+        registry = ToolRegistry()
+        tools = {item["name"]: item for item in registry.list()}
+        ok = (
+            tools["start_service"]["requires_policy"] is True
+            and tools["apply_repair"]["allowed_modes"] == ["gated_actor"]
+            and tools["verify_evidence"]["requires_policy"] is False
+        )
+        return self._result(case, "passed" if ok else "failed", "tool registry policy gate verified")
+
+    def _case_agent_comparison_report(self, case: Dict) -> Dict:
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "eval"
+            targets = [{"id": "target-a"}, {"id": "target-b"}]
+            report = AgentComparisonReporter().build(
+                "bench-eval",
+                targets,
+                [{"target_id": "target-a", "verify_status": "failed"}, {"target_id": "target-b", "verify_status": "passed"}],
+                [{"target_id": "target-a", "verify_status": "passed", "help_type": "selected_entrypoint"}, {"target_id": "target-b", "verify_status": "passed"}],
+                output,
+            )
+            ok = report["baseline_failed_agent_passed_count"] == 1 and (output / "comparison_report.json").exists() and (output / "comparison_report.md").exists()
+        return self._result(case, "passed" if ok else "failed", "agent comparison report verified")
 
     def _stage_update_count(self, run_dir: Path) -> Dict[str, int]:
         counts: Dict[str, int] = {}

@@ -7,6 +7,7 @@ from auto_harness.config import HarnessConfig
 from auto_harness.artifacts import DeploymentPackageExporter
 from auto_harness.benchmarks import BenchmarkRunner, LiveSmokePlanner
 from auto_harness.dashboard import DashboardGenerator, DashboardServer
+from auto_harness.evals import AgentComparisonReporter
 from auto_harness.memory import MemoryPromoter
 from auto_harness.live_smoke import LiveAgentSmokeRunner
 from auto_harness.orchestrator import TaskRunner
@@ -109,6 +110,10 @@ def build_parser() -> argparse.ArgumentParser:
     agent_metrics = sub.add_parser("agent-metrics", help="collect agent metrics from local runs")
     agent_metrics.add_argument("--runs-dir", default="")
     agent_metrics.add_argument("--output", default="")
+
+    eval_compare = sub.add_parser("eval-compare", help="generate baseline vs agent comparison report skeleton")
+    eval_compare.add_argument("--manifest", default="eval_targets/manifest.json")
+    eval_compare.add_argument("--output-dir", default="runs/evals/local-fixture-eval")
 
     queue = sub.add_parser("queue", help="submit and run persistent deployment queue jobs")
     queue_sub = queue.add_subparsers(dest="queue_command", required=True)
@@ -309,6 +314,11 @@ def main(argv=None) -> int:
         runs_dir = Path(args.runs_dir) if args.runs_dir else config.runs_path
         output = Path(args.output) if args.output else None
         result = AgentMetricsCollector().collect_many(runs_dir, output_path=output)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0
+
+    if args.command == "eval-compare":
+        result = AgentComparisonReporter().from_manifest(Path(args.manifest), Path(args.output_dir))
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
 
