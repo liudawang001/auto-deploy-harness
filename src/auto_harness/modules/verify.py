@@ -1,5 +1,6 @@
 import json
 import hashlib
+import logging
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -23,6 +24,7 @@ class VerifyModule:
         browser_verifier: BrowserVerifier = None,
         progress_callback=None,
         verify_planner=None,
+        agent_verify_config: Optional[Dict] = None,
     ) -> None:
         self._base_urlopen = urlopen or urllib.request.urlopen
         self._custom_urlopen = urlopen is not None
@@ -33,6 +35,7 @@ class VerifyModule:
         self.browser_verifier = browser_verifier or BrowserVerifier()
         self.progress_callback = progress_callback
         self.verify_planner = verify_planner
+        self.agent_verify_config = agent_verify_config or {}
 
     def _open_url(self, req, timeout=10):
         url = getattr(req, "full_url", req)
@@ -93,6 +96,28 @@ class VerifyModule:
                 if status != "pass":
                     status = "pass" if self._can_pass(service, checks) else "uncertain"
         self._progress("verify_completed", {"result_status": status, "trace_id": trace_id})
+        # Phase 6: Agent verify integration
+        # When status is uncertain and agent verify is enabled, call act_verify
+        agent_verify_result = None
+        if status == "uncertain" and self._should_trigger_agent_verify(service):
+            agent_verify_result = self._run_agent_verify(
+                trace_id, run_dir, service, analysis, checks, evidence_dir
+            )
+            if agent_verify_result and agent_verify_result.get("strong_verify_pass"):
+                # Only upgrade to pass if strong_verify_pass is true
+                # (meaning current trace_id was found in evidence)
+                status = "pass"
+                if agent_verify_result.get("evidence_paths"):
+                    for ep in agent_verify_result["evidence_paths"]:
+                        if ep and Path(ep).exists():
+                            ev_data = json.loads(Path(ep).read_text(encoding="utf-8"))
+                            checks.append({
+                                "name": "agent_verify_probe",
+                                "status": "pass" if agent_verify_result.get("strong_verify_pass") else "uncertain",
+                                "evidence": "trace_id=%s" % trace_id,
+                                "reason": "agent verify tool produced current trace evidence",
+                            })
+                            break
         diagnosis = {
             "category": "none" if status == "pass" else "unknown",
             "root_cause": "" if status == "pass" else "dry-run or missing end-to-end evidence",
@@ -115,6 +140,18 @@ class VerifyModule:
         result_data = result.__dict__
         if planner_result:
             result_data["llm_verify_planner"] = planner_result.get("planner", {})
+        if agent_verify_result:
+            result_data["agent_verify"] = {
+                "triggered": agent_verify_result.get("triggered", False),
+                "mode": agent_verify_result.get("mode", ""),
+                "final_status": agent_verify_result.get("final_status", ""),
+                "llm_helped": agent_verify_result.get("llm_helped", False),
+                "step_count": agent_verify_result.get("step_count", 0),
+                "accepted_tool_count": agent_verify_result.get("accepted_tool_count", 0),
+                "rejected_tool_count": agent_verify_result.get("rejected_tool_count", 0),
+                "evidence_paths": agent_verify_result.get("evidence_paths", []),
+                "stop_reason": agent_verify_result.get("stop_reason", ""),
+            }
         if self.stage_context:
             result_data["control_context"] = self.stage_context
         evidence_path = evidence_dir / ("%s_verify.json" % trace_id)
@@ -751,8 +788,88 @@ class VerifyModule:
             return False
         if any(check.get("status") == "fail" for check in checks):
             return False
-        strong_pass_names = {"artifact_download_validation", "http_trace_response", "browser_dom_probe"}
+        strong_pass_names = {"artifact_download_validation", "http_trace_response", "browser_dom_probe", "agent_verify_probe"}
         return any(
             check.get("name") in strong_pass_names and check.get("status") == "pass"
             for check in checks
         )
+
+    # ------------------------------------------------------------------
+    # Phase 6: Agent verify integration
+    # ------------------------------------------------------------------
+
+    def _should_trigger_agent_verify(self, service: Dict) -> bool:
+        """Check if agent verify should be triggered."""
+        cfg = self.agent_verify_config
+        if not cfg:
+            return False
+        agent_mode = cfg.get("agent_mode", "off")
+        if agent_mode not in ("planner", "gated_actor"):
+            return False
+        if not cfg.get("agent_enable_verify", False):
+            return False
+        if not service.get("process_alive") or not service.get("port_ready"):
+            return False
+        return True
+
+    def _run_agent_verify(
+        self,
+        trace_id: str,
+        run_dir: Path,
+        service: Dict,
+        analysis: Dict,
+        checks: List[Dict],
+        evidence_dir: Path,
+    ) -> Optional[Dict]:
+        """Call AgentRuntime.act_verify when deterministic verify is uncertain."""
+        cfg = self.agent_verify_config
+        if not cfg:
+            return None
+
+        from auto_harness.agent_runtime.runtime import AgentRuntime
+
+        provider = cfg.get("provider")
+        agent_mode = cfg.get("agent_mode", "gated_actor")
+        max_steps = cfg.get("agent_verify_max_steps", 3)
+        allowed_hosts = cfg.get("agent_allowed_hosts", ["127.0.0.1", "localhost"])
+        repo_path = run_dir / "workspace" / "repo"
+
+        runtime = AgentRuntime()
+        try:
+            result = runtime.act_verify(
+                run_dir=run_dir,
+                repo_path=repo_path,
+                initial_verify_result={
+                    "status": "uncertain",
+                    "data": {
+                        "checks": checks,
+                        "frameworks": analysis.get("frameworks", []),
+                        "trace_id": trace_id,
+                    },
+                },
+                service_context=service,
+                trace_id=trace_id,
+                config={"urlopen": self.urlopen},
+                provider=provider,
+                max_steps=max_steps,
+                agent_mode=agent_mode,
+                allowed_hosts=allowed_hosts,
+            )
+            return result
+        except Exception as exc:
+            # Agent verify must not crash the deterministic pipeline
+            logging.getLogger(__name__).exception(
+                "Agent verify failed for trace_id=%s", trace_id,
+            )
+            return {
+                "triggered": True,
+                "final_status": "uncertain",
+                "stop_reason": "agent_error: %s" % str(exc)[:200],
+                "llm_helped": False,
+                "step_count": 0,
+                "accepted_tool_count": 0,
+                "rejected_tool_count": 0,
+                "strong_verify_pass": False,
+                "evidence_paths": [],
+                "mode": "",
+            }

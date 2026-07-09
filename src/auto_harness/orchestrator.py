@@ -256,10 +256,12 @@ class TaskRunner:
 
         verify_context = self._stage_context("verify", deploy_analysis)
         verify_trace_writer = self._agent_trace_writer(run_dir)
+        agent_verify_config = self._agent_verify_config()
         verify_result = VerifyModule(
             stage_context=verify_context,
             progress_callback=lambda progress: self.store.update_stage(task_id, "verify", "running_verify", progress=progress),
             verify_planner=self._agent_verify_planner(verify_trace_writer) if self._agent_verify_planner_enabled() else None,
+            agent_verify_config=agent_verify_config,
         ).verify(run_dir, deploy_analysis, runner_data)
         self._attach_repair_overlay(verify_result, repair_overlay)
         results["verify"] = to_plain(verify_result)
@@ -491,6 +493,21 @@ class TaskRunner:
 
     def _agent_verify_planner_enabled(self) -> bool:
         return self.config.agent_mode in ("planner", "gated_actor") and self.config.agent_enable_verify_planner
+
+    def _agent_verify_enabled(self) -> bool:
+        return self.config.agent_mode in ("planner", "gated_actor") and self.config.agent_enable_verify
+
+    def _agent_verify_config(self) -> Dict:
+        """Build config dict for the agent verify integration in VerifyModule."""
+        if not self._agent_verify_enabled():
+            return {}
+        return {
+            "agent_mode": self.config.agent_mode,
+            "agent_enable_verify": self.config.agent_enable_verify,
+            "agent_verify_max_steps": self.config.agent_verify_max_steps,
+            "agent_allowed_hosts": self.config.agent_allowed_hosts,
+            "provider": self._agent_provider(),
+        }
 
     def _agent_repair_execute_enabled(self, runtime: RuntimePolicy) -> bool:
         return (

@@ -7,7 +7,12 @@ from auto_harness.models.base import write_json
 
 
 class AgentComparisonReporter:
-    """Builds baseline/off vs planner/gated_actor comparison reports from run summaries."""
+    """Builds baseline/off vs planner/gated_actor comparison reports from run summaries.
+
+    Supports two modes:
+    - from_manifest(): generates skeleton report from manifest (backward compatible)
+    - run_eval(): executes real off vs gated_actor comparison using test servers
+    """
 
     def build(self, eval_id: str, targets: List[Dict], baseline_runs: List[Dict], agent_runs: List[Dict], output_dir: Path) -> Dict:
         output_dir = Path(output_dir)
@@ -37,11 +42,20 @@ class AgentComparisonReporter:
         return report
 
     def from_manifest(self, manifest_path: Path, output_dir: Path) -> Dict:
+        """Generate skeleton report from manifest (backward compatible)."""
         manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
         targets = manifest.get("targets") or []
         baseline_runs = [{"target_id": item["id"], "verify_status": "unknown"} for item in targets]
         agent_runs = [{"target_id": item["id"], "verify_status": "unknown"} for item in targets]
         return self.build(manifest.get("eval_id", "local-fixture-eval"), targets, baseline_runs, agent_runs, output_dir)
+
+    def run_eval(self, output_dir: Path) -> Dict:
+        """Execute real off vs gated_actor comparison using test servers and agent verify loop.
+
+        This is the Phase 7 deliverable per design doc §12.
+        """
+        from auto_harness.evals.agent_verify_eval import run_agent_verify_eval
+        return run_agent_verify_eval(output_dir=output_dir)
 
     def _markdown(self, report: Dict) -> str:
         lines = [

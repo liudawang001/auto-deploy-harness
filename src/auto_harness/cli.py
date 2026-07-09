@@ -37,6 +37,9 @@ def build_parser() -> argparse.ArgumentParser:
     deploy.add_argument("--download-retry-backoff", type=float, default=None)
     deploy.add_argument("--execution-backend", choices=["local", "docker"], default=None)
     deploy.add_argument("--agent-self-heal", action="store_true", default=False)
+    deploy.add_argument("--agent-mode", choices=["off", "audit", "planner", "gated_actor"], default=None)
+    deploy.add_argument("--agent-enable-verify", action="store_true", default=False)
+    deploy.add_argument("--agent-verify-max-steps", type=int, default=None)
     deploy.add_argument("--env-backend", choices=["auto", "venv", "conda", "mamba"], default=None)
     deploy.add_argument("--prefer-mamba", action="store_true", default=False)
     deploy.add_argument("--docker-image", default=None)
@@ -111,9 +114,10 @@ def build_parser() -> argparse.ArgumentParser:
     agent_metrics.add_argument("--runs-dir", default="")
     agent_metrics.add_argument("--output", default="")
 
-    eval_compare = sub.add_parser("eval-compare", help="generate baseline vs agent comparison report skeleton")
+    eval_compare = sub.add_parser("eval-compare", help="generate baseline vs agent comparison report")
     eval_compare.add_argument("--manifest", default="eval_targets/manifest.json")
-    eval_compare.add_argument("--output-dir", default="runs/evals/local-fixture-eval")
+    eval_compare.add_argument("--output-dir", default="runs/evals/agent-verify-mvp")
+    eval_compare.add_argument("--run", action="store_true", default=False, help="run real off vs gated_actor comparison (not just skeleton)")
 
     queue = sub.add_parser("queue", help="submit and run persistent deployment queue jobs")
     queue_sub = queue.add_subparsers(dest="queue_command", required=True)
@@ -186,7 +190,14 @@ def _apply_cli_overrides(config: HarnessConfig, args) -> None:
         config.agent_enable_log_diagnosis = True
         config.agent_enable_repair_actions = True
         config.agent_enable_verify_planner = True
+        config.agent_enable_verify = True
         config.agent_auto_resume_after_repair = True
+    if getattr(args, "agent_mode", None):
+        config.agent_mode = args.agent_mode
+    if getattr(args, "agent_enable_verify", False):
+        config.agent_enable_verify = True
+    if getattr(args, "agent_verify_max_steps", None) is not None:
+        config.agent_verify_max_steps = max(1, args.agent_verify_max_steps)
     if getattr(args, "env_backend", None):
         config.env_backend = args.env_backend
     if getattr(args, "prefer_mamba", False):
@@ -318,7 +329,11 @@ def main(argv=None) -> int:
         return 0
 
     if args.command == "eval-compare":
-        result = AgentComparisonReporter().from_manifest(Path(args.manifest), Path(args.output_dir))
+        reporter = AgentComparisonReporter()
+        if getattr(args, "run", False):
+            result = reporter.run_eval(Path(args.output_dir))
+        else:
+            result = reporter.from_manifest(Path(args.manifest), Path(args.output_dir))
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
 

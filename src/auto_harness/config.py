@@ -31,11 +31,14 @@ class HarnessConfig:
     agent_enable_analyze_planner: bool = False
     agent_enable_log_diagnosis: bool = False
     agent_enable_verify_planner: bool = False
+    agent_enable_verify: bool = False
     agent_enable_repair_actions: bool = False
     agent_auto_resume_after_repair: bool = False
     agent_max_loop_iterations: int = 2
     agent_auto_resume_stages: List[str] = None
     agent_stop_on_verify_pass: bool = True
+    agent_verify_max_steps: int = 3
+    agent_allowed_hosts: List[str] = None
     env_backend: str = "auto"
     conda_envs_dir: str = ".conda/envs"
     conda_prefer_mamba: bool = True
@@ -70,6 +73,8 @@ class HarnessConfig:
             self.model_cache_cleanup_keep_repo_ids = []
         if self.agent_auto_resume_stages is None:
             self.agent_auto_resume_stages = ["env_deploy", "model_prepare", "runner", "verify"]
+        if self.agent_allowed_hosts is None:
+            self.agent_allowed_hosts = ["127.0.0.1", "localhost", "::1"]
         if self.conda_allowed_channels is None:
             self.conda_allowed_channels = ["defaults", "conda-forge", "pytorch", "nvidia", "fastai"]
 
@@ -98,6 +103,8 @@ class HarnessConfig:
             known["agent_enable_log_diagnosis"] = os.environ.get("AUTO_HARNESS_ENABLE_LOG_DIAGNOSIS") == "1"
         if os.environ.get("AUTO_HARNESS_ENABLE_VERIFY_PLANNER"):
             known["agent_enable_verify_planner"] = os.environ.get("AUTO_HARNESS_ENABLE_VERIFY_PLANNER") == "1"
+        if os.environ.get("AUTO_HARNESS_ENABLE_VERIFY"):
+            known["agent_enable_verify"] = os.environ.get("AUTO_HARNESS_ENABLE_VERIFY") == "1"
         if os.environ.get("AUTO_HARNESS_ENABLE_REPAIR_ACTIONS"):
             known["agent_enable_repair_actions"] = os.environ.get("AUTO_HARNESS_ENABLE_REPAIR_ACTIONS") == "1"
         if os.environ.get("AUTO_HARNESS_AGENT_AUTO_RESUME_AFTER_REPAIR"):
