@@ -78,9 +78,19 @@ class VerifiedMemoryRecorder:
         return entry
 
     def _effective_repair(self, apply_result: Dict) -> bool:
-        if any(item.get("executed") and int(item.get("exit_code") or 0) == 0 for item in apply_result.get("action_results", [])):
-            return True
-        return any(item.get("status") == "metadata_only" for item in apply_result.get("action_results", []))
+        """Check if repair had a truly effective action.
+
+        metadata_only actions (e.g. update_verify_hint, rerun_from_stage) do NOT
+        count as effective — they change metadata, not the actual deployment state.
+        Only truly executed actions with exit_code 0, or tool results with
+        strong_verify_pass, qualify.
+        """
+        for item in apply_result.get("action_results", []):
+            if item.get("executed") is True and int(item.get("exit_code") or 0) == 0:
+                return True
+            if item.get("tool_result", {}).get("strong_verify_pass") is True:
+                return True
+        return False
 
     def _has_high_risk_rejection(self, run_dir: Path, apply_result: Dict) -> bool:
         text = json.dumps(apply_result.get("policy") or {}, ensure_ascii=False).lower()

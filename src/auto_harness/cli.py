@@ -9,6 +9,9 @@ from auto_harness.benchmarks import BenchmarkRunner, LiveSmokePlanner
 from auto_harness.dashboard import DashboardGenerator, DashboardServer
 from auto_harness.evals import AgentComparisonReporter
 from auto_harness.memory import MemoryPromoter
+from auto_harness.memory.evolution import MemoryEvolutionManager
+from auto_harness.memory.outcomes import SkillOutcomeRecorder
+from auto_harness.skills.rollback import SkillRollbackManager
 from auto_harness.live_smoke import LiveAgentSmokeRunner
 from auto_harness.orchestrator import TaskRunner
 from auto_harness.providers import Message, MockLLMProvider, XunfeiSparkProvider
@@ -89,6 +92,29 @@ def build_parser() -> argparse.ArgumentParser:
     memory_promote.add_argument("--reviewer", default="operator")
     memory_promote.add_argument("--note", default="")
     memory_promote.add_argument("--skip-regression", action="store_true", default=False)
+
+    memory_evolve = sub.add_parser("memory-evolve", help="propose, validate, regress, shadow, and promote skill candidates from verified memory")
+    memory_evolve.add_argument("--propose", action="store_true", default=False)
+    memory_evolve.add_argument("--regression", action="store_true", default=False)
+    memory_evolve.add_argument("--shadow", action="store_true", default=False)
+    memory_evolve.add_argument("--promote", action="store_true", default=False)
+    memory_evolve.add_argument("--reject", action="store_true", default=False)
+    memory_evolve.add_argument("--candidate", default="")
+    memory_evolve.add_argument("--min-verified-count", type=int, default=3)
+    memory_evolve.add_argument("--stage", default=None)
+    memory_evolve.add_argument("--category", default=None)
+    memory_evolve.add_argument("--output-dir", default="")
+    memory_evolve.add_argument("--provider", choices=["mock", "xunfei"], default=None)
+    memory_evolve.add_argument("--run-dir", default="")
+    memory_evolve.add_argument("--no-require-shadow", action="store_true", default=False)
+    memory_evolve.add_argument("--reason", default="")
+
+    skill_rollback = sub.add_parser("skill-rollback", help="rollback a promoted skill candidate")
+    skill_rollback.add_argument("--candidate", required=True)
+
+    skill_outcomes = sub.add_parser("skill-outcomes", help="summarize skill outcome records")
+    skill_outcomes.add_argument("--skill", default="")
+    skill_outcomes.add_argument("--candidate", default="")
 
     llm = sub.add_parser("llm-test", help="test LLM provider")
     llm.add_argument("--provider", choices=["mock", "xunfei"], default="mock")
@@ -391,6 +417,82 @@ def main(argv=None) -> int:
         )
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0 if result.get("status") in ("planned", "passed") else 2
+
+    if args.command == "memory-evolve":
+        provider = None
+        provider_name = args.provider or config.memory_evolution_provider
+        if provider_name == "xunfei":
+            from auto_harness.providers import XunfeiSparkProvider
+            provider = XunfeiSparkProvider()
+        else:
+            from auto_harness.providers import MockLLMProvider
+            provider = MockLLMProvider()
+
+        manager = MemoryEvolutionManager(
+            memory_dir=config.memory_path,
+            skills_dir=config.skills_path,
+            provider=provider,
+        )
+
+        if args.propose:
+            output_dir = Path(args.output_dir) if args.output_dir else None
+            result = manager.propose(
+                min_verified_count=max(1, args.min_verified_count),
+                stage=args.stage,
+                category=args.category,
+                output_dir=output_dir,
+            )
+        elif args.regression:
+            if not args.candidate:
+                result = {"status": "failed", "error": "--candidate is required with --regression"}
+            else:
+                result = manager.run_regression(Path(args.candidate))
+        elif args.shadow:
+            if not args.candidate or not args.run_dir:
+                result = {"status": "failed", "error": "--candidate and --run-dir are required with --shadow"}
+            else:
+                from auto_harness.skills.shadow import ShadowSkillEvaluator
+                evaluator = ShadowSkillEvaluator()
+                eval_result = evaluator.evaluate_run(Path(args.run_dir), Path(args.candidate))
+                shadow_result = evaluator.record(Path(args.candidate), eval_result)
+                result = {"status": "ok", "evaluation": eval_result, "shadow": shadow_result}
+        elif args.promote:
+            if not args.candidate:
+                result = {"status": "failed", "error": "--candidate is required with --promote"}
+            else:
+                require_shadow = not args.no_require_shadow
+                result = manager.promote(Path(args.candidate), require_shadow=require_shadow)
+        elif args.reject:
+            if not args.candidate:
+                result = {"status": "failed", "error": "--candidate is required with --reject"}
+            else:
+                result = manager.reject(Path(args.candidate), reason=args.reason or "operator rejected")
+        else:
+            result = {"status": "failed", "error": "one of --propose/--regression/--shadow/--promote/--reject is required"}
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        exit_code = 0
+        if isinstance(result, dict):
+            if result.get("status") in ("failed", "rejected", "regression_failed", "base_changed"):
+                exit_code = 2
+            reg = result.get("regression") if isinstance(result.get("regression"), dict) else {}
+            if reg.get("status") == "failed":
+                exit_code = 2
+        return exit_code
+
+    if args.command == "skill-rollback":
+        manager = SkillRollbackManager()
+        result = manager.rollback_candidate(Path(args.candidate))
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0 if result.get("status") == "rolled_back" else 2
+
+    if args.command == "skill-outcomes":
+        recorder = SkillOutcomeRecorder(config.memory_path)
+        result = recorder.summarize(
+            skill_name=args.skill or None,
+            candidate_id=args.candidate or None,
+        )
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0
 
     if args.command == "cache":
         if args.cleanup:

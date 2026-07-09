@@ -63,6 +63,14 @@ class HarnessConfig:
     model_cache_cleanup_keep_repo_ids: List[str] = None
     max_skill_chars: int = 6000
     max_memory_items: int = 5
+    memory_evolution_enabled: bool = False
+    memory_evolution_min_verified_count: int = 3
+    memory_evolution_require_regression: bool = True
+    memory_evolution_require_shadow: bool = True
+    memory_evolution_shadow_helped_threshold: int = 2
+    memory_evolution_shadow_harmful_threshold: int = 0
+    memory_evolution_provider: str = "mock"
+    skill_candidate_dir: str = "memory/skill_candidates"
 
     def __post_init__(self) -> None:
         if self.allowed_commands is None:
@@ -117,6 +125,10 @@ class HarnessConfig:
             known["conda_prefer_mamba"] = os.environ.get("AUTO_HARNESS_CONDA_PREFER_MAMBA") == "1"
         if os.environ.get("AUTO_HARNESS_TORCH_CUDA_PREFERENCE"):
             known["torch_cuda_preference"] = os.environ["AUTO_HARNESS_TORCH_CUDA_PREFERENCE"]
+        if os.environ.get("AUTO_HARNESS_MEMORY_EVOLUTION_ENABLED"):
+            known["memory_evolution_enabled"] = os.environ.get("AUTO_HARNESS_MEMORY_EVOLUTION_ENABLED") == "1"
+        if os.environ.get("AUTO_HARNESS_MEMORY_EVOLUTION_PROVIDER"):
+            known["memory_evolution_provider"] = os.environ["AUTO_HARNESS_MEMORY_EVOLUTION_PROVIDER"]
         return cls(**known)
 
     @property
