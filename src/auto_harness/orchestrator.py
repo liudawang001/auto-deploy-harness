@@ -153,6 +153,14 @@ class TaskRunner:
         run_dir = self.store.run_dir(task_id)
         repo_dir = run_dir / "workspace" / "repo"
 
+        # Load task for runtime policy
+        task = self.store.load_task(task_id)
+        runtime_policy = {
+            "allow_dependency_install": task.runtime.allow_dependency_install,
+            "allow_service_start": task.runtime.allow_service_start,
+            "allow_source_edit": task.runtime.allow_source_edit,
+        }
+
         # Load pipeline results
         pipeline_path = run_dir / "reports" / "pipeline_results.json"
         initial_results = {}
@@ -170,9 +178,16 @@ class TaskRunner:
         stage_executor = AgentStageExecutor(
             config=self.config,
             store=self.store,
-            model_prepare=getattr(self, '_model_prepare', None),
-            repair_components=getattr(self, '_repair_components', None),
+            model_prepare=self.model_prepare,
+            repair_components={
+                "planner": self.repair_planner,
+                "policy": self.repair_policy,
+                "applier": self.repair_applier,
+                "loop": self.repair_loop,
+                "overlay": self.repair_overlay,
+            },
             provider_factory=lambda: self._create_agent_provider(),
+            runtime_policy=runtime_policy,
         )
 
         # Create and run the agent loop
@@ -182,6 +197,7 @@ class TaskRunner:
             stage_executor=stage_executor,
             max_iterations=self.config.agent_runtime_loop_max_iterations,
             stop_on_verify_pass=self.config.agent_runtime_loop_stop_on_verify_pass,
+            runtime_policy=runtime_policy,
         )
 
         result = loop.run(

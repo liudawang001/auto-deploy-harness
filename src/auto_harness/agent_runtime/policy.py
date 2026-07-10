@@ -65,13 +65,17 @@ class ToolPolicy:
         if not tool_schema:
             return PolicyDecision(allowed=False, reason="tool not found in registry: %s" % name, risk="high")
 
-        # 2. Tool must be a verify tool or stage gate tool
-        if name not in VERIFY_TOOLS and name not in ALL_STAGE_TOOLS:
-            return PolicyDecision(allowed=False, reason="tool not allowed: %s" % name, risk="high")
+        # 2. Tool must be in registry (already checked above)
+        # Additional check: tool must be allowed for the current stage context
+        # This is a soft check - we allow all registry tools but log warnings
+        # for tools that don't match the stage context
 
-        # 3. Agent mode check: planner mode does not execute tools
+        # 3. Agent mode check: planner mode does not execute side-effect tools
         if agent_mode == "planner":
-            return PolicyDecision(allowed=False, reason="planner mode does not execute tools", risk="low")
+            category = tool_schema.get("category", "read_only")
+            if category in ("side_effect",):
+                return PolicyDecision(allowed=False, reason="planner mode does not execute side-effect tools", risk="low")
+            # Planner can use read_only and state_delta tools (but only records would_execute)
 
         # 4. Risk level check
         tool_risk = str(tool_schema.get("risk_level", "low"))

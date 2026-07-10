@@ -5,7 +5,14 @@ from auto_harness.tools.schemas import ToolSchema
 
 
 class ToolRegistry:
-    """Declarative registry for tools the agent runtime may request."""
+    """Declarative registry for tools the agent runtime may request.
+
+    Tool categories:
+    - read_only: no side effects, safe to run in any mode
+    - state_delta: changes internal state but no external side effects
+    - side_effect: has external side effects (filesystem, network, process)
+    - evidence: produces evidence for verification
+    """
 
     def __init__(self) -> None:
         self.tools: Dict[str, ToolSchema] = {}
@@ -21,7 +28,7 @@ class ToolRegistry:
 
     def _defaults(self) -> List[ToolSchema]:
         return [
-            # read_only tools
+            # read_only tools - no side effects, safe in any mode
             ToolSchema("inspect_repo_tree", "low", [], False, success_signal="repo files are listed", category="read_only"),
             ToolSchema("read_selected_files", "low", [], False, success_signal="selected file snippets are redacted", category="read_only"),
             ToolSchema("parse_dependency_files", "low", [], False, success_signal="requirements and environment files parsed", category="read_only"),
@@ -30,7 +37,8 @@ class ToolRegistry:
             ToolSchema("inspect_model_config", "low", [], False, success_signal="model config extracted", category="read_only"),
             ToolSchema("inspect_git_lfs_pointers", "low", [], False, success_signal="git lfs pointers extracted", category="read_only"),
             ToolSchema("classify_failure", "low", [], False, success_signal="structured diagnosis emitted", category="read_only"),
-            # state_delta tools
+
+            # state_delta tools - change internal state, no external side effects
             ToolSchema("select_runner_candidate", "low", [], False, ["planner", "gated_actor"], success_signal="candidate selected", category="state_delta"),
             ToolSchema("add_runner_candidate", "low", [], False, ["planner", "gated_actor"], success_signal="candidate added", category="state_delta"),
             ToolSchema("reject_runner_candidate", "low", [], False, ["planner", "gated_actor"], success_signal="candidate rejected", category="state_delta"),
@@ -44,19 +52,22 @@ class ToolRegistry:
             ToolSchema("set_deployment_strategy", "low", [], False, ["planner", "gated_actor"], success_signal="strategy set", category="state_delta"),
             ToolSchema("set_stage_hint", "low", [], False, ["planner", "gated_actor"], success_signal="stage hint set", category="state_delta"),
             ToolSchema("propose_repair", "low", [], False, success_signal="hypothesis-driven repair plan generated", category="state_delta"),
-            # execution tools
-            ToolSchema("solve_environment", "low", [], False, success_signal="env_solution generated", category="execution"),
-            ToolSchema("install_environment", "medium", ["filesystem", "network"], True, ["gated_actor"], success_signal="install command exits 0", category="execution"),
-            ToolSchema("prepare_model_assets", "medium", ["filesystem", "network"], True, ["gated_actor"], success_signal="asset manifest ready", category="execution"),
-            ToolSchema("download_model_asset", "medium", ["filesystem", "network"], True, ["gated_actor"], success_signal="asset checksum/etag recorded", category="execution"),
-            ToolSchema("start_service", "medium", ["process", "network"], True, ["gated_actor"], success_signal="process alive and port ready", category="execution"),
-            ToolSchema("probe_http", "low", ["network"], False, success_signal="response contains current trace id", category="execution"),
-            ToolSchema("probe_browser_dom", "medium", ["browser", "network"], True, ["planner", "gated_actor"], success_signal="DOM contains current trace id", category="execution"),
-            ToolSchema("discover_gradio_api", "low", ["network"], False, success_signal="trace-capable Gradio endpoint found", category="execution"),
-            ToolSchema("discover_openapi_schema", "low", ["network"], False, success_signal="trace-capable OpenAPI endpoint found", category="execution"),
-            ToolSchema("discover_openai_compatible_model", "low", ["network"], False, success_signal="model id discovered", category="execution"),
-            ToolSchema("apply_repair", "medium", ["filesystem", "network"], True, ["gated_actor"], success_signal="policy-approved repair applied", category="execution"),
-            ToolSchema("resume_from_stage", "medium", ["process"], True, ["gated_actor"], success_signal="pipeline resumes from safe stage", category="execution"),
-            ToolSchema("verify_evidence", "low", ["network"], False, success_signal="trace evidence passes", category="execution"),
-            ToolSchema("verify_after_repair", "low", ["network"], False, success_signal="verify after repair passed", category="execution"),
+
+            # side_effect tools - have external side effects, require policy gate
+            ToolSchema("solve_environment", "low", [], False, success_signal="env_solution generated", category="side_effect"),
+            ToolSchema("install_environment", "medium", ["filesystem", "network"], True, ["gated_actor"], success_signal="install command exits 0", category="side_effect"),
+            ToolSchema("prepare_model_assets", "medium", ["filesystem", "network"], True, ["gated_actor"], success_signal="asset manifest ready", category="side_effect"),
+            ToolSchema("download_model_asset", "medium", ["filesystem", "network"], True, ["gated_actor"], success_signal="asset checksum/etag recorded", category="side_effect"),
+            ToolSchema("start_service", "medium", ["process", "network"], True, ["gated_actor"], success_signal="process alive and port ready", category="side_effect"),
+            ToolSchema("apply_repair", "medium", ["filesystem", "network"], True, ["gated_actor"], success_signal="policy-approved repair applied", category="side_effect"),
+            ToolSchema("resume_from_stage", "medium", ["process"], True, ["gated_actor"], success_signal="pipeline resumes from safe stage", category="side_effect"),
+
+            # evidence tools - produce verification evidence
+            ToolSchema("probe_http", "low", ["network"], False, success_signal="response contains current trace id", category="evidence"),
+            ToolSchema("probe_browser_dom", "medium", ["browser", "network"], True, ["planner", "gated_actor"], success_signal="DOM contains current trace id", category="evidence"),
+            ToolSchema("discover_gradio_api", "low", ["network"], False, success_signal="trace-capable Gradio endpoint found", category="evidence"),
+            ToolSchema("discover_openapi_schema", "low", ["network"], False, success_signal="trace-capable OpenAPI endpoint found", category="evidence"),
+            ToolSchema("discover_openai_compatible_model", "low", ["network"], False, success_signal="model id discovered", category="evidence"),
+            ToolSchema("verify_evidence", "low", ["network"], False, success_signal="trace evidence passes", category="evidence"),
+            ToolSchema("verify_after_repair", "low", ["network"], False, success_signal="verify after repair passed", category="evidence"),
         ]

@@ -47,12 +47,14 @@ class AgentStageExecutor:
         model_prepare=None,
         repair_components: Dict = None,
         provider_factory: Callable = None,
+        runtime_policy: Dict = None,
     ) -> None:
         self.config = config
         self.store = store
         self.model_prepare = model_prepare
         self.repair_components = repair_components or {}
         self.provider_factory = provider_factory
+        self.runtime_policy = runtime_policy or {}
 
     def execute_stage(
         self,
@@ -196,7 +198,10 @@ class AgentStageExecutor:
                 if cmd not in existing_plan:
                     existing_plan.append(cmd)
             effective_analysis["install_plan"] = existing_plan
-        execute = not dry_run and (self.config.allow_dependency_install if self.config else False)
+        # Use runtime_policy for execute flag (set by CLI), fallback to config
+        allow_install = self.runtime_policy.get("allow_dependency_install",
+                                                 self.config.allow_dependency_install if self.config else False)
+        execute = not dry_run and allow_install
         result = EnvDeployModule().deploy(
             repo_dir,
             effective_analysis,
@@ -244,7 +249,10 @@ class AgentStageExecutor:
 
     def _execute_runner(self, task_id, run_dir, repo_dir, deploy_analysis, before_status, dry_run, stage_hints):
         from auto_harness.modules.runner import RunnerModule
-        execute = not dry_run and (self.config.allow_service_start if self.config else False)
+        # Use runtime_policy for execute flag (set by CLI), fallback to config
+        allow_start = self.runtime_policy.get("allow_service_start",
+                                               self.config.allow_service_start if self.config else False)
+        execute = not dry_run and allow_start
         result = RunnerModule().run(
             repo_dir,
             deploy_analysis,
@@ -267,10 +275,20 @@ class AgentStageExecutor:
 
     def _execute_verify(self, task_id, run_dir, repo_dir, deploy_analysis, runner_data, before_status, stage_hints):
         from auto_harness.modules.verify import VerifyModule
+        # runner_data from agent loop may be a StageResult wrapper with {stage, status, summary, data}
+        # VerifyModule._service_discovery expects the inner data (pid, service_ready, expected_port, etc.)
+        effective_runner_data = runner_data
+        if isinstance(runner_data, dict) and "data" in runner_data and isinstance(runner_data.get("data"), dict):
+            inner_data = runner_data["data"]
+            # If inner_data also has a "data" field (from to_plain), extract that
+            if "data" in inner_data and isinstance(inner_data.get("data"), dict):
+                effective_runner_data = inner_data["data"]
+            else:
+                effective_runner_data = inner_data
         result = VerifyModule().verify(
             run_dir,
             deploy_analysis,
-            runner_data,
+            effective_runner_data,
             stage_hints=stage_hints,
         )
         evidence_paths = list(result.evidence) if hasattr(result, 'evidence') and result.evidence else []

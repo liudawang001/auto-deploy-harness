@@ -48,6 +48,7 @@ AI-Auto-Harness 是一个面向 AI 开源 demo 项目的自动部署与验证 Ag
 - Agent runtime 安全文档：`docs/agent-threat-model.md`、`docs/tool-policy.md`、`docs/prompt-injection-eval.md`。
 - 真实 Agent smoke 证据：`docs/evidence/live-agent-smoke-manifest.json` 记录了无密钥 Xunfei repair-mode live smoke manifest。
 - Benchmark fixtures：`tests/fixtures/benchmarks` 覆盖下载续传、缓存命中、并发下载、etag 缓存失效、缓存清理、按来源/repo/keep-list 清理、服务启动后退出、历史 artifact 干扰、Gradio API shape 变化、token 缺失、token report 提示、Gradio `/config` discovery、OpenAPI schema discovery、OpenAI-compatible model discovery/stream verify、浏览器 DOM trace、Streamlit 错误页面、HTTP 200 false-positive 防护、repair policy 拒绝、repair loop 限流、repair resume 阶段跳转、人工审批、checksum 失败、本地 E2E fixture matrix、memory promotion proposal/审批/回归绑定、LLM planner policy merge、LLM repair execute loop、LLM verify hint recovery、静态 dashboard 导出、只读 HTTP dashboard、持久化任务队列 dry-run 调度、队列并发 worker pool、队列 claim lock、stale claim lock recovery、GPU 探测调度、部署产物包导出、readiness audit、Docker backend plan/GPU/cache/log 元数据、GPU 包矩阵、verify progress、Git LFS progress parse、主流程 self-healing、conda/PyTorch backend、verified memory、skill evolution、agent runtime artifacts、tool registry policy 和 baseline vs agent comparison report。
+- 本地 E2E trace smoke：`tests/test_deployment_e2e.py` 会对 `tests/fixtures/e2e/http_trace_echo` 真实执行 `TaskRunner.deploy(... execute=True ...)`，完成本地 repo 复制、venv 安装、服务启动、HTTP trace verify、evidence/report/events 落盘和进程清理，证明部署闭环不是只停留在 dry-run 或 HTTP 200 健康检查。
 - 开发进度报告：`docs/progress.md`。
 
 ## 快速开始
@@ -176,6 +177,45 @@ repair 阶段会区分 LLM 提议和 Python 裁决的 rerun stage：`rerun_from_
 发送给 LLM 的 selected files 会先经过 `AgentInputSanitizer`：secret value 会替换为 `[REDACTED_SECRET]`，prompt injection 风险会写入 observation metadata，trace 写入前也会脱敏。恶意 README 诱导出的 shell/network run candidate 会被 policy 拒绝。
 
 每次 run 会生成 `reports/agent_metrics.json`，记录 LLM 调用数、accepted/rejected action、执行动作数、repair attempts、verify candidates、final status 和 `help_type`。可用 `agent-metrics --runs-dir runs` 汇总本地所有任务。
+
+## LLM-driven Agent Mode
+
+AI-Auto-Harness 支持 gated LLM-driven deployment mode。LLM 不直接执行 shell 命令，只能提出 typed tool call，如选择 runner candidate、选择 verify probe 或提出 repair。Python 通过 schema、policy、command allowlist 和 evidence gate 校验每个 action。
+
+### 运行 Primary Loop E2E
+
+```bash
+PYTHONPATH=src python3 -m auto_harness.cli deploy \
+  --repo tests/fixtures/e2e/http_trace_echo \
+  --name agent-primary-e2e \
+  --execute \
+  --allow-install \
+  --allow-start \
+  --agent-runtime-loop \
+  --agent-runtime-loop-position primary
+```
+
+### 查看 Agent Artifacts
+
+```text
+runs/<task-id>/agent_steps.jsonl          # 逐步执行日志
+runs/<task-id>/agent_state.json           # Agent 状态快照
+runs/<task-id>/agent_plan.json            # 部署计划
+runs/<task-id>/reports/agent_loop_result.json  # Agent 循环结果
+runs/<task-id>/reports/pipeline_results.json   # 阶段结果
+runs/<task-id>/reports/report.md          # 部署报告
+runs/<task-id>/evidence/*trace*.json      # HTTP trace 证据
+```
+
+### 安全边界
+
+- LLM 不能直接执行 shell
+- LLM 只能请求 typed tool
+- side-effect tool 必须经过 policy gate
+- 命令必须经过 allowlist
+- verify 成功只能由 Python evidence gate 判定
+- HTTP 200、端口开放、进程存活都不能单独判定成功
+- 当前 trace 被服务处理，才算强证据
 
 ## Skill 与 Memory
 
