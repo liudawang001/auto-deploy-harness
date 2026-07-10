@@ -1,10 +1,13 @@
-"""Tests for Shadow Skill Evaluation (Phase 5).
+"""Tests for Shadow Skill Evaluation.
 
 Verifies:
 - Shadow evaluation does not change real deployment results
 - Candidate helped/harmful counts accumulate
 - Shadow artifact is written
 - Shadow threshold updates candidate status
+- evaluate_candidate_decision produces planner-only shadow with executed=false
+- would_help requires evidence trace support (not just text overlap)
+- would_help demoted when no evidence trace support
 """
 import json
 import tempfile
@@ -31,12 +34,21 @@ def _make_candidate() -> dict:
             "do": ["discover /config", "send current trace_id"],
             "do_not": ["do not mark success on HTTP 200 alone"],
         },
+        "patch": {
+            "section_title": "Gradio API shape discovery",
+            "markdown": "When Gradio verify is uncertain, inspect /config and probe the inferred callable endpoint with the current trace_id. Do not mark success on HTTP 200 alone.",
+        },
         "shadow": {"enabled": False, "helped_count": 0, "harmful_count": 0},
     }
 
 
-def _make_run_dir(tmp: Path, with_steps: bool = True) -> Path:
-    """Create a minimal run directory with agent verify results."""
+def _make_run_dir(tmp: Path, with_steps: bool = True, with_evidence: bool = False) -> Path:
+    """Create a minimal run directory with agent verify results.
+
+    Args:
+        with_evidence: If True, include trace_id and evidence_paths in result
+                       so would_help can pass the evidence trace check.
+    """
     run_dir = tmp / "runs" / "run_001"
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "reports").mkdir(parents=True, exist_ok=True)
@@ -48,6 +60,9 @@ def _make_run_dir(tmp: Path, with_steps: bool = True) -> Path:
         "final_status": "passed",
         "llm_helped": True,
     }
+    if with_evidence:
+        result["trace_id"] = "trace_001"
+        result["evidence_paths"] = ["reports/trace_evidence.json"]
     (run_dir / "reports" / "agent_verify_result.json").write_text(
         json.dumps(result), encoding="utf-8"
     )
@@ -70,10 +85,10 @@ class TestShadowSkillEvaluator(unittest.TestCase):
     """Test ShadowSkillEvaluator."""
 
     def test_evaluate_run_matched_helped(self):
-        """Shadow eval matches and detects would_help."""
+        """Shadow eval matches and detects would_help with evidence trace support."""
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)
-            run_dir = _make_run_dir(tmp)
+            run_dir = _make_run_dir(tmp, with_evidence=True)
             candidate_path = tmp / "candidate.json"
             candidate_path.write_text(json.dumps(_make_candidate()), encoding="utf-8")
 
@@ -186,6 +201,130 @@ class TestShadowSkillEvaluator(unittest.TestCase):
         evaluator = ShadowSkillEvaluator()
         result = evaluator.evaluate_run(Path("/nonexistent"), Path("/nonexistent_candidate"))
         self.assertEqual(result["status"], "failed")
+
+    def test_would_help_demoted_without_evidence_trace(self):
+        """would_help is demoted when no evidence trace support exists."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            # Run dir WITHOUT evidence (no trace_id, no evidence_paths)
+            run_dir = _make_run_dir(tmp, with_evidence=False)
+            candidate_path = tmp / "candidate.json"
+            candidate_path.write_text(json.dumps(_make_candidate()), encoding="utf-8")
+
+            evaluator = ShadowSkillEvaluator()
+            result = evaluator.evaluate_run(run_dir, candidate_path)
+
+            # Pattern matches and tools overlap, but no evidence trace
+            self.assertTrue(result["matched"])
+            self.assertFalse(result["would_help"], "would_help should be demoted without evidence trace")
+            self.assertIn("evidence trace", result["reason"].lower())
+
+    def test_evaluate_candidate_decision_planner_only(self):
+        """evaluate_candidate_decision produces planner-only shadow with executed=false."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            run_dir = _make_run_dir(tmp, with_steps=True, with_evidence=True)
+            candidate_path = tmp / "candidate.json"
+            candidate_path.write_text(json.dumps(_make_candidate()), encoding="utf-8")
+
+            evaluator = ShadowSkillEvaluator()
+            # No planner provided — falls back to heuristic
+            result = evaluator.evaluate_candidate_decision(
+                run_dir=run_dir,
+                candidate_path=candidate_path,
+                observation={"stage": "verify", "frameworks": ["gradio"], "trace_id": "trace_001"},
+            )
+
+            self.assertEqual(result["shadow_mode"], "planner_only")
+            self.assertFalse(result["executed"], "shadow must never execute tools")
+            self.assertIn("would_tool_call", result)
+            self.assertIn("actual_tool_call", result)
+
+    def test_evaluate_candidate_decision_shadow_artifact(self):
+        """evaluate_candidate_decision writes shadow artifact."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            run_dir = _make_run_dir(tmp, with_steps=True, with_evidence=True)
+            candidate_path = tmp / "candidate.json"
+            candidate_path.write_text(json.dumps(_make_candidate()), encoding="utf-8")
+
+            evaluator = ShadowSkillEvaluator()
+            result = evaluator.evaluate_candidate_decision(
+                run_dir=run_dir,
+                candidate_path=candidate_path,
+                observation={"stage": "verify", "frameworks": ["gradio"], "trace_id": "trace_001"},
+            )
+
+            # Shadow artifact should exist
+            shadow_artifact = candidate_path.with_suffix(".shadow.json")
+            self.assertTrue(shadow_artifact.exists())
+
+            # Artifact should be a list with one entry
+            entries = json.loads(shadow_artifact.read_text(encoding="utf-8"))
+            self.assertIsInstance(entries, list)
+            self.assertEqual(len(entries), 1)
+            self.assertFalse(entries[0]["executed"])
+
+    def test_evaluate_candidate_decision_with_mock_planner(self):
+        """evaluate_candidate_decision with a mock planner produces would_tool_call."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            run_dir = _make_run_dir(tmp, with_steps=True, with_evidence=True)
+            candidate_path = tmp / "candidate.json"
+            candidate_path.write_text(json.dumps(_make_candidate()), encoding="utf-8")
+
+            # Create a mock planner that returns a specific tool call
+            from auto_harness.agent_runtime.schemas import AgentDecision, ToolCall
+            mock_planner = _MockPlanner(AgentDecision(
+                status="ok",
+                hypothesis="test",
+                confidence=0.8,
+                tool_call=ToolCall(name="discover_gradio_api", input={}),
+            ))
+
+            evaluator = ShadowSkillEvaluator()
+            result = evaluator.evaluate_candidate_decision(
+                run_dir=run_dir,
+                candidate_path=candidate_path,
+                observation={"stage": "verify", "frameworks": ["gradio"], "trace_id": "trace_001"},
+                planner=mock_planner,
+            )
+
+            self.assertEqual(result["shadow_mode"], "planner_only")
+            self.assertFalse(result["executed"])
+            self.assertIsNotNone(result["would_tool_call"])
+            self.assertEqual(result["would_tool_call"]["name"], "discover_gradio_api")
+
+    def test_evaluate_candidate_decision_harmful_detected(self):
+        """evaluate_candidate_decision detects harmful recommendations."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            run_dir = _make_run_dir(tmp, with_steps=True, with_evidence=True)
+
+            # Candidate with harmful recommendation
+            candidate = _make_candidate()
+            candidate["reusable_rule"]["do"] = ["bypass trace verification"]
+            candidate_path = tmp / "candidate.json"
+            candidate_path.write_text(json.dumps(candidate), encoding="utf-8")
+
+            evaluator = ShadowSkillEvaluator()
+            result = evaluator.evaluate_candidate_decision(
+                run_dir=run_dir,
+                candidate_path=candidate_path,
+                observation={"stage": "verify", "frameworks": ["gradio"]},
+            )
+
+            self.assertTrue(result["would_harm"])
+
+
+class _MockPlanner:
+    """Mock planner for testing evaluate_candidate_decision."""
+
+    def __init__(self, decision):
+        self._decision = decision
+
+    def plan_verify(self, observation, allowed_tools=None):
+        return self._decision
 
 
 if __name__ == "__main__":

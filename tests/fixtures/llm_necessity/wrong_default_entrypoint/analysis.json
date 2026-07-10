@@ -1,0 +1,33 @@
+{
+  "frameworks": ["gradio"],
+  "run_candidates": [
+    {
+      "id": "cand_0",
+      "cmd": ["python", "app.py"],
+      "entrypoint": "app.py",
+      "expected_port": 7860,
+      "source": "deterministic",
+      "score": 0.6,
+      "score_reasons": ["app.py exists"]
+    },
+    {
+      "id": "cand_1",
+      "cmd": ["python", "gradio_app.py"],
+      "entrypoint": "gradio_app.py",
+      "expected_port": 7860,
+      "source": "deterministic",
+      "score": 0.4,
+      "score_reasons": ["gradio_app.py exists"]
+    }
+  ],
+  "selected_files": {
+    "README.md": "# My Gradio App\nRun `python gradio_app.py` to start.",
+    "app.py": "# placeholder\nprint('not the real app')",
+    "gradio_app.py": "import gradio as gr\ndemo = gr.Interface(fn=lambda x: x, inputs='text', outputs='text')\ndemo.launch(server_port=7860)"
+  },
+  "install_plan": [["python3", "-m", "pip", "install", "-r", "requirements.txt"]],
+  "env_solution": {
+    "backend": "venv",
+    "python": "3.10"
+  }
+}

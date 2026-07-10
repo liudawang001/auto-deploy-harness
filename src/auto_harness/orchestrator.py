@@ -11,7 +11,9 @@ from auto_harness.agents.claude_code import ClaudeCodeExecutor
 from auto_harness.assets import HuggingFaceDownloader, ModelCache, ModelScopeDownloader
 from auto_harness.models.base import read_json, to_plain, write_json
 from auto_harness.models.task import ProjectSpec, RuntimePolicy, TaskSpec
-from auto_harness.memory import MemoryStore, VerifiedMemoryRecorder
+from auto_harness.memory import MemoryStore
+from auto_harness.memory.outcomes import SkillOutcomeRecorder
+from auto_harness.memory.success import VerifiedMemoryRecorder
 from auto_harness.modules import (
     EnvDeployModule,
     EnvSolveModule,
@@ -169,6 +171,10 @@ class TaskRunner:
         repair_overlay = self.repair_overlay.load(run_dir)
         effective_analysis = self.repair_overlay.merge_analysis(analyze_data, repair_overlay)
 
+        # Plan Decision Gate: generate initial deployment strategy after analyze
+        if self._plan_gate_enabled() and should_run("analyze"):
+            self._apply_plan_gate(task_id, effective_analysis, results, run_dir, revision=False)
+
         if should_run("resource_plan"):
             resource_context = self._stage_context("resource_plan", effective_analysis)
             resource_result = ResourcePlanner().plan(repo_dir, effective_analysis)
@@ -213,11 +219,19 @@ class TaskRunner:
             )
             self._attach_context(env_result, env_context)
             self._attach_repair_overlay(env_result, repair_overlay)
+            # Env Decision Gate: LLM diagnoses dependency conflicts on failure
+            if env_result.status in ("failed", "uncertain") and self._env_gate_enabled():
+                env_gate_analysis = self._apply_env_gate(task_id, env_result, deploy_analysis, run_dir)
+                if env_gate_analysis is not None:
+                    deploy_analysis = env_gate_analysis
             results["env_deploy"] = to_plain(env_result)
             self._save_stage(task_id, "env_deploy", env_result)
             self._remember(task_id, "env_deploy", env_result, deploy_analysis, results)
 
         if should_run("model_prepare"):
+            # Model Decision Gate: LLM resolves model asset ambiguity
+            if self._model_gate_enabled():
+                resource_data = self._apply_model_gate(task_id, resource_data, effective_analysis, repo_dir, run_dir)
             model_context = self._stage_context("model_prepare", resource_data)
             model_result = self.model_prepare.prepare(
                 run_dir,
@@ -235,6 +249,9 @@ class TaskRunner:
 
         if should_run("runner"):
             runner_context = self._stage_context("runner", deploy_analysis)
+            # Runner Decision Gate: LLM selects best candidate before deterministic execution
+            if self._runner_gate_enabled():
+                deploy_analysis = self._apply_runner_gate(task_id, deploy_analysis, repo_dir, run_dir)
             runner_result = RunnerModule().run(
                 repo_dir,
                 deploy_analysis,
@@ -372,6 +389,40 @@ class TaskRunner:
         stage_status = "passed" if result.status in ("passed", "pass") else result.status
         progress = result.data.get("progress", {}) if isinstance(result.data, dict) else {}
         self.store.update_stage(task_id, stage, stage_status, result_path=str(path), error=result.error, progress=progress)
+        self._record_skill_outcome(task_id, stage, result)
+        # Plan revision at failed/uncertain stage boundaries
+        if result.status in ("failed", "uncertain") and self._plan_gate_enabled():
+            self._maybe_plan_revision(task_id, stage, result)
+
+    def _record_skill_outcome(self, task_id: str, stage: str, result) -> None:
+        """Record skill outcome after each stage. Failure must not affect the pipeline."""
+        try:
+            data = result.data if isinstance(result.data, dict) else {}
+            control_context = data.get("control_context") if isinstance(data.get("control_context"), dict) else {}
+            selected_skills = control_context.get("selected_skills", [])
+
+            # Build agent metadata from verify result if available
+            agent_metadata = {}
+            agent_verify = data.get("agent_verify") if isinstance(data.get("agent_verify"), dict) else None
+            if agent_verify:
+                agent_metadata["llm_helped"] = agent_verify.get("llm_helped", False)
+                agent_metadata["policy_rejected"] = agent_verify.get("rejected_tool_count", 0) > 0
+            trace_id = str(data.get("trace_id") or "")
+            if trace_id and result.status in ("pass", "passed"):
+                agent_metadata["trace_verified"] = True
+
+            recorder = SkillOutcomeRecorder(self.config.memory_path)
+            recorder.record_run(
+                run_id=task_id,
+                stage=stage,
+                selected_skills=selected_skills,
+                result={"status": result.status},
+                agent_metadata=agent_metadata if agent_metadata else None,
+            )
+        except Exception:
+            # Outcome recording must never affect the deployment pipeline.
+            # Swallow all errors silently.
+            pass
 
     def _stage_context(self, stage: str, analysis: Dict) -> Dict:
         skills = [skill.to_context() for skill in self.skills.select_for_stage(stage, analysis, limit=3)]
@@ -515,6 +566,384 @@ class TaskRunner:
             and self.config.agent_enable_repair_actions
             and runtime.allow_dependency_install
         )
+
+    # ------------------------------------------------------------------
+    # Decision Gate helpers
+    # ------------------------------------------------------------------
+
+    def _runner_gate_enabled(self) -> bool:
+        return self.config.agent_mode in ("planner", "gated_actor") and self.config.agent_enable_runner_gate
+
+    def _env_gate_enabled(self) -> bool:
+        return self.config.agent_mode in ("planner", "gated_actor") and self.config.agent_enable_env_gate
+
+    def _model_gate_enabled(self) -> bool:
+        return self.config.agent_mode in ("planner", "gated_actor") and self.config.agent_enable_model_gate
+
+    def _repair_gate_enabled(self) -> bool:
+        return self.config.agent_mode in ("planner", "gated_actor") and self.config.agent_enable_repair_gate
+
+    def _plan_gate_enabled(self) -> bool:
+        return self.config.agent_mode in ("planner", "gated_actor") and self.config.agent_enable_plan_gate
+
+    def _apply_runner_gate(self, task_id: str, analysis: Dict, repo_dir: Path, run_dir: Path) -> Dict:
+        """Apply runner decision gate: LLM selects/reorders run candidates."""
+        from auto_harness.agent_runtime.decision_gate import AgentDecisionGate
+        from auto_harness.agent_runtime.stage_schemas import RUNNER_TOOLS
+
+        candidates = analysis.get("run_candidates", [])
+        if not candidates:
+            return analysis
+
+        # Build observation for runner gate
+        observation = self._build_runner_observation(analysis, repo_dir)
+
+        gate = AgentDecisionGate(provider=self._agent_provider())
+        gate_result = gate.decide(
+            stage="runner",
+            observation=observation,
+            allowed_tools=list(RUNNER_TOOLS),
+            mode=self.config.agent_mode,
+            run_dir=run_dir,
+            max_steps=self.config.agent_decision_gate_max_steps,
+        )
+
+        self.store.events(task_id).append("runner", "decision_gate", {
+            "decision_status": gate_result.decision_status,
+            "policy_allowed": gate_result.policy.get("allowed", False),
+            "executed": gate_result.execution.get("executed", False),
+            "state_changed": gate_result.state_delta.get("changed", False),
+        })
+
+        # Apply state delta if candidates were reordered
+        if gate_result.state_delta.get("changed") and gate_result.state_delta.get("reordered_candidates"):
+            reordered = gate_result.state_delta["reordered_candidates"]
+            updated_analysis = dict(analysis)
+            updated_analysis["run_candidates"] = reordered
+            # Mark selection metadata
+            if reordered:
+                reordered[0]["selected_by"] = "llm_runner_gate"
+                reordered[0]["selection_reason"] = gate_result.hypothesis
+            return updated_analysis
+
+        return analysis
+
+    def _build_runner_observation(self, analysis: Dict, repo_dir: Path) -> Dict:
+        """Build observation for runner decision gate."""
+        from auto_harness.agent.safety import AgentInputSanitizer
+        sanitizer = AgentInputSanitizer()
+
+        candidates = analysis.get("run_candidates", [])
+        # Normalize candidates with IDs
+        normalized = []
+        for i, c in enumerate(candidates):
+            cand = dict(c)
+            if "id" not in cand:
+                cand["id"] = "cand_%d" % i
+            normalized.append(cand)
+
+        # Read selected files for context
+        selected_files = {}
+        for name in ("README.md", "readme.md", "app.py", "main.py", "gradio_app.py", "server.py"):
+            path = repo_dir / name
+            if path.is_file():
+                try:
+                    selected_files[name] = path.read_text(encoding="utf-8", errors="ignore")[:3000]
+                except OSError:
+                    pass
+        selected_files = sanitizer.sanitize_selected_files(selected_files)
+
+        frameworks = analysis.get("frameworks", [])
+        allowed_roots = list(self.config.allowed_commands or ["python", "python3", "streamlit", "gradio", "uvicorn"])
+
+        return {
+            "stage": "runner",
+            "frameworks": frameworks,
+            "run_candidates": normalized,
+            "selected_files": selected_files,
+            "constraints": [
+                "Only select from existing candidates or add safe candidates.",
+                "Command roots must be in allowed list: %s" % ", ".join(allowed_roots),
+                "No shell metacharacters in commands.",
+                "Do not start services yourself; the runner module handles execution.",
+            ],
+        }
+
+    def _apply_model_gate(self, task_id: str, resource_data: Dict, analysis: Dict, repo_dir: Path, run_dir: Path) -> Dict:
+        """Apply model decision gate: LLM resolves model asset ambiguity."""
+        from auto_harness.agent_runtime.decision_gate import AgentDecisionGate
+        from auto_harness.agent_runtime.stage_schemas import MODEL_TOOLS
+
+        model_assets = resource_data.get("model_assets", [])
+        # Check if model gate is needed
+        needs_gate = (
+            not model_assets  # no assets detected but README/code may imply models
+            or any(a.get("status") in ("uncertain", "failed") for a in model_assets)
+        )
+        if not needs_gate:
+            return resource_data
+
+        # Build observation
+        readme_excerpt = ""
+        for name in ("README.md", "readme.md"):
+            path = repo_dir / name
+            if path.is_file():
+                try:
+                    readme_excerpt = path.read_text(encoding="utf-8", errors="ignore")[:3000]
+                except OSError:
+                    pass
+
+        observation = {
+            "stage": "model_prepare",
+            "model_mentions": self._extract_model_mentions(analysis, readme_excerpt),
+            "detected_assets": model_assets,
+            "cache_candidates": [],
+            "git_lfs": resource_data.get("git_lfs", {}),
+            "constraints": [
+                "Model source must be huggingface, model_scope, or local_cache.",
+                "repo_id format must be namespace/name (no whitespace, no URL).",
+                "target_path must be relative, no path traversal.",
+                "No token values in tool input.",
+                "Do not download directly; strategy overlay only.",
+            ],
+        }
+
+        gate = AgentDecisionGate(provider=self._agent_provider())
+        gate_result = gate.decide(
+            stage="model_prepare",
+            observation=observation,
+            allowed_tools=list(MODEL_TOOLS),
+            mode=self.config.agent_mode,
+            run_dir=run_dir,
+            max_steps=self.config.agent_decision_gate_max_steps,
+        )
+
+        self.store.events(task_id).append("model_prepare", "decision_gate", {
+            "decision_status": gate_result.decision_status,
+            "policy_allowed": gate_result.policy.get("allowed", False),
+            "state_changed": gate_result.state_delta.get("changed", False),
+        })
+
+        # Apply model strategy overlay if produced
+        if gate_result.state_delta.get("changed") and gate_result.state_delta.get("strategy_path"):
+            strategy_path = Path(gate_result.state_delta["strategy_path"])
+            if strategy_path.exists():
+                import json
+                strategy = json.loads(strategy_path.read_text())
+                updated_resource = dict(resource_data)
+                if strategy.get("repo_id"):
+                    # Add model asset from strategy
+                    new_asset = {
+                        "source": strategy.get("source", "huggingface"),
+                        "repo_id": strategy["repo_id"],
+                        "target_path": strategy.get("target_path", ""),
+                        "strategy": strategy.get("strategy", "snapshot_download"),
+                        "selected_by": "llm_model_gate",
+                    }
+                    existing = list(updated_resource.get("model_assets", []))
+                    existing.append(new_asset)
+                    updated_resource["model_assets"] = existing
+                return updated_resource
+
+        return resource_data
+
+    def _extract_model_mentions(self, analysis: Dict, readme: str) -> list:
+        """Extract model mentions from analysis and README."""
+        mentions = []
+        # From analysis
+        for hint in analysis.get("model_hints", []):
+            if isinstance(hint, str):
+                mentions.append(hint)
+        # From README: look for HF-style model references
+        import re
+        hf_pattern = re.compile(r'[\w.-]+/[\w.-]+')
+        for match in hf_pattern.finditer(readme):
+            candidate = match.group()
+            # Filter out obvious non-model references
+            if "/" in candidate and not candidate.startswith(("http", "git@", "ssh://")):
+                if any(kw in readme.lower() for kw in ("model", "huggingface", "hf", "transformers")):
+                    mentions.append(candidate)
+        return list(set(mentions))[:10]
+
+    def _apply_plan_gate(self, task_id: str, analysis: Dict, results: Dict, run_dir: Path, revision: bool = False) -> None:
+        """Apply plan decision gate: LLM generates deployment strategy and stage hints."""
+        from auto_harness.agent_runtime.decision_gate import AgentDecisionGate
+        from auto_harness.agent_runtime.stage_planners import PlanPlanner
+        from auto_harness.models.base import write_json
+
+        # Build observation for plan gate
+        frameworks = analysis.get("frameworks", [])
+        uncertainties = []
+        if analysis.get("run_candidates") and len(analysis["run_candidates"]) > 1:
+            uncertainties.append("Multiple run candidates; best entrypoint unclear")
+        env_solution = analysis.get("env_solution", {})
+        if env_solution.get("risk_reasons"):
+            uncertainties.extend(env_solution["risk_reasons"])
+
+        observation = {
+            "stage": "plan",
+            "analysis_summary": {
+                "frameworks": frameworks,
+                "has_model_assets": bool(analysis.get("model_assets")),
+                "env_backend": env_solution.get("backend", "venv"),
+            },
+            "frameworks": frameworks,
+            "previous_results": {k: v.get("status", "") for k, v in results.items() if isinstance(v, dict)},
+            "uncertainties": uncertainties,
+            "constraints": [
+                "Plan gate only generates strategy hints, never executes tools.",
+                "Stage names must be valid pipeline stages.",
+                "Hints must not change policy or security settings.",
+                "Strategy is advisory; deterministic pipeline still runs.",
+            ],
+        }
+
+        provider = self._agent_provider()
+        if not provider:
+            return
+
+        planner = PlanPlanner()
+        decision = planner.plan(observation, provider=provider)
+
+        # Write plan artifact
+        reports_dir = run_dir / "reports"
+        reports_dir.mkdir(parents=True, exist_ok=True)
+
+        plan_data = {
+            "status": decision.status,
+            "deployment_strategy": "",
+            "stage_plan": [],
+            "uncertainties": uncertainties,
+            "fallback": "deterministic_pipeline",
+            "hypothesis": decision.hypothesis,
+            "confidence": decision.confidence,
+            "revision": revision,
+        }
+
+        if decision.tool_call and decision.tool_call.get("name") == "set_deployment_strategy":
+            plan_data["deployment_strategy"] = decision.tool_call.get("input", {}).get("strategy", "")
+            plan_data["stage_plan"] = decision.tool_call.get("input", {}).get("stage_plan", [])
+        elif decision.tool_call and decision.tool_call.get("name") == "set_stage_hint":
+            plan_data["stage_hints"] = {decision.tool_call.get("input", {}).get("stage", ""): decision.tool_call.get("input", {}).get("hints", {})}
+
+        if revision:
+            # Append to revisions JSONL
+            revisions_path = run_dir / "agent_plan_revisions.jsonl"
+            with revisions_path.open("a", encoding="utf-8") as f:
+                import json
+                f.write(json.dumps(plan_data, ensure_ascii=False) + "\n")
+        else:
+            write_json(run_dir / "agent_plan_initial.json", plan_data)
+
+        # Write strategy report
+        write_json(reports_dir / "agent_strategy.json", plan_data)
+
+        self.store.events(task_id).append("plan", "decision_gate", {
+            "decision_status": decision.status,
+            "revision": revision,
+            "hypothesis": decision.hypothesis,
+        })
+
+    def _maybe_plan_revision(self, task_id: str, stage: str, result) -> None:
+        """Generate plan revision at failed/uncertain stage boundary.
+
+        Per design doc: same stage max revision 1 time to avoid infinite loops.
+        """
+        run_dir = self.store.run_dir(task_id)
+        # Check if already revised for this stage
+        revisions_path = run_dir / "agent_plan_revisions.jsonl"
+        if revisions_path.exists():
+            try:
+                import json
+                existing = revisions_path.read_text(encoding="utf-8").strip().split("\n")
+                for line in existing:
+                    if not line:
+                        continue
+                    rev = json.loads(line)
+                    if rev.get("source_stage") == stage:
+                        return  # Already revised for this stage
+            except (OSError, ValueError):
+                pass
+
+        # Load current results for context
+        results = self._load_previous_results(run_dir)
+        analysis = results.get("analyze", {}).get("data", {}) if isinstance(results.get("analyze"), dict) else {}
+
+        self._apply_plan_gate(task_id, analysis, results, run_dir, revision=True)
+
+        # Tag the revision with source stage
+        if revisions_path.exists():
+            try:
+                import json
+                lines = revisions_path.read_text(encoding="utf-8").strip().split("\n")
+                if lines:
+                    last = json.loads(lines[-1])
+                    last["source_stage"] = stage
+                    last["trigger_status"] = result.status
+                    lines[-1] = json.dumps(last, ensure_ascii=False)
+                    revisions_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            except (OSError, ValueError):
+                pass
+
+    def _apply_env_gate(self, task_id: str, env_result, deploy_analysis: Dict, run_dir: Path) -> Dict:
+        """Apply env decision gate: LLM diagnoses dependency conflicts and proposes constraints."""
+        from auto_harness.agent_runtime.decision_gate import AgentDecisionGate
+        from auto_harness.agent_runtime.stage_schemas import ENV_TOOLS
+
+        data = env_result.data if isinstance(env_result.data, dict) else {}
+        env_solution = deploy_analysis.get("env_solution", {})
+        diagnosis = data.get("diagnosis", {})
+
+        observation = {
+            "stage": "env_solve",
+            "failed_stage": "env_deploy",
+            "requirements": deploy_analysis.get("install_plan", []),
+            "install_log_tail": str(data.get("error", ""))[:4000],
+            "deterministic_constraints": env_solution.get("constraints", []),
+            "risk_reasons": env_solution.get("risk_reasons", []),
+            "diagnosis": diagnosis,
+            "constraints": [
+                "Only apply dependency constraints, do not modify source files.",
+                "Package names must be valid Python package names.",
+                "Version specs must be valid (e.g., '<2', '>=1.0,<2.0', '==1.2.3').",
+                "No arbitrary index URLs.",
+                "Write constraints to repair_overlay/constraints.txt only.",
+            ],
+        }
+
+        gate = AgentDecisionGate(provider=self._agent_provider())
+        gate_result = gate.decide(
+            stage="env_solve",
+            observation=observation,
+            allowed_tools=list(ENV_TOOLS),
+            mode=self.config.agent_mode,
+            run_dir=run_dir,
+            max_steps=self.config.agent_decision_gate_max_steps,
+        )
+
+        self.store.events(task_id).append("env_deploy", "decision_gate", {
+            "decision_status": gate_result.decision_status,
+            "policy_allowed": gate_result.policy.get("allowed", False),
+            "state_changed": gate_result.state_delta.get("changed", False),
+        })
+
+        # If constraints were applied, update the analysis with the overlay
+        if gate_result.state_delta.get("changed") and gate_result.state_delta.get("constraint"):
+            constraint = gate_result.state_delta["constraint"]
+            updated_analysis = dict(deploy_analysis)
+            env_sol = dict(updated_analysis.get("env_solution", {}))
+            existing_constraints = list(env_sol.get("constraints", []))
+            new_constraint = "%s%s" % (constraint.get("package", ""), constraint.get("version_spec", ""))
+            if new_constraint and new_constraint not in existing_constraints:
+                existing_constraints.append(new_constraint)
+            env_sol["constraints"] = existing_constraints
+            env_sol["constraint_reasons"] = env_sol.get("constraint_reasons", []) + [
+                "LLM env gate: %s" % (constraint.get("reason", "dependency conflict"))
+            ]
+            updated_analysis["env_solution"] = env_sol
+            return updated_analysis
+
+        return None
 
     def _maybe_agent_diagnose(self, task_id: str, stage: str, result, analysis: Dict, runtime: RuntimePolicy, run_dir: Path) -> None:
         if not (self.config.agent_mode in ("planner", "gated_actor") and self.config.agent_enable_log_diagnosis):

@@ -49,6 +49,12 @@ def build_parser() -> argparse.ArgumentParser:
     deploy.add_argument("--docker-network", default=None)
     deploy.add_argument("--docker-gpus", default=None)
     deploy.add_argument("--docker-model-cache-dir", default=None)
+    deploy.add_argument("--agent-enable-plan-gate", action="store_true", default=False)
+    deploy.add_argument("--agent-enable-runner-gate", action="store_true", default=False)
+    deploy.add_argument("--agent-enable-env-gate", action="store_true", default=False)
+    deploy.add_argument("--agent-enable-model-gate", action="store_true", default=False)
+    deploy.add_argument("--agent-enable-repair-gate", action="store_true", default=False)
+    deploy.add_argument("--agent-all-decision-gates", action="store_true", default=False)
 
     resume = sub.add_parser("resume", help="resume an existing task")
     resume.add_argument("--task-id", required=True)
@@ -116,6 +122,14 @@ def build_parser() -> argparse.ArgumentParser:
     skill_outcomes.add_argument("--skill", default="")
     skill_outcomes.add_argument("--candidate", default="")
 
+    skill_gain = sub.add_parser("skill-gain", help="evaluate skill candidate gain over baseline")
+    skill_gain.add_argument("--candidate", required=True, help="path to candidate JSON file")
+    skill_gain.add_argument("--output", default="", help="path to write gain report JSON")
+
+    evidence_package = sub.add_parser("evidence-package", help="export project evidence as tar.gz archive")
+    evidence_package.add_argument("--output", default="dist/evidence/agent-project-evidence.tar.gz", help="output tar.gz path")
+    evidence_package.add_argument("--project-root", default=".", help="project root directory")
+
     llm = sub.add_parser("llm-test", help="test LLM provider")
     llm.add_argument("--provider", choices=["mock", "xunfei"], default="mock")
     llm.add_argument("--prompt", default="Return a JSON object with status ok.")
@@ -144,6 +158,10 @@ def build_parser() -> argparse.ArgumentParser:
     eval_compare.add_argument("--manifest", default="eval_targets/manifest.json")
     eval_compare.add_argument("--output-dir", default="runs/evals/agent-verify-mvp")
     eval_compare.add_argument("--run", action="store_true", default=False, help="run real off vs gated_actor comparison (not just skeleton)")
+
+    eval_llm = sub.add_parser("eval-llm-necessity", help="evaluate LLM necessity with baseline vs agent comparison")
+    eval_llm.add_argument("--manifest", default="eval_targets/llm_necessity_manifest.json")
+    eval_llm.add_argument("--output", default="runs/evals/llm-necessity/report.json")
 
     queue = sub.add_parser("queue", help="submit and run persistent deployment queue jobs")
     queue_sub = queue.add_subparsers(dest="queue_command", required=True)
@@ -228,6 +246,27 @@ def _apply_cli_overrides(config: HarnessConfig, args) -> None:
         config.env_backend = args.env_backend
     if getattr(args, "prefer_mamba", False):
         config.conda_prefer_mamba = True
+    # Decision gate CLI overrides
+    if getattr(args, "agent_enable_plan_gate", False):
+        config.agent_enable_plan_gate = True
+    if getattr(args, "agent_enable_runner_gate", False):
+        config.agent_enable_runner_gate = True
+    if getattr(args, "agent_enable_env_gate", False):
+        config.agent_enable_env_gate = True
+    if getattr(args, "agent_enable_model_gate", False):
+        config.agent_enable_model_gate = True
+    if getattr(args, "agent_enable_repair_gate", False):
+        config.agent_enable_repair_gate = True
+    if getattr(args, "agent_all_decision_gates", False):
+        config.agent_mode = "gated_actor"
+        config.agent_enable_plan_gate = True
+        config.agent_enable_runner_gate = True
+        config.agent_enable_env_gate = True
+        config.agent_enable_model_gate = True
+        config.agent_enable_repair_gate = True
+        config.agent_enable_verify = True
+        config.agent_enable_repair_actions = True
+        config.agent_enable_log_diagnosis = True
 
 
 def main(argv=None) -> int:
@@ -363,6 +402,14 @@ def main(argv=None) -> int:
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
 
+    if args.command == "eval-llm-necessity":
+        from auto_harness.evals.llm_necessity import LLMNecessityEvaluator
+        evaluator = LLMNecessityEvaluator()
+        output_path = Path(args.output) if args.output else Path("runs/evals/llm-necessity/report.json")
+        result = evaluator.evaluate_manifest(Path(args.manifest), output_path)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0 if result.get("status") == "completed" else 2
+
     if args.command == "queue":
         queue = DeploymentQueue(config.task_queue_path, runner, claim_ttl_seconds=config.queue_claim_ttl_seconds)
         if args.queue_command == "submit":
@@ -425,8 +472,10 @@ def main(argv=None) -> int:
             from auto_harness.providers import XunfeiSparkProvider
             provider = XunfeiSparkProvider()
         else:
-            from auto_harness.providers import MockLLMProvider
-            provider = MockLLMProvider()
+            # Use MemoryEvolutionMockProvider (not generic MockLLMProvider)
+            # so memory-evolve --provider mock returns valid curator JSON
+            from auto_harness.providers.memory_evolution_mock import MemoryEvolutionMockProvider
+            provider = MemoryEvolutionMockProvider()
 
         manager = MemoryEvolutionManager(
             memory_dir=config.memory_path,
@@ -493,6 +542,28 @@ def main(argv=None) -> int:
         )
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
+
+    if args.command == "skill-gain":
+        from auto_harness.evals.skill_gain import SkillGainEvaluator
+        evaluator = SkillGainEvaluator()
+        output_path = Path(args.output) if args.output else None
+        report = evaluator.evaluate_candidate(
+            candidate_path=Path(args.candidate),
+            output_path=output_path,
+        )
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        if report.get("status") == "failed":
+            return 2
+        return 0 if report.get("gain", {}).get("improved") else 1
+
+    if args.command == "evidence-package":
+        from auto_harness.evidence import create_evidence_package
+        result = create_evidence_package(
+            project_root=Path(args.project_root),
+            output_path=Path(args.output),
+        )
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0 if result.get("status") == "ok" else 2
 
     if args.command == "cache":
         if args.cleanup:

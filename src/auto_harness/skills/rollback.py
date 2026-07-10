@@ -8,6 +8,8 @@ Key rules:
 - The rollback_path must exist on disk
 - Current skill is saved to history before restoring
 - Candidate status is updated to rolled_back
+- Rollback uses file lock + atomic write to prevent concurrent corruption
+- Rollback audit is written to history/
 """
 import hashlib
 import json
@@ -15,6 +17,7 @@ from pathlib import Path
 from typing import Dict
 
 from auto_harness.models.base import write_json
+from auto_harness.utils.atomic import FileLock, atomic_write_text
 from auto_harness.utils.time import utc_now_iso
 
 
@@ -23,6 +26,9 @@ class SkillRollbackManager:
 
     def rollback_candidate(self, candidate_path: Path) -> Dict:
         """Rollback a promoted candidate, restoring the pre-promotion skill.
+
+        Uses file lock + atomic write to prevent concurrent corruption.
+        Writes rollback audit to history/ alongside pre-rollback backup.
 
         Args:
             candidate_path: Path to the candidate JSON file.
@@ -63,19 +69,7 @@ class SkillRollbackManager:
                 "error": "rollback file not found: %s" % rollback_path_str,
             }
 
-        # Get target skill path
-        target_skill_rel = candidate.get("target_skill", "")
-        # The target skill is relative to skills_dir, but we need the full path
-        # We can derive it from the promotion info or from the marker
-        # Use the rollback_path's parent structure to find the target
-        # Actually, the target skill path was set during apply_candidate
-        # We need the skills_dir. Let's compute it from rollback_path structure.
-        # rollback_path is skills/<skill>/history/<timestamp>_<candidate_id>.md
-        # target skill is skills/<skill>/SKILL.md
-
         # Derive target skill path from rollback path
-        # rollback_path: skills/<skill-name>/history/20260709_skillcand_xxx.md
-        # target:        skills/<skill-name>/SKILL.md
         skill_dir = rollback_path.parent.parent
         target_path = skill_dir / "SKILL.md"
 
@@ -86,25 +80,42 @@ class SkillRollbackManager:
                 "error": "target skill not found: %s" % str(target_path),
             }
 
-        # Save current skill to history before restoring
-        current_content = target_path.read_text(encoding="utf-8")
-        history_dir = rollback_path.parent
-        history_dir.mkdir(parents=True, exist_ok=True)
-        pre_rollback_path = history_dir / ("%s_pre_rollback_%s.md" % (
-            utc_now_iso().replace(":", "").replace("-", "").split(".")[0],
-            candidate_id,
-        ))
-        pre_rollback_path.write_text(current_content, encoding="utf-8")
+        # Acquire file lock for the target skill
+        with FileLock(target_path):
+            # Save current skill to history before restoring (under lock)
+            current_content = target_path.read_text(encoding="utf-8")
+            history_dir = rollback_path.parent
+            history_dir.mkdir(parents=True, exist_ok=True)
+            pre_rollback_path = history_dir / ("%s_pre_rollback_%s.md" % (
+                utc_now_iso().replace(":", "").replace("-", "").split(".")[0],
+                candidate_id,
+            ))
+            pre_rollback_path.write_text(current_content, encoding="utf-8")
 
-        # Restore from rollback
-        rollback_content = rollback_path.read_text(encoding="utf-8")
-        target_path.write_text(rollback_content, encoding="utf-8")
+            # Restore from rollback (atomic write)
+            rollback_content = rollback_path.read_text(encoding="utf-8")
+            atomic_write_text(target_path, rollback_content)
 
-        # Compute restored sha
-        restored_sha = hashlib.sha256(rollback_content.encode("utf-8")).hexdigest()
-        previous_sha = hashlib.sha256(current_content.encode("utf-8")).hexdigest()
+            # Compute restored sha
+            restored_sha = hashlib.sha256(rollback_content.encode("utf-8")).hexdigest()
+            previous_sha = hashlib.sha256(current_content.encode("utf-8")).hexdigest()
 
-        # Update candidate
+            # Write rollback audit
+            audit_path = history_dir / ("%s_%s.rollback.json" % (
+                utc_now_iso().replace(":", "").replace("-", "").split(".")[0],
+                candidate_id,
+            ))
+            audit = {
+                "candidate_id": candidate_id,
+                "target_skill": str(target_path),
+                "restored_sha256": restored_sha,
+                "previous_active_sha256": previous_sha,
+                "pre_rollback_backup": str(pre_rollback_path),
+                "rolled_back_at": utc_now_iso(),
+            }
+            audit_path.write_text(json.dumps(audit, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        # Update candidate (outside lock — candidate json is separate from skill file)
         candidate["status"] = "rolled_back"
         candidate["rollback"] = {
             "rolled_back_at": utc_now_iso(),

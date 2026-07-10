@@ -1,0 +1,6 @@
+{
+  "model_assets": [],
+  "git_lfs": {"required": false},
+  "gpu_required": false,
+  "frameworks": ["transformers"]
+}

@@ -71,6 +71,14 @@ class HarnessConfig:
     memory_evolution_shadow_harmful_threshold: int = 0
     memory_evolution_provider: str = "mock"
     skill_candidate_dir: str = "memory/skill_candidates"
+    # Decision gate configuration
+    agent_enable_plan_gate: bool = False
+    agent_enable_runner_gate: bool = False
+    agent_enable_env_gate: bool = False
+    agent_enable_model_gate: bool = False
+    agent_enable_repair_gate: bool = False
+    agent_decision_gate_max_steps: int = 2
+    agent_llm_required_eval: bool = False
 
     def __post_init__(self) -> None:
         if self.allowed_commands is None:

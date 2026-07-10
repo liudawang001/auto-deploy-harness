@@ -5,6 +5,7 @@ __pycache__/
 .env
 runs/
 memory/*.jsonl
+memory/skill_candidates/
 model_cache/
 queue/
 docs/

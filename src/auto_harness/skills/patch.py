@@ -9,13 +9,17 @@ Key rules:
 - base_skill_sha256 must match current target skill sha256 before apply
 - Secrets, absolute paths, HTTP 200 false success, and privilege escalation are rejected
 - The original skill content is never deleted or overwritten
+- Apply uses file lock + atomic write to prevent concurrent corruption
+- Apply audit is written to history/ alongside rollback copy
 """
 import hashlib
+import json
 import re
 from pathlib import Path
 from typing import Dict
 
 from auto_harness.models.base import write_json
+from auto_harness.utils.atomic import FileLock, atomic_write_text
 from auto_harness.utils.files import ensure_dir
 from auto_harness.utils.time import utc_now_iso
 
@@ -50,6 +54,25 @@ _HTTP_200_SUCCESS = re.compile(
 # Maximum allowed markdown length for a skill patch (prevents LLM from dumping huge content)
 _MAX_MARKDOWN_LENGTH = 10000
 
+# Phrases that indicate a prohibition (do_not context) — these are safe
+_DO_NOT_PHRASES = re.compile(
+    r"(do\s+not\s+mark\s+success\s+on\s+HTTP\s*200\s+alone|"
+    r"do\s+not\s+reuse\s+old\s+trace_id|"
+    r"do\s+not\s+include\s+secrets?|"
+    r"do\s+not\s+(?:allow|use)\s+(?:arbitrary|shell|source\s+edit))",
+    re.IGNORECASE,
+)
+
+
+def _strip_do_not_phrases(text: str) -> str:
+    """Remove 'do not X' phrases from text before security validation.
+
+    These are prohibitions — they're safe patterns that forbid the bad thing.
+    Without stripping, 'Do not mark success on HTTP 200 alone' would falsely
+    trigger the HTTP 200 success rule detector.
+    """
+    return _DO_NOT_PHRASES.sub("", text)
+
 
 class SkillPatchValidator:
     """Validate a skill patch candidate before it can be applied to a skill file."""
@@ -79,26 +102,31 @@ class SkillPatchValidator:
             return {"valid": False, "reasons": reasons, "reject_reasons": reject_reasons}
         reasons.append("markdown length reasonable")
 
+        # Filter out "do not" phrases — they prohibit bad patterns,
+        # not advocate them. Stripping prevents false positives on
+        # "Do not mark success on HTTP 200 alone" etc.
+        filtered = _strip_do_not_phrases(markdown)
+
         # Check for secrets
-        if _SECRET_PATTERNS.search(markdown):
+        if _SECRET_PATTERNS.search(filtered):
             reject_reasons.append("contains secret-like content (api_key, token, password, etc.)")
             return {"valid": False, "reasons": reasons, "reject_reasons": reject_reasons}
         reasons.append("no secrets detected")
 
         # Check for absolute one-off paths
-        if _ABS_PATH_PATTERNS.search(markdown):
+        if _ABS_PATH_PATTERNS.search(filtered):
             reject_reasons.append("contains absolute one-off path (/tmp/, /Users/, C:\\Users)")
             return {"valid": False, "reasons": reasons, "reject_reasons": reject_reasons}
         reasons.append("no absolute paths")
 
         # Check for HTTP 200 false success
-        if _HTTP_200_SUCCESS.search(markdown):
+        if _HTTP_200_SUCCESS.search(filtered):
             reject_reasons.append("contains HTTP 200 as success rule")
             return {"valid": False, "reasons": reasons, "reject_reasons": reject_reasons}
         reasons.append("no HTTP 200 false success")
 
         # Check for privilege escalation
-        if _PRIVILEGE_ESCALATION.search(markdown):
+        if _PRIVILEGE_ESCALATION.search(filtered):
             reject_reasons.append("suggests expanding shell or source edit permissions")
             return {"valid": False, "reasons": reasons, "reject_reasons": reject_reasons}
         reasons.append("no privilege escalation")
@@ -122,6 +150,9 @@ class SkillPatchApplier:
 
     def apply_candidate(self, candidate: Dict, skills_dir: Path) -> Dict:
         """Apply a candidate patch to the target skill.
+
+        Uses file lock + atomic write to prevent concurrent corruption.
+        Writes rollback copy and apply audit before modifying the skill.
 
         Args:
             candidate: Dict with target_skill, base_skill_sha256, patch (section_title, markdown),
@@ -147,60 +178,79 @@ class SkillPatchApplier:
                 "error": "target skill does not exist: %s" % str(target_path),
             }
 
-        # Read current content
-        raw = target_path.read_text(encoding="utf-8")
+        # Acquire file lock for the target skill
+        with FileLock(target_path):
+            # Read current content (under lock)
+            raw = target_path.read_text(encoding="utf-8")
 
-        # Check base sha matches
-        current_sha = _sha256(raw)
-        if base_sha and current_sha != base_sha:
-            return {
-                "status": "base_changed",
-                "candidate_id": candidate_id,
-                "current_sha256": current_sha,
-                "expected_sha256": base_sha,
-                "error": "target skill has been modified since candidate was created",
-            }
+            # Check base sha matches (under lock to prevent TOCTOU)
+            current_sha = _sha256(raw)
+            if base_sha and current_sha != base_sha:
+                return {
+                    "status": "base_changed",
+                    "candidate_id": candidate_id,
+                    "current_sha256": current_sha,
+                    "expected_sha256": base_sha,
+                    "error": "target skill has been modified since candidate was created",
+                }
 
-        # Check marker not already present
-        marker = "auto-harness-skill-evolution:%s" % candidate_id
-        if marker in raw:
-            return {
-                "status": "already_applied",
+            # Check marker not already present
+            marker = "auto-harness-skill-evolution:%s" % candidate_id
+            if marker in raw:
+                return {
+                    "status": "already_applied",
+                    "candidate_id": candidate_id,
+                    "target_skill": str(target_path),
+                }
+
+            # Write rollback copy
+            history_dir = target_path.parent / "history"
+            history_dir.mkdir(parents=True, exist_ok=True)
+            rollback_path = history_dir / ("%s_%s.md" % (
+                utc_now_iso().replace(":", "").replace("-", "").split(".")[0],
+                candidate_id,
+            ))
+            rollback_path.write_text(raw, encoding="utf-8")
+
+            # Apply patch with marker
+            section_title = patch.get("section_title", "Memory Evolution Patch")
+            block = "\n\n<!-- %s -->\n## %s\n%s\n<!-- /%s -->\n" % (
+                marker,
+                section_title,
+                markdown.strip(),
+                marker,
+            )
+            new_raw = raw.rstrip() + block
+
+            # Atomic write the new skill content
+            atomic_write_text(target_path, new_raw)
+
+            new_sha = _sha256(new_raw)
+
+            # Write apply audit
+            audit_path = history_dir / ("%s_%s.apply.json" % (
+                utc_now_iso().replace(":", "").replace("-", "").split(".")[0],
+                candidate_id,
+            ))
+            audit = {
                 "candidate_id": candidate_id,
                 "target_skill": str(target_path),
+                "previous_sha256": current_sha,
+                "new_sha256": new_sha,
+                "rollback_path": str(rollback_path),
+                "applied_at": utc_now_iso(),
             }
+            audit_path.write_text(json.dumps(audit, ensure_ascii=False, indent=2), encoding="utf-8")
 
-        # Write rollback copy
-        history_dir = target_path.parent / "history"
-        history_dir.mkdir(parents=True, exist_ok=True)
-        rollback_path = history_dir / ("%s_%s.md" % (
-            utc_now_iso().replace(":", "").replace("-", "").split(".")[0],
-            candidate_id,
-        ))
-        rollback_path.write_text(raw, encoding="utf-8")
-
-        # Apply patch with marker
-        section_title = patch.get("section_title", "Memory Evolution Patch")
-        block = "\n\n<!-- %s -->\n## %s\n%s\n<!-- /%s -->\n" % (
-            marker,
-            section_title,
-            markdown.strip(),
-            marker,
-        )
-        new_raw = raw.rstrip() + block
-        target_path.write_text(new_raw, encoding="utf-8")
-
-        new_sha = _sha256(new_raw)
-
-        return {
-            "status": "applied",
-            "candidate_id": candidate_id,
-            "target_skill": str(target_path),
-            "previous_sha256": current_sha,
-            "new_sha256": new_sha,
-            "rollback_path": str(rollback_path),
-            "marker": marker,
-        }
+            return {
+                "status": "applied",
+                "candidate_id": candidate_id,
+                "target_skill": str(target_path),
+                "previous_sha256": current_sha,
+                "new_sha256": new_sha,
+                "rollback_path": str(rollback_path),
+                "marker": marker,
+            }
 
 
 def _sha256(text: str) -> str:

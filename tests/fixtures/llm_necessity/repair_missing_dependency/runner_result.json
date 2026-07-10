@@ -1,0 +1,14 @@
+{
+  "status": "failed",
+  "stage": "runner",
+  "summary": "service process exited",
+  "error": "ModuleNotFoundError: No module named 'gradio'",
+  "data": {
+    "diagnosis": {
+      "category": "dependency_missing",
+      "signal": "gradio",
+      "root_cause": "gradio is not installed",
+      "confidence": 0.95
+    }
+  }
+}

@@ -21,6 +21,7 @@ import urllib.parse
 from typing import Dict, List, Optional
 
 from auto_harness.agent_runtime.schemas import PolicyDecision, ToolCall, VERIFY_TOOLS
+from auto_harness.agent_runtime.stage_schemas import ALL_STAGE_TOOLS
 from auto_harness.tools import ToolRegistry
 
 
@@ -64,9 +65,9 @@ class ToolPolicy:
         if not tool_schema:
             return PolicyDecision(allowed=False, reason="tool not found in registry: %s" % name, risk="high")
 
-        # 2. Tool must be a verify tool (this policy only covers verify stage)
-        if name not in VERIFY_TOOLS:
-            return PolicyDecision(allowed=False, reason="tool not allowed for verify stage: %s" % name, risk="high")
+        # 2. Tool must be a verify tool or stage gate tool
+        if name not in VERIFY_TOOLS and name not in ALL_STAGE_TOOLS:
+            return PolicyDecision(allowed=False, reason="tool not allowed: %s" % name, risk="high")
 
         # 3. Agent mode check: planner mode does not execute tools
         if agent_mode == "planner":

@@ -3,10 +3,19 @@
 The shadow evaluator reads the run results and checks whether a candidate's
 recommended tools/actions would have helped or harmed the deployment outcome.
 
+Two evaluation modes:
+1. Artifact overlap mode (evaluate_run): checks if candidate recommended tools
+   overlap with successful agent steps from a prior run.
+2. Planner-only shadow mode (evaluate_candidate_decision): constructs a shadow
+   prompt context from the candidate patch + run observation, calls the planner
+   to generate a would_tool_call, and compares it with the actual tool call.
+   The shadow planner NEVER executes any tool.
+
 Key properties:
 - Shadow evaluation does NOT change real deployment behavior
 - It only reads and compares: candidate recommendations vs actual outcomes
 - Results are written to shadow artifacts for later promotion gating
+- helped_count requires evidence trace support (not just text overlap)
 """
 import json
 from pathlib import Path
@@ -32,6 +41,223 @@ class ShadowSkillEvaluator:
     # Default shadow promotion thresholds
     DEFAULT_HELPED_THRESHOLD = 2
     DEFAULT_HARMFUL_THRESHOLD = 0
+
+    def evaluate_candidate_decision(
+        self,
+        run_dir: Path,
+        candidate_path: Path,
+        observation: dict = None,
+        planner=None,
+    ) -> Dict:
+        """Evaluate a candidate using planner-only shadow decision.
+
+        This is a more rigorous shadow evaluation that:
+        1. Reads candidate.patch.markdown
+        2. Reads the run's agent observation or agent_verify_result
+        3. Constructs a shadow prompt context with candidate skill injected
+        4. Calls planner to generate would_tool_call (NO tool execution)
+        5. Compares would_tool_call with actual executed tool
+        6. Writes candidate decision artifact with executed=false
+
+        Args:
+            run_dir: Path to the run directory.
+            candidate_path: Path to the candidate JSON file.
+            observation: Optional observation dict (stage, frameworks, etc.).
+            planner: Optional VerifyPlanner instance. If None, falls back to
+                     heuristic comparison.
+
+        Returns:
+            Dict with shadow_mode="planner_only", would_tool_call, actual_tool_call,
+            would_help, would_harm, reason, executed=False.
+        """
+        candidate_path = Path(candidate_path)
+        if not candidate_path.exists():
+            return {"status": "failed", "error": "candidate file not found"}
+
+        candidate = json.loads(candidate_path.read_text(encoding="utf-8"))
+        candidate_id = candidate.get("candidate_id", "unknown")
+        patch_markdown = candidate.get("patch", {}).get("markdown", "")
+        reusable_rule = candidate.get("reusable_rule", {})
+
+        # Read actual outcome
+        agent_verify_result = self._read_json(run_dir / "reports" / "agent_verify_result.json")
+        agent_steps = self._read_jsonl(run_dir / "agent_verify_steps.jsonl")
+
+        # Get actual tool call from steps
+        actual_tool_call = self._get_actual_tool_call(agent_steps)
+
+        # Get observation context
+        obs = observation or agent_verify_result or {}
+
+        # Try planner-based shadow decision
+        would_tool_call = None
+        if planner is not None:
+            would_tool_call = self._planner_shadow_decision(
+                planner, obs, patch_markdown, reusable_rule
+            )
+
+        # If no planner or planner failed, fall back to heuristic
+        if would_tool_call is None:
+            would_tool_call = self._heuristic_shadow_decision(
+                reusable_rule, obs
+            )
+
+        # Compare would vs actual
+        would_help = False
+        would_harm = False
+        reason = ""
+
+        if would_tool_call is None:
+            reason = "no shadow decision could be generated"
+        elif actual_tool_call is None:
+            # No actual tool was called — candidate suggests one
+            would_help = True
+            reason = "candidate suggests tool %s where no tool was called" % would_tool_call.get("name", "")
+        else:
+            would_name = would_tool_call.get("name", "")
+            actual_name = actual_tool_call.get("name", "")
+
+            if would_name == actual_name:
+                would_help = True
+                reason = "candidate selects same tool as actual: %s" % would_name
+            elif would_name and actual_name:
+                # Different tools — check if candidate tool is more specific
+                recommended = self._extract_recommended_tools(reusable_rule)
+                if would_name in recommended:
+                    would_help = True
+                    reason = "candidate selects recommended tool %s (actual was %s)" % (would_name, actual_name)
+                else:
+                    reason = "candidate selects %s, actual was %s" % (would_name, actual_name)
+
+        # Check for harm
+        do_items = reusable_rule.get("do", [])
+        for item in do_items:
+            item_lower = str(item).lower()
+            if any(term in item_lower for term in ("bypass trace", "disable verification", "skip regression")):
+                would_harm = True
+                reason = "candidate suggests bypassing trace verification"
+                break
+            if any(term in item_lower for term in ("allow shell", "source edit by default", "arbitrary command")):
+                would_harm = True
+                reason = "candidate suggests expanding permissions"
+                break
+
+        # Evidence trace check: would_help requires evidence support
+        if would_help and not would_harm:
+            if not self._has_evidence_trace_support(obs, agent_verify_result):
+                would_help = False
+                reason = "would_help demoted: no evidence trace support (need final_status=passed + llm_helped + trace_id)"
+
+        result = {
+            "candidate_id": candidate_id,
+            "run_id": run_dir.name if hasattr(run_dir, "name") else str(run_dir),
+            "shadow_mode": "planner_only",
+            "would_tool_call": would_tool_call,
+            "actual_tool_call": actual_tool_call,
+            "would_help": would_help,
+            "would_harm": would_harm,
+            "reason": reason,
+            "executed": False,
+            "evaluated_at": utc_now_iso(),
+        }
+
+        # Write shadow artifact
+        shadow_artifact_path = candidate_path.with_suffix(".shadow.json")
+        existing_shadow = []
+        if shadow_artifact_path.exists():
+            try:
+                existing_shadow = json.loads(shadow_artifact_path.read_text(encoding="utf-8"))
+                if not isinstance(existing_shadow, list):
+                    existing_shadow = []
+            except (json.JSONDecodeError, ValueError):
+                existing_shadow = []
+        existing_shadow.append(result)
+        write_json(shadow_artifact_path, existing_shadow)
+
+        return result
+
+    def _planner_shadow_decision(self, planner, observation: dict, patch_markdown: str, reusable_rule: dict) -> Optional[Dict]:
+        """Call planner with candidate skill injected into context.
+
+        The planner generates a would_tool_call but NO tool is executed.
+        Returns None if planner fails or returns no_action.
+        """
+        # Build shadow observation with candidate skill context
+        shadow_obs = dict(observation)
+        shadow_obs["candidate_skill_patch"] = patch_markdown[:2000]
+        shadow_obs["candidate_reusable_rule"] = reusable_rule
+        shadow_obs["shadow_mode"] = True
+
+        try:
+            from auto_harness.agent_runtime.schemas import VERIFY_TOOLS
+            decision = planner.plan_verify(shadow_obs, allowed_tools=list(VERIFY_TOOLS))
+            if decision.status == "ok" and decision.tool_call:
+                return {
+                    "name": decision.tool_call.name,
+                    "input": decision.tool_call.input or {},
+                }
+        except Exception:
+            pass
+
+        return None
+
+    def _heuristic_shadow_decision(self, reusable_rule: dict, observation: dict) -> Optional[Dict]:
+        """Fallback heuristic: extract recommended tool from reusable_rule.do.
+
+        Returns a would_tool_call dict or None.
+        """
+        recommended = self._extract_recommended_tools(reusable_rule)
+        if recommended:
+            return {"name": recommended[0], "input": {}}
+        return None
+
+    def _get_actual_tool_call(self, steps: List[Dict]) -> Optional[Dict]:
+        """Extract the first successful tool call from agent steps."""
+        if not isinstance(steps, list):
+            return None
+        for step in steps:
+            if not isinstance(step, dict):
+                continue
+            if step.get("tool_name"):
+                return {
+                    "name": step["tool_name"],
+                    "input": step.get("tool_input", {}),
+                }
+        return None
+
+    def _has_evidence_trace_support(self, observation: dict, agent_verify_result: Optional[Dict]) -> bool:
+        """Check if there is evidence trace support for would_help.
+
+        Requirements:
+        - agent_verify_result.final_status == passed (or observation has passed status)
+        - llm_helped == true
+        - evidence contains current trace_id
+
+        This prevents would_help from being true based on text overlap alone.
+        """
+        result = agent_verify_result or {}
+
+        # Check final status
+        final_status = result.get("final_status", observation.get("status", ""))
+        if final_status not in ("passed", "pass", "success"):
+            return False
+
+        # Check llm_helped
+        llm_helped = result.get("llm_helped", False)
+        if not llm_helped:
+            return False
+
+        # Check for trace_id in evidence
+        evidence_paths = result.get("evidence_paths", [])
+        trace_id = result.get("trace_id", observation.get("trace_id", ""))
+        if trace_id and evidence_paths:
+            return True
+
+        # If strong_verify_pass is true, that's also evidence
+        if result.get("strong_verify_pass", False):
+            return True
+
+        return False
 
     def evaluate_run(self, run_dir: Path, candidate_path: Path, active_context: dict = None) -> Dict:
         """Evaluate a candidate against a single run in shadow mode.
@@ -104,6 +330,13 @@ class ShadowSkillEvaluator:
                     reason = "candidate recommendations align with successful outcomes"
                 else:
                     reason = "candidate matched but no overlap with successful tools"
+
+        # Evidence trace check: would_help requires evidence support
+        # This prevents would_help from being true based on text overlap alone.
+        if would_help and not would_harm:
+            if not self._has_evidence_trace_support(active_context or {}, agent_verify_result):
+                would_help = False
+                reason = "would_help demoted: no evidence trace support (need final_status=passed + llm_helped + trace_id)"
 
         # Compute active skill sha for audit
         active_skill_sha = ""

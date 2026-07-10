@@ -50,6 +50,17 @@ class AgentLoopController:
 
         agent_diagnosis = self._maybe_diagnose(task_id, stage, result, analysis, runtime_policy, run_dir)
         repair_plan = self.repair_planner.propose(stage, result, analysis)
+        # Repair Actuator Gate: LLM proposes repair tool_call through decision gate
+        if self._repair_gate_enabled():
+            repair_gate_result = self._apply_repair_gate(task_id, stage, result, analysis, run_dir)
+            if repair_gate_result and repair_gate_result.get("gate_decision_status") == "ok":
+                # Merge gate repair actions into repair plan
+                gate_actions = repair_gate_result.get("actions", [])
+                if gate_actions:
+                    existing = list(repair_plan.get("actions", []))
+                    existing.extend(gate_actions)
+                    repair_plan["actions"] = existing
+                    repair_plan["repair_source"] = "llm_repair_gate"
         approval = self.repair_loop.load_approval(run_dir)
         policy_result = self.repair_policy.check(repair_plan, runtime_policy, operator_approval=approval)
         effective_policy = self.repair_loop.gate(run_dir, stage, entry, repair_plan, policy_result, last_safe_stage)
@@ -115,6 +126,79 @@ class AgentLoopController:
             and self.config.agent_enable_repair_actions
             and bool(getattr(runtime_policy, "allow_dependency_install", False))
         )
+
+    def _repair_gate_enabled(self) -> bool:
+        return (
+            self.config.agent_mode in ("planner", "gated_actor")
+            and getattr(self.config, "agent_enable_repair_gate", False)
+        )
+
+    def _apply_repair_gate(self, task_id: str, stage: str, result, analysis: Dict, run_dir: Path) -> Dict:
+        """Apply repair decision gate: LLM proposes repair action through decision gate."""
+        from auto_harness.agent_runtime.decision_gate import AgentDecisionGate
+        from auto_harness.agent_runtime.stage_schemas import REPAIR_TOOLS
+
+        data = result.data if isinstance(result.data, dict) else {}
+        diagnosis = data.get("diagnosis", {}) if isinstance(data.get("diagnosis"), dict) else {}
+        agent_diagnosis = data.get("agent_diagnosis", {}) if isinstance(data.get("agent_diagnosis"), dict) else {}
+
+        observation = {
+            "stage": "repair",
+            "failure": {
+                "stage": stage,
+                "status": result.status,
+                "error": str(result.error or "")[:2000],
+                "summary": str(result.summary or "")[:1000],
+            },
+            "diagnosis": agent_diagnosis or diagnosis,
+            "previous_repairs": [],
+            "constraints": [
+                "Only propose repair actions allowed by policy.",
+                "Do not edit source files directly.",
+                "Do not include secret values.",
+                "Resume from a safe stage after applying repair.",
+            ],
+        }
+
+        provider = self.provider_factory() if callable(self.provider_factory) else None
+        if not provider:
+            return {}
+
+        gate = AgentDecisionGate(provider=provider)
+        gate_result = gate.decide(
+            stage="repair",
+            observation=observation,
+            allowed_tools=list(REPAIR_TOOLS),
+            mode=self.config.agent_mode,
+            run_dir=run_dir,
+            max_steps=getattr(self.config, "agent_decision_gate_max_steps", 2),
+        )
+
+        # Build repair actions from gate result
+        actions = []
+        if gate_result.tool_call and gate_result.execution.get("applied"):
+            tc = gate_result.tool_call
+            if tc.get("name") == "apply_repair":
+                actions.append({
+                    "type": tc.get("input", {}).get("action_type", "install_package"),
+                    "reason": gate_result.hypothesis,
+                    "payload": tc.get("input", {}),
+                    "source": "llm_repair_gate",
+                })
+            elif tc.get("name") == "apply_dependency_constraint":
+                actions.append({
+                    "type": "install_package",
+                    "reason": gate_result.hypothesis,
+                    "payload": tc.get("input", {}),
+                    "source": "llm_repair_gate",
+                })
+
+        return {
+            "gate_decision_status": gate_result.decision_status,
+            "gate_policy_allowed": gate_result.policy.get("allowed", False),
+            "gate_state_changed": gate_result.state_delta.get("changed", False),
+            "actions": actions,
+        }
 
     def _env_context(self, analysis: Dict) -> Dict:
         env_solution = analysis.get("env_solution") if isinstance(analysis.get("env_solution"), dict) else {}

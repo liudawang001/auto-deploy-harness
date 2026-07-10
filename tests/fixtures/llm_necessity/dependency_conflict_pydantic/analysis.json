@@ -1,0 +1,18 @@
+{
+  "frameworks": ["gradio"],
+  "install_plan": [["python3", "-m", "pip", "install", "-r", "requirements.txt"]],
+  "env_solution": {
+    "backend": "venv",
+    "python": "3.10",
+    "constraints": [],
+    "constraint_reasons": [],
+    "risk_reasons": ["old or unpinned gradio project detected; pydantic v2 can break legacy gradio stacks"]
+  },
+  "run_candidates": [
+    {
+      "id": "cand_0",
+      "cmd": ["python", "app.py"],
+      "expected_port": 7860
+    }
+  ]
+}

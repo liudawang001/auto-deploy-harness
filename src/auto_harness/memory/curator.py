@@ -44,6 +44,20 @@ _HTTP_200_SUCCESS = re.compile(
     re.IGNORECASE,
 )
 
+# Phrases that indicate a prohibition — safe, should not trigger detectors
+_DO_NOT_PHRASES = re.compile(
+    r"(do\s+not\s+mark\s+success\s+on\s+HTTP\s*200\s+alone|"
+    r"do\s+not\s+reuse\s+old\s+trace_id|"
+    r"do\s+not\s+include\s+secrets?|"
+    r"do\s+not\s+(?:allow|use)\s+(?:arbitrary|shell|source\s+edit))",
+    re.IGNORECASE,
+)
+
+
+def _strip_do_not_phrases(text: str) -> str:
+    """Remove 'do not X' prohibition phrases before security validation."""
+    return _DO_NOT_PHRASES.sub("", text)
+
 # Minimum required top-level keys in a valid curator response
 _REQUIRED_KEYS = {"status", "pattern", "reusable_rule", "skill_patch"}
 
@@ -179,31 +193,33 @@ class MemoryCurator:
         """
         markdown = data.get("skill_patch", {}).get("markdown", "")
 
-        # Check for secrets
-        if _SECRET_PATTERNS.search(markdown):
-            return {"valid": False, "reason": "secret-like content in skill_patch markdown"}
+        # Strip "do not X" phrases from markdown — they are prohibitions,
+        # not recommendations. Without this, "Do not mark success on HTTP 200
+        # alone" would falsely trigger the HTTP 200 success detector.
+        filtered = _strip_do_not_phrases(markdown)
 
-        # Check for absolute paths
-        if _ABS_PATH_PATTERNS.search(markdown):
-            return {"valid": False, "reason": "absolute one-off path in skill_patch markdown"}
-
-        # Check for HTTP 200 false success rule
-        if _HTTP_200_SUCCESS.search(markdown):
-            return {"valid": False, "reason": "HTTP 200 alone as success rule in skill_patch markdown"}
-
-        # Check for privilege escalation
-        if _PRIVILEGE_ESCALATION.search(markdown):
-            return {"valid": False, "reason": "privilege escalation suggestion in skill_patch markdown"}
-
-        # Also check the reusable_rule do_not section for bypass suggestions
+        # Also strip reusable_rule.do_not items
         rule = data.get("reusable_rule", {})
         do_not_items = rule.get("do_not", [])
         if isinstance(do_not_items, list):
             for item in do_not_items:
-                item_str = str(item)
-                # do_not items are OK — they say what NOT to do
-                # But if they suggest the thing itself (not prohibiting), reject
-                pass  # do_not items are inherently safe — they prohibit
+                filtered = filtered.replace(str(item), "")
+
+        # Check for secrets
+        if _SECRET_PATTERNS.search(filtered):
+            return {"valid": False, "reason": "secret-like content in skill_patch markdown"}
+
+        # Check for absolute paths
+        if _ABS_PATH_PATTERNS.search(filtered):
+            return {"valid": False, "reason": "absolute one-off path in skill_patch markdown"}
+
+        # Check for HTTP 200 false success rule (only in positive assertions, not do_not)
+        if _HTTP_200_SUCCESS.search(filtered):
+            return {"valid": False, "reason": "HTTP 200 alone as success rule in skill_patch markdown"}
+
+        # Check for privilege escalation
+        if _PRIVILEGE_ESCALATION.search(filtered):
+            return {"valid": False, "reason": "privilege escalation suggestion in skill_patch markdown"}
 
         return {"valid": True, "reason": ""}
 
