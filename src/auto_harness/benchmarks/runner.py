@@ -1437,7 +1437,7 @@ class BenchmarkRunner:
                 and summary.get("task_count") == 1
                 and summary.get("benchmark", {}).get("case_count") == 1
                 and "dashboard-demo" in html
-                and "AI-Auto-Harness Dashboard" in html
+                and "auto-deploy-harness Dashboard" in html
             )
         return self._result(case, "passed" if ok else "failed", "static dashboard export verified")
 
@@ -1478,7 +1478,7 @@ class BenchmarkRunner:
                 health.get("status") == "ok"
                 and summary.get("task_count") == 1
                 and "dashboard-http-demo" in html_body
-                and "AI-Auto-Harness Dashboard" in html_body
+                and "auto-deploy-harness Dashboard" in html_body
             )
         return self._result(case, "passed" if ok else "failed", "dashboard HTTP server verified")
 

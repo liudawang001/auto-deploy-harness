@@ -1,6 +1,6 @@
-# AI-Auto-Harness
+# auto-deploy-harness
 
-AI-Auto-Harness 是一个面向 AI 开源 demo 项目的自动部署与验证 Agent。
+auto-deploy-harness 是一个面向 AI 开源 demo 项目的自动部署与验证 Agent。
 
 项目采用“确定性 Python 编排 + 受控 Agent 执行”的架构：
 
@@ -8,6 +8,8 @@ AI-Auto-Harness 是一个面向 AI 开源 demo 项目的自动部署与验证 Ag
 - Claude Code headless 或其他 executor 负责项目阅读、日志诊断等不确定任务。
 - 讯飞 Spark 等 LLM provider 通过统一接口接入。
 - `verify` 是证据驱动的，不能把端口开放或 HTTP 200 直接当成部署成功。
+
+项目发布名和主命令为 `auto-deploy-harness`。为避免破坏历史 import 和已有脚本，Python 包名继续保留为 `auto_harness`，旧命令 `auto-harness` 也继续兼容。
 
 ## 当前 MVP
 
@@ -180,7 +182,7 @@ repair 阶段会区分 LLM 提议和 Python 裁决的 rerun stage：`rerun_from_
 
 ## LLM-driven Agent Mode
 
-AI-Auto-Harness 支持 gated LLM-driven deployment mode。LLM 不直接执行 shell 命令，只能提出 typed tool call，如选择 runner candidate、选择 verify probe 或提出 repair。Python 通过 schema、policy、command allowlist 和 evidence gate 校验每个 action。
+auto-deploy-harness 支持 gated LLM-driven deployment mode。LLM 不直接执行 shell 命令，只能提出 typed tool call，如选择 runner candidate、选择 verify probe 或提出 repair。Python 通过 schema、policy、command allowlist 和 evidence gate 校验每个 action。
 
 ### 运行 Primary Loop E2E
 

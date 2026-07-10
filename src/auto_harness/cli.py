@@ -22,7 +22,7 @@ from auto_harness.utils.time import compact_timestamp
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="auto-harness")
+    parser = argparse.ArgumentParser(prog="auto-deploy-harness")
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("init", help="create local run directories")

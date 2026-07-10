@@ -1,4 +1,3 @@
-"""AI-Auto-Harness package."""
+"""auto-deploy-harness package."""
 
 __version__ = "0.1.0"
-

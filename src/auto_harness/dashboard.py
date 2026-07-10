@@ -149,7 +149,7 @@ class DashboardGenerator:
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>AI-Auto-Harness Dashboard</title>
+  <title>auto-deploy-harness Dashboard</title>
   <style>
     body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 0; color: #1f2937; background: #f7f7f5; }
     header { padding: 24px 32px 16px; background: #ffffff; border-bottom: 1px solid #e5e7eb; }
@@ -174,7 +174,7 @@ class DashboardGenerator:
 </head>
 <body>
   <header>
-    <h1>AI-Auto-Harness Dashboard</h1>
+    <h1>auto-deploy-harness Dashboard</h1>
     <div class="muted">Generated at %s from <code>%s</code></div>
     <div class="metrics">%s</div>
   </header>

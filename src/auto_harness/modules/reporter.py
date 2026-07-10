@@ -10,7 +10,7 @@ class ReportGenerator:
         report_path = run_dir / "reports" / "report.md"
         report_path.parent.mkdir(parents=True, exist_ok=True)
         lines = [
-            "# AI-Auto-Harness Deployment Report",
+            "# auto-deploy-harness Deployment Report",
             "",
             "## Project",
             "",

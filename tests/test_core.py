@@ -2891,7 +2891,7 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(health["status"], "ok")
             self.assertEqual(summary["task_count"], 1)
             self.assertIn("dashboard-http-demo", html_body)
-            self.assertIn("AI-Auto-Harness Dashboard", html_body)
+            self.assertIn("auto-deploy-harness Dashboard", html_body)
 
     def test_queue_cli_submits_lists_and_runs_dry_run_job(self):
         with tempfile.TemporaryDirectory() as tmp:
