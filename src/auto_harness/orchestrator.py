@@ -6,6 +6,7 @@ from typing import Dict
 
 from auto_harness.agent import AgentDecisionEngine, AgentDiagnoser, AgentLoopController, AgentMetricsCollector, AgentObservation, AgentTraceWriter, AgentVerifyPlanner
 from auto_harness.agent_runtime import AgentContributionAnalyzer, AgentGoal, AgentRuntime
+from auto_harness.agent_runtime.loop import DeploymentAgentLoop
 from auto_harness.config import HarnessConfig
 from auto_harness.agents.claude_code import ClaudeCodeExecutor
 from auto_harness.assets import HuggingFaceDownloader, ModelCache, ModelScopeDownloader
@@ -120,6 +121,7 @@ class TaskRunner:
         return self.run_existing(spec.task_id, dry_run=dry_run)
 
     def run_existing(self, task_id: str, dry_run: bool = True, start_stage: str = "analyze") -> str:
+        # Run deterministic pipeline first
         current_start_stage = start_stage
         max_iterations = int(self.config.agent_max_loop_iterations or 0)
         for iteration in range(max_iterations + 1):
@@ -129,7 +131,52 @@ class TaskRunner:
                 break
             self.store.events(task_id).append("task", "agent_auto_resume", decision)
             current_start_stage = decision["start_stage"]
+
+        # If agent runtime loop is enabled, run the unified AgentLoop
+        if self.config.agent_enable_runtime_loop and self.config.agent_mode == "gated_actor":
+            self._run_agent_runtime_loop(task_id, dry_run=dry_run)
+
         return task_id
+
+    def _run_agent_runtime_loop(self, task_id: str, dry_run: bool = True) -> None:
+        """Run the unified DeploymentAgentLoop after deterministic pipeline."""
+        run_dir = self.store.run_dir(task_id)
+        repo_dir = run_dir / "workspace" / "repo"
+
+        # Load pipeline results
+        pipeline_path = run_dir / "reports" / "pipeline_results.json"
+        initial_results = {}
+        if pipeline_path.exists():
+            try:
+                initial_results = read_json(pipeline_path)
+            except (OSError, ValueError):
+                pass
+
+        # Create provider
+        provider = self._create_agent_provider()
+
+        # Create and run the agent loop
+        loop = DeploymentAgentLoop(
+            provider=provider,
+            config=self.config,
+            max_iterations=self.config.agent_runtime_loop_max_iterations,
+            stop_on_verify_pass=self.config.agent_runtime_loop_stop_on_verify_pass,
+        )
+
+        result = loop.run(
+            task_id=task_id,
+            run_dir=run_dir,
+            repo_dir=repo_dir,
+            initial_results=initial_results,
+            dry_run=dry_run,
+        )
+
+        # Write agent loop result
+        write_json(run_dir / "reports" / "agent_loop_result.json", result)
+        self.store.events(task_id).append("task", "agent_runtime_loop_completed", {
+            "stop_reason": result.get("stop_reason", ""),
+            "iteration_count": result.get("iteration_count", 0),
+        })
 
     def _run_existing_once(self, task_id: str, dry_run: bool = True, start_stage: str = "analyze") -> str:
         task = self.store.load_task(task_id)
@@ -175,6 +222,9 @@ class TaskRunner:
         if self._plan_gate_enabled() and should_run("analyze"):
             self._apply_plan_gate(task_id, effective_analysis, results, run_dir, revision=False)
 
+        # Load plan hints for subsequent stages
+        plan_hints = self._load_plan_hints(run_dir)
+
         if should_run("resource_plan"):
             resource_context = self._stage_context("resource_plan", effective_analysis)
             resource_result = ResourcePlanner().plan(repo_dir, effective_analysis)
@@ -188,6 +238,7 @@ class TaskRunner:
 
         if should_run("env_solve"):
             env_solve_context = self._stage_context("env_solve", effective_analysis)
+            env_solve_hints = plan_hints.get("stage_hints", {}).get("env_solve", {})
             env_solve_result = EnvSolveModule(
                 env_backend=self.config.env_backend,
                 conda_envs_dir=self.config.conda_envs_dir,
@@ -195,7 +246,7 @@ class TaskRunner:
                 conda_allowed_channels=self.config.conda_allowed_channels,
                 conda_python_default=self.config.conda_python_default,
                 torch_cuda_preference=self.config.torch_cuda_preference,
-            ).solve(repo_dir, effective_analysis, resource_data)
+            ).solve(repo_dir, effective_analysis, resource_data, stage_hints=env_solve_hints)
             self._attach_context(env_solve_result, env_solve_context)
             results["env_solve"] = to_plain(env_solve_result)
             self._save_stage(task_id, "env_solve", env_solve_result)
@@ -252,6 +303,7 @@ class TaskRunner:
             # Runner Decision Gate: LLM selects best candidate before deterministic execution
             if self._runner_gate_enabled():
                 deploy_analysis = self._apply_runner_gate(task_id, deploy_analysis, repo_dir, run_dir)
+            runner_hints = plan_hints.get("stage_hints", {}).get("runner", {})
             runner_result = RunnerModule().run(
                 repo_dir,
                 deploy_analysis,
@@ -262,6 +314,7 @@ class TaskRunner:
                 docker_network=self.config.docker_network,
                 docker_gpus=self.config.docker_gpus,
                 docker_model_cache_dir=self._docker_model_cache_dir(),
+                stage_hints=runner_hints,
             )
             self._attach_context(runner_result, runner_context)
             results["runner"] = to_plain(runner_result)
@@ -274,12 +327,13 @@ class TaskRunner:
         verify_context = self._stage_context("verify", deploy_analysis)
         verify_trace_writer = self._agent_trace_writer(run_dir)
         agent_verify_config = self._agent_verify_config()
+        verify_hints = plan_hints.get("stage_hints", {}).get("verify", {})
         verify_result = VerifyModule(
             stage_context=verify_context,
             progress_callback=lambda progress: self.store.update_stage(task_id, "verify", "running_verify", progress=progress),
             verify_planner=self._agent_verify_planner(verify_trace_writer) if self._agent_verify_planner_enabled() else None,
             agent_verify_config=agent_verify_config,
-        ).verify(run_dir, deploy_analysis, runner_data)
+        ).verify(run_dir, deploy_analysis, runner_data, stage_hints=verify_hints)
         self._attach_repair_overlay(verify_result, repair_overlay)
         results["verify"] = to_plain(verify_result)
         self._save_stage(task_id, "verify", verify_result)
@@ -516,6 +570,10 @@ class TaskRunner:
         if self.config.agent_provider == "xunfei":
             return XunfeiSparkProvider()
         return MockLLMProvider()
+
+    def _create_agent_provider(self):
+        """Create LLM provider for the agent runtime loop."""
+        return self._agent_provider()
 
     def _agent_trace_writer(self, run_dir: Path) -> AgentTraceWriter:
         return AgentTraceWriter(run_dir / "logs" / "agent_calls")
@@ -870,6 +928,35 @@ class TaskRunner:
         analysis = results.get("analyze", {}).get("data", {}) if isinstance(results.get("analyze"), dict) else {}
 
         self._apply_plan_gate(task_id, analysis, results, run_dir, revision=True)
+
+    def _load_plan_hints(self, run_dir: Path) -> Dict:
+        """Load plan hints from agent_plan_initial.json or agent_strategy.json.
+
+        Returns dict with stage_hints and deployment_strategy.
+        """
+        plan_path = run_dir / "reports" / "agent_strategy.json"
+        if not plan_path.exists():
+            plan_path = run_dir / "agent_plan_initial.json"
+        if not plan_path.exists():
+            return {"stage_hints": {}, "deployment_strategy": ""}
+        try:
+            plan = read_json(plan_path)
+            stage_hints = {}
+            # Extract stage_hints from stage_plan
+            for item in plan.get("stage_plan", []):
+                stage = item.get("stage", "")
+                hints = item.get("hints", {})
+                if stage and hints:
+                    stage_hints[stage] = hints
+            # Also check direct stage_hints field
+            if "stage_hints" in plan:
+                stage_hints.update(plan["stage_hints"])
+            return {
+                "stage_hints": stage_hints,
+                "deployment_strategy": plan.get("deployment_strategy", ""),
+            }
+        except (OSError, ValueError):
+            return {"stage_hints": {}, "deployment_strategy": ""}
 
         # Tag the revision with source stage
         if revisions_path.exists():

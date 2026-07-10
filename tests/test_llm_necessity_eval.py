@@ -120,6 +120,32 @@ class TestLLMNecessityEvaluator(unittest.TestCase):
         self.assertEqual(result["status"], "failed")
         self.assertIn("not found", result["error"])
 
+    def test_generate_report_from_manifest_uses_llm_necessity_evaluator(self):
+        """generate_report_from_manifest must use LLMNecessityEvaluator, not LLMEvaluator."""
+        from auto_harness.evals.llm_necessity import generate_report_from_manifest
+        manifest_path = Path(self.tmpdir) / "manifest.json"
+        manifest_path.write_text(json.dumps({
+            "version": "1.0",
+            "cases": [
+                {
+                    "case_id": "test_case",
+                    "target_gate": "runner",
+                    "fixture_dir": "tests/fixtures/llm_necessity/wrong_default_entrypoint",
+                    "baseline_expectation": {"status": "failed"},
+                    "agent_expectation": {
+                        "status": "passed",
+                        "llm_decision": "select_runner_candidate",
+                        "state_transition": "runner.failed -> runner.passed",
+                    },
+                },
+            ],
+        }), encoding="utf-8")
+        output_path = Path(self.tmpdir) / "report.json"
+        report = generate_report_from_manifest(str(manifest_path), str(output_path))
+        self.assertEqual(report["status"], "completed")
+        self.assertEqual(report["case_count"], 1)
+        self.assertTrue(report["summary"]["llm_necessity_proven"])
+
     def test_summary_counts(self):
         results = [
             {"case_id": "a", "llm_required": True, "llm_helped": True, "fixture_exists": True},

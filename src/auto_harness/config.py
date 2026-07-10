@@ -79,6 +79,10 @@ class HarnessConfig:
     agent_enable_repair_gate: bool = False
     agent_decision_gate_max_steps: int = 2
     agent_llm_required_eval: bool = False
+    # Agent runtime loop configuration
+    agent_enable_runtime_loop: bool = False
+    agent_runtime_loop_max_iterations: int = 5
+    agent_runtime_loop_stop_on_verify_pass: bool = True
 
     def __post_init__(self) -> None:
         if self.allowed_commands is None:

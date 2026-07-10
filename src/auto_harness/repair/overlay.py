@@ -69,13 +69,15 @@ class RepairOverlay:
     def _merge_verify_hints(self, base_hint: Dict, hints: List[Dict]) -> Dict:
         merged = deepcopy(base_hint)
         for hint in hints:
-            if "request" in hint and isinstance(hint["request"], dict):
+            # Unwrap verify_hint key if present (from normalizer)
+            actual = hint.get("verify_hint") if isinstance(hint.get("verify_hint"), dict) else hint
+            if "request" in actual and isinstance(actual["request"], dict):
                 request = merged.get("request") if isinstance(merged.get("request"), dict) else {}
-                request.update(hint["request"])
+                request.update(actual["request"])
                 merged["request"] = request
             for key in ("endpoint", "service_type"):
-                if hint.get(key):
-                    merged[key] = hint[key]
+                if actual.get(key):
+                    merged[key] = actual[key]
         return merged
 
     def _valid_commands(self, commands: List) -> List[List[str]]:

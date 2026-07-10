@@ -37,6 +37,22 @@ from auto_harness.utils.time import utc_now_iso
 
 
 # ------------------------------------------------------------------
+# Helpers
+# ------------------------------------------------------------------
+
+def format_dependency_constraint(package: str, version_spec: str) -> str:
+    """Format a dependency constraint in canonical form: package + version_spec.
+
+    Examples:
+        format_dependency_constraint("pydantic", "<2") -> "pydantic<2"
+        format_dependency_constraint("numpy", "<2") -> "numpy<2"
+        format_dependency_constraint("torch", "==2.3.0") -> "torch==2.3.0"
+        format_dependency_constraint("pydantic", "") -> "pydantic"
+    """
+    return "%s%s" % (package, version_spec) if version_spec else package
+
+
+# ------------------------------------------------------------------
 # Stage-specific policy validators
 # ------------------------------------------------------------------
 
@@ -499,6 +515,13 @@ class AgentDecisionGate:
             if exec_result.get("executed") or exec_result.get("applied"):
                 break
 
+        # Compute llm_helped: true only when LLM decision was accepted, policy allowed, and state changed
+        result.llm_helped = (
+            result.decision_status == "ok"
+            and result.policy.get("allowed", False)
+            and (result.execution.get("executed") or result.execution.get("applied"))
+        )
+
         # Write gate result artifact
         artifact_writer.write_gate_result(stage, result)
         return result
@@ -685,7 +708,7 @@ class AgentDecisionGate:
             existing = ""
             if constraints_path.exists():
                 existing = constraints_path.read_text(encoding="utf-8")
-            line = "%s%s" % (constraint["version_spec"], constraint["package"])
+            line = format_dependency_constraint(constraint["package"], constraint["version_spec"])
             constraints_path.write_text(existing + line + "\n", encoding="utf-8")
             return {
                 "applied": True,

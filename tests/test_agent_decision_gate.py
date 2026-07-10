@@ -385,6 +385,72 @@ class TestAgentDecisionGate(unittest.TestCase):
         )
         self.assertEqual(result.decision_status, "no_action")
 
+    def test_llm_helped_true_when_decision_applied(self):
+        """llm_helped should be True when LLM decision was accepted, policy allowed, and applied."""
+        provider = self._make_mock_provider({
+            "status": "ok",
+            "hypothesis": "cand_1 is better",
+            "confidence": 0.8,
+            "tool_call": {"name": "select_runner_candidate", "input": {"candidate_id": "cand_1"}},
+            "expected_observation": "reordered",
+        })
+        gate = AgentDecisionGate(provider=provider)
+        obs = {"run_candidates": [
+            {"id": "cand_0", "cmd": ["python", "app.py"]},
+            {"id": "cand_1", "cmd": ["python", "gradio_app.py"]},
+        ]}
+        result = gate.decide(
+            stage="runner",
+            observation=obs,
+            allowed_tools=list(RUNNER_TOOLS),
+            mode="gated_actor",
+            run_dir=self.run_dir,
+        )
+        self.assertTrue(result.llm_helped, "llm_helped should be True when decision is applied")
+
+    def test_llm_helped_false_when_planner_mode(self):
+        """llm_helped should be False in planner mode (no execution)."""
+        provider = self._make_mock_provider({
+            "status": "ok",
+            "hypothesis": "cand_1 is better",
+            "confidence": 0.8,
+            "tool_call": {"name": "select_runner_candidate", "input": {"candidate_id": "cand_1"}},
+            "expected_observation": "reordered",
+        })
+        gate = AgentDecisionGate(provider=provider)
+        obs = {"run_candidates": [
+            {"id": "cand_0", "cmd": ["python", "app.py"]},
+            {"id": "cand_1", "cmd": ["python", "gradio_app.py"]},
+        ]}
+        result = gate.decide(
+            stage="runner",
+            observation=obs,
+            allowed_tools=list(RUNNER_TOOLS),
+            mode="planner",
+            run_dir=self.run_dir,
+        )
+        self.assertFalse(result.llm_helped, "llm_helped should be False in planner mode")
+
+    def test_llm_helped_false_when_policy_rejected(self):
+        """llm_helped should be False when policy rejects the action."""
+        provider = self._make_mock_provider({
+            "status": "ok",
+            "hypothesis": "test",
+            "confidence": 0.5,
+            "tool_call": {"name": "select_runner_candidate", "input": {"candidate_id": "cand_99"}},
+            "expected_observation": "none",
+        })
+        gate = AgentDecisionGate(provider=provider)
+        obs = {"run_candidates": [{"id": "cand_0", "cmd": ["python", "app.py"]}]}
+        result = gate.decide(
+            stage="runner",
+            observation=obs,
+            allowed_tools=list(RUNNER_TOOLS),
+            mode="gated_actor",
+            run_dir=self.run_dir,
+        )
+        self.assertFalse(result.llm_helped, "llm_helped should be False when policy rejects")
+
 
 class TestGateArtifactWriter(unittest.TestCase):
     """Tests for GateArtifactWriter."""

@@ -108,6 +108,16 @@ class ReportGenerator:
                 "- Agent artifacts: `agent_steps.jsonl`, `agent_state.json`, `agent_plan.json`, `agent_plan_revisions.jsonl`",
                 "",
             ])
+        llm_required_evidence = self._read_optional(run_dir / "reports" / "llm_required_evidence.json")
+        if isinstance(llm_required_evidence, dict) and llm_required_evidence:
+            lines.extend([
+                "## LLM Required Evidence",
+                "",
+                "- Baseline status: `%s`" % llm_required_evidence.get("baseline_status", ""),
+                "- Agent status: `%s`" % llm_required_evidence.get("agent_status", ""),
+                "- LLM required: `%s`" % str(bool(llm_required_evidence.get("llm_required"))).lower(),
+                "",
+            ])
         verified_memory = self._read_optional(run_dir / "reports" / "verified_memory.json")
         if isinstance(verified_memory, dict):
             lines.extend([

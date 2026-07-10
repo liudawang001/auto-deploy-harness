@@ -146,7 +146,7 @@ class LLMNecessityEvaluator:
 
 def generate_report_from_manifest(manifest_path: str, output_path: str = None) -> Dict:
     """Convenience function for CLI integration."""
-    evaluator = LLMEvaluator()
+    evaluator = LLMNecessityEvaluator()
     return evaluator.evaluate_manifest(
         Path(manifest_path),
         Path(output_path) if output_path else None,

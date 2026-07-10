@@ -12,3 +12,4 @@ class ToolSchema:
     input_schema: Dict = field(default_factory=dict)
     output_schema: Dict = field(default_factory=dict)
     success_signal: str = ""
+    category: str = "read_only"  # read_only | state_delta | execution

@@ -28,10 +28,16 @@ class RunnerModule:
         docker_network: str = "bridge",
         docker_gpus: str = "none",
         docker_model_cache_dir: str = "",
+        stage_hints: Dict = None,
     ) -> StageResult:
         candidates: List[Dict] = analysis.get("run_candidates", [])
         if not candidates:
             return StageResult("runner", "uncertain", "no run candidate detected", {"run_candidates": []})
+        # Apply plan hints: prefer_entrypoint_patterns for candidate ordering
+        hints = stage_hints or {}
+        prefer_patterns = hints.get("prefer_entrypoint_patterns", [])
+        if prefer_patterns:
+            candidates = self._reorder_candidates_by_hints(candidates, prefer_patterns)
         candidate = dict(candidates[0])
         candidate["env_solution"] = analysis.get("env_solution") if isinstance(analysis.get("env_solution"), dict) else {}
         effective_candidate, sandbox = self._effective_candidate(
@@ -107,6 +113,24 @@ class RunnerModule:
             except OSError:
                 data["diagnosis"] = self.log_classifier.classify("")
         return StageResult("runner", status, "service process started" if status == "passed" else "service process exited", data)
+
+    def _reorder_candidates_by_hints(self, candidates: List[Dict], prefer_patterns: List[str]) -> List[Dict]:
+        """Reorder candidates based on plan hints.
+
+        Candidates matching prefer_entrypoint_patterns get boosted to the front.
+        """
+        if not prefer_patterns:
+            return candidates
+
+        matched = []
+        unmatched = []
+        for c in candidates:
+            cmd = " ".join(c.get("cmd", []))
+            if any(pattern in cmd for pattern in prefer_patterns):
+                matched.append(c)
+            else:
+                unmatched.append(c)
+        return matched + unmatched
 
     def _candidate_selection(self, candidate: Dict) -> Dict:
         return {

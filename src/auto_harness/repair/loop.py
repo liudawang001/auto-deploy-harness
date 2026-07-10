@@ -6,14 +6,18 @@ from auto_harness.utils.time import utc_now_iso
 
 
 class RepairLoopController:
+    # Safe stages for repair resume (document Phase 7.4)
     SAFE_RERUN_STAGES = (
-        "analyze",
-        "resource_plan",
-        "env_solve",
         "env_deploy",
         "model_prepare",
         "runner",
         "verify",
+    )
+    # Legacy stages that were previously allowed but are now forbidden
+    FORBIDDEN_RERUN_STAGES = (
+        "analyze",
+        "resource_plan",
+        "report",
     )
 
     def __init__(self, max_attempts: int = 2) -> None:
@@ -99,13 +103,21 @@ class RepairLoopController:
         return self._read_optional(run_dir / "repairs" / "operator_approval.json") or {}
 
     def _effective_rerun_from(self, requested: str, stage: str, last_safe_stage: str = None) -> str:
+        """Determine the effective rerun stage.
+
+        Only SAFE_RERUN_STAGES are allowed. Forbidden stages (analyze, resource_plan, report)
+        are rejected. Unknown stages default to env_deploy (safest).
+        """
         if requested in self.SAFE_RERUN_STAGES:
             return requested
+        if requested in self.FORBIDDEN_RERUN_STAGES:
+            # Reject forbidden stages, fallback to env_deploy
+            return "env_deploy"
         if stage in self.SAFE_RERUN_STAGES:
             return stage
         if last_safe_stage in self.SAFE_RERUN_STAGES:
             return last_safe_stage
-        return "analyze"
+        return "env_deploy"
 
     def _signature(self, stage: str, plan: Dict) -> str:
         return "%s:%s:%s" % (stage, plan.get("root_cause", ""), plan.get("rerun_from", ""))

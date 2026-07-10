@@ -231,5 +231,74 @@ class TestRepairGateFixture(unittest.TestCase):
         self.assertEqual(result["data"]["diagnosis"]["signal"], "gradio")
 
 
+class TestRepairLoopClosure(unittest.TestCase):
+    """Test repair loop closure: repair -> apply -> resume -> final verify."""
+
+    def test_repair_requires_final_verify_for_repair_verified(self):
+        """repair_verified should only be True when final verify passes."""
+        r = RepairActuatorResult(
+            repair_status="verified",
+            policy_allowed=True,
+            executed=True,
+            repair_verified=True,
+            final_verify_status="passed",
+        )
+        self.assertTrue(r.repair_verified)
+        self.assertEqual(r.final_verify_status, "passed")
+
+    def test_metadata_only_repair_is_not_self_healing(self):
+        """metadata_only repair should not count as self_healing."""
+        r = RepairActuatorResult(
+            repair_status="applied",
+            policy_allowed=True,
+            executed=True,
+            metadata_only=True,
+            repair_verified=False,
+        )
+        self.assertFalse(r.repair_verified)
+        self.assertTrue(r.metadata_only)
+
+    def test_repair_policy_rejection_does_not_resume(self):
+        """When policy rejects repair, resume should not happen."""
+        from auto_harness.repair.loop import RepairLoopController
+        import tempfile
+        tmpdir = tempfile.mkdtemp()
+        run_dir = Path(tmpdir)
+        controller = RepairLoopController(max_attempts=2)
+        memory_entry = {"signature": "runner:dependency_missing:env_deploy"}
+        plan = {"root_cause": "dependency_missing", "rerun_from": "env_deploy"}
+        policy_result = {"allowed": False, "decisions": [{"action_type": "install_package", "allowed": False}]}
+        result = controller.gate(run_dir, "runner", memory_entry, plan, policy_result)
+        self.assertFalse(result["allowed"])
+
+    def test_repair_resume_from_safe_stage(self):
+        """Resume should only be from safe stages."""
+        from auto_harness.repair.loop import RepairLoopController
+        import tempfile
+        tmpdir = tempfile.mkdtemp()
+        run_dir = Path(tmpdir)
+        controller = RepairLoopController(max_attempts=2)
+        memory_entry = {"signature": "runner:dependency_missing:env_deploy"}
+        plan = {"root_cause": "dependency_missing", "rerun_from": "env_deploy"}
+        policy_result = {"allowed": True, "decisions": []}
+        result = controller.gate(run_dir, "runner", memory_entry, plan, policy_result)
+        self.assertTrue(result["allowed"])
+        self.assertIn(result["loop"]["rerun_from_effective"], RepairLoopController.SAFE_RERUN_STAGES)
+
+    def test_repair_forbidden_stage_fallback(self):
+        """Resume from forbidden stage should fallback to env_deploy."""
+        from auto_harness.repair.loop import RepairLoopController
+        import tempfile
+        tmpdir = tempfile.mkdtemp()
+        run_dir = Path(tmpdir)
+        controller = RepairLoopController(max_attempts=2)
+        memory_entry = {"signature": "runner:dependency_missing:analyze"}
+        plan = {"root_cause": "dependency_missing", "rerun_from": "analyze"}
+        policy_result = {"allowed": True, "decisions": []}
+        result = controller.gate(run_dir, "runner", memory_entry, plan, policy_result)
+        # analyze is forbidden, should fallback to env_deploy
+        self.assertEqual(result["loop"]["rerun_from_effective"], "env_deploy")
+
+
 if __name__ == "__main__":
     unittest.main()

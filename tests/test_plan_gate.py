@@ -219,5 +219,57 @@ class TestDeploymentStrategy(unittest.TestCase):
         self.assertEqual(len(ds.stage_plan), 1)
 
 
+class TestPlanHintInfluence(unittest.TestCase):
+    """Test that plan hints influence execution but cannot change policy."""
+
+    def test_plan_hint_influences_runner_candidate_order(self):
+        """Runner should reorder candidates when plan hints provide prefer_entrypoint_patterns."""
+        from auto_harness.modules.runner import RunnerModule
+        module = RunnerModule()
+        candidates = [
+            {"id": "cand_0", "cmd": ["python", "app.py"]},
+            {"id": "cand_1", "cmd": ["python", "gradio_app.py"]},
+        ]
+        # Without hints, order is preserved
+        result = module._reorder_candidates_by_hints(candidates, [])
+        self.assertEqual(result[0]["id"], "cand_0")
+
+        # With hint preferring gradio_app.py, cand_1 should be first
+        result = module._reorder_candidates_by_hints(candidates, ["gradio_app.py"])
+        self.assertEqual(result[0]["id"], "cand_1")
+
+    def test_plan_hint_influences_env_solve_constraints(self):
+        """env_solve should add prefer_constraints from plan hints."""
+        from auto_harness.modules.env_solve import EnvSolveModule
+        module = EnvSolveModule()
+        # Test valid hint constraint
+        self.assertTrue(module._valid_hint_constraint("pydantic<2"))
+        self.assertTrue(module._valid_hint_constraint("numpy<2"))
+        self.assertTrue(module._valid_hint_constraint("torch==2.3.0"))
+
+        # Test invalid hint constraint (shell metachar)
+        self.assertFalse(module._valid_hint_constraint("rm -rf /"))
+        self.assertFalse(module._valid_hint_constraint("; echo pwned"))
+
+    def test_plan_hint_cannot_change_policy(self):
+        """Plan hints must not bypass policy checks."""
+        policy = StagePolicyValidator()
+        # Hints that try to bypass policy should be rejected
+        tc = {"name": "set_stage_hint", "input": {"stage": "runner", "hints": {"bypass_policy": True}}}
+        r = policy.validate(tc, "plan")
+        self.assertFalse(r["allowed"])
+
+        tc = {"name": "set_stage_hint", "input": {"stage": "runner", "hints": {"allow_source_edit": True}}}
+        r = policy.validate(tc, "plan")
+        self.assertFalse(r["allowed"])
+
+    def test_plan_hint_valid_format(self):
+        """Plan hints with valid format should be accepted."""
+        policy = StagePolicyValidator()
+        tc = {"name": "set_stage_hint", "input": {"stage": "runner", "hints": {"prefer_entrypoint_patterns": ["gradio_app.py"]}}}
+        r = policy.validate(tc, "plan")
+        self.assertTrue(r["allowed"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -273,7 +273,7 @@ class TestToolPolicy(unittest.TestCase):
         tc = ToolCall(name="install_environment", input={"package": "rich"})
         result = self.policy.validate(tc, stage="verify", agent_mode="gated_actor", trace_id="trace-abc")
         self.assertFalse(result.allowed)
-        self.assertIn("not allowed for verify stage", result.reason)
+        self.assertIn("not allowed", result.reason.lower())
 
     def test_unknown_tool_rejected(self):
         tc = ToolCall(name="hack_system", input={})

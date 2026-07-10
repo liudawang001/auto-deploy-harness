@@ -47,7 +47,7 @@ class VerifyModule:
         host = urllib.parse.urlparse(url).hostname or ""
         return host in {"127.0.0.1", "localhost", "::1"}
 
-    def verify(self, run_dir: Path, analysis: Dict, runner_result: Dict) -> StageResult:
+    def verify(self, run_dir: Path, analysis: Dict, runner_result: Dict, stage_hints: Dict = None) -> StageResult:
         trace_id = "verify_%s_%s" % (compact_timestamp(), short_hash(str(run_dir), 6))
         service = self._service_discovery(runner_result)
         self._progress("service_discovered", {"service": service})

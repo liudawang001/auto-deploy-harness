@@ -70,9 +70,19 @@ class PolicyDecision:
 
 @dataclass
 class ToolResult:
-    """Result of tool execution."""
+    """Result of tool execution.
+
+    Distinguishes between executed (real command/network/download) and
+    applied (state delta written). metadata_only cannot be counted as
+    repair_verified or self_healing.
+    """
     status: str = "error"  # passed|failed|uncertain|error|rejected
     tool_name: str = ""
+    category: str = "read_only"  # read_only|state_delta|execution
+    policy_allowed: bool = False
+    executed: bool = False
+    applied: bool = False
+    metadata_only: bool = False
     evidence: Dict = field(default_factory=dict)
     evidence_path: Optional[str] = None
     strong_verify_pass: bool = False

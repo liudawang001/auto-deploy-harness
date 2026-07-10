@@ -126,6 +126,42 @@ class TestEnvGateExecution(unittest.TestCase):
         content = overlay_path.read_text()
         self.assertIn("pydantic", content)
 
+    def test_constraint_format_is_package_before_version_spec(self):
+        """apply_dependency_constraint must write pydantic<2, NOT <2pydantic."""
+        provider = self._make_provider({
+            "status": "ok",
+            "hypothesis": "gradio requires pydantic<2",
+            "confidence": 0.9,
+            "tool_call": {
+                "name": "apply_dependency_constraint",
+                "input": {"package": "pydantic", "version_spec": "<2"},
+            },
+            "expected_observation": "env deploy passes",
+        })
+        gate = AgentDecisionGate(provider=provider)
+        result = gate.decide(
+            stage="env_solve",
+            observation={},
+            allowed_tools=list(ENV_TOOLS),
+            mode="gated_actor",
+            run_dir=self.run_dir,
+        )
+        self.assertTrue(result.execution.get("applied"))
+        overlay_path = self.run_dir / "repair_overlay" / "constraints.txt"
+        self.assertTrue(overlay_path.exists())
+        content = overlay_path.read_text().strip()
+        # Must be "pydantic<2", not "<2pydantic"
+        self.assertEqual(content, "pydantic<2")
+
+    def test_format_dependency_constraint_helper(self):
+        """Test the format_dependency_constraint helper function."""
+        from auto_harness.agent_runtime.decision_gate import format_dependency_constraint
+        self.assertEqual(format_dependency_constraint("pydantic", "<2"), "pydantic<2")
+        self.assertEqual(format_dependency_constraint("numpy", "<2"), "numpy<2")
+        self.assertEqual(format_dependency_constraint("torch", "==2.3.0"), "torch==2.3.0")
+        self.assertEqual(format_dependency_constraint("pydantic", ">=1.10,<2"), "pydantic>=1.10,<2")
+        self.assertEqual(format_dependency_constraint("pydantic", ""), "pydantic")
+
     def test_does_not_modify_source_requirements(self):
         """The env gate writes to repair_overlay, not to requirements.txt."""
         provider = self._make_provider({

@@ -85,7 +85,7 @@ class EnvSolveModule:
         self.conda_python_default = conda_python_default
         self.torch_cuda_preference = torch_cuda_preference
 
-    def solve(self, repo_dir: Path, analysis: Dict, resource_plan: Dict) -> StageResult:
+    def solve(self, repo_dir: Path, analysis: Dict, resource_plan: Dict, stage_hints: Dict = None) -> StageResult:
         requirements = self._read_requirements(repo_dir)
         frameworks = set(analysis.get("frameworks") or [])
         base_plan = [list(cmd) for cmd in analysis.get("install_plan") or []]
@@ -96,6 +96,15 @@ class EnvSolveModule:
             requirements = requirements + [dep for dep in (conda_file.get("conda_dependencies") or []) if str(dep).startswith(("pytorch", "torch", "torchvision", "torchaudio"))]
             requirements = requirements + [dep for dep in (conda_file.get("pip_dependencies") or []) if str(dep).startswith(("torch", "torchvision", "torchaudio"))]
         constraints, reasons = self._constraints(requirements, frameworks)
+        # Apply plan hints: prefer_constraints from LLM plan
+        hints = stage_hints or {}
+        prefer_constraints = hints.get("prefer_constraints", [])
+        for hint_constraint in prefer_constraints:
+            if hint_constraint and hint_constraint not in constraints:
+                # Validate hint format: must be package+version_spec
+                if self._valid_hint_constraint(hint_constraint):
+                    constraints.append(hint_constraint)
+                    reasons.append("plan hint: %s" % hint_constraint)
         environment_strategy = self._environment_strategy(analysis, conda_file)
         torch_solution = self._torch_solution(requirements, frameworks, resource_plan, local_environment, base_plan)
         gpu_package_matrix = self._gpu_package_matrix(requirements, frameworks, resource_plan, local_environment, torch_solution)
@@ -237,6 +246,18 @@ class EnvSolveModule:
             if normalized.startswith(prefix) and token in normalized:
                 return True
         return False
+
+    def _valid_hint_constraint(self, constraint: str) -> bool:
+        """Validate hint constraint format: must be package+version_spec.
+
+        Valid examples: pydantic<2, numpy<2, torch==2.3.0
+        Invalid examples: <2pydantic, rm -rf /
+        """
+        import re
+        # Must start with a letter or underscore (package name)
+        # Followed by version spec (optional)
+        pattern = r'^[a-zA-Z_][a-zA-Z0-9_._-]*([<>=!~]+[a-zA-Z0-9._,]+)?$'
+        return bool(re.match(pattern, constraint.strip()))
 
     def _apply_constraints(self, base_plan: List[List[str]], constraints: List[str]) -> List[List[str]]:
         if not constraints:

@@ -1,14 +1,115 @@
 """Agent verify state and step persistence.
 
 Manages the internal state of the act_verify loop and writes artifacts.
+Also provides AgentState for the unified AgentLoop.
 """
 import hashlib
 import json
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional
 
 from auto_harness.models.base import write_json
 from auto_harness.utils.time import utc_now_iso
+
+
+# ------------------------------------------------------------------
+# AgentState: unified state for the AgentLoop
+# ------------------------------------------------------------------
+
+@dataclass
+class AgentState:
+    """Unified state for the deployment AgentLoop.
+
+    Tracks the full observe-plan-act-verify cycle. State only records
+    facts and approved operations. LLM raw output is recorded separately.
+    Any success/pass field must come from module result or verifier, not LLM.
+    """
+    task_id: str = ""
+    run_dir: str = ""
+    mode: str = "planner"  # planner | gated_actor
+    objective: str = ""
+    current_stage: str = "analyze"
+    iteration: int = 0
+    max_iterations: int = 5
+    plan: Dict = field(default_factory=dict)
+    stage_status: Dict = field(default_factory=dict)
+    observations: List[Dict] = field(default_factory=list)
+    decisions: List[Dict] = field(default_factory=list)
+    tool_results: List[Dict] = field(default_factory=list)
+    repairs: List[Dict] = field(default_factory=list)
+    verify: Dict = field(default_factory=dict)
+    stop_reason: str = ""
+
+    def to_dict(self) -> Dict:
+        """Serialize state to dict for JSON persistence."""
+        return {
+            "task_id": self.task_id,
+            "run_dir": self.run_dir,
+            "mode": self.mode,
+            "objective": self.objective,
+            "current_stage": self.current_stage,
+            "iteration": self.iteration,
+            "max_iterations": self.max_iterations,
+            "plan": self.plan,
+            "stage_status": self.stage_status,
+            "observations": self.observations,
+            "decisions": self.decisions,
+            "tool_results": self.tool_results,
+            "repairs": self.repairs,
+            "verify": self.verify,
+            "stop_reason": self.stop_reason,
+            "updated_at": utc_now_iso(),
+        }
+
+    def save(self) -> Path:
+        """Write state to agent_state.json."""
+        path = Path(self.run_dir) / "agent_state.json"
+        write_json(path, self.to_dict())
+        return path
+
+    def record_observation(self, stage: str, observation: Dict) -> None:
+        """Record an observation from a stage."""
+        self.observations.append({
+            "stage": stage,
+            "observation": observation,
+            "iteration": self.iteration,
+            "recorded_at": utc_now_iso(),
+        })
+
+    def record_decision(self, stage: str, decision: Dict) -> None:
+        """Record an LLM decision."""
+        self.decisions.append({
+            "stage": stage,
+            "decision": decision,
+            "iteration": self.iteration,
+            "recorded_at": utc_now_iso(),
+        })
+
+    def record_tool_result(self, stage: str, tool_result: Dict) -> None:
+        """Record a tool execution result."""
+        self.tool_results.append({
+            "stage": stage,
+            "tool_result": tool_result,
+            "iteration": self.iteration,
+            "recorded_at": utc_now_iso(),
+        })
+
+    def record_repair(self, repair: Dict) -> None:
+        """Record a repair action."""
+        self.repairs.append({
+            "repair": repair,
+            "iteration": self.iteration,
+            "recorded_at": utc_now_iso(),
+        })
+
+    def update_stage_status(self, stage: str, status: str) -> None:
+        """Update the status of a pipeline stage."""
+        self.stage_status[stage] = {
+            "status": status,
+            "iteration": self.iteration,
+            "updated_at": utc_now_iso(),
+        }
 
 
 class AgentVerifyState:

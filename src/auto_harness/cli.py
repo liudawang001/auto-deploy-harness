@@ -55,6 +55,8 @@ def build_parser() -> argparse.ArgumentParser:
     deploy.add_argument("--agent-enable-model-gate", action="store_true", default=False)
     deploy.add_argument("--agent-enable-repair-gate", action="store_true", default=False)
     deploy.add_argument("--agent-all-decision-gates", action="store_true", default=False)
+    deploy.add_argument("--agent-runtime-loop", action="store_true", default=False)
+    deploy.add_argument("--agent-runtime-loop-max-iterations", type=int, default=None)
 
     resume = sub.add_parser("resume", help="resume an existing task")
     resume.add_argument("--task-id", required=True)
@@ -267,6 +269,12 @@ def _apply_cli_overrides(config: HarnessConfig, args) -> None:
         config.agent_enable_verify = True
         config.agent_enable_repair_actions = True
         config.agent_enable_log_diagnosis = True
+    # Agent runtime loop CLI overrides
+    if getattr(args, "agent_runtime_loop", False):
+        config.agent_enable_runtime_loop = True
+        config.agent_mode = "gated_actor"
+    if getattr(args, "agent_runtime_loop_max_iterations", None) is not None:
+        config.agent_runtime_loop_max_iterations = max(1, args.agent_runtime_loop_max_iterations)
 
 
 def main(argv=None) -> int:

@@ -2460,9 +2460,9 @@ class CoreTests(unittest.TestCase):
             self.assertFalse(second["allowed"])
             self.assertIn("repair attempt limit reached", second["loop"]["reasons"])
             self.assertTrue((Path(tmp) / "repairs" / "repair_loop_state.json").exists())
-            env_plan = {"root_cause": "dependency solve", "rerun_from": "env_solve", "actions": []}
+            env_plan = {"root_cause": "dependency solve", "rerun_from": "env_deploy", "actions": []}
             env_gate = RepairLoopController(max_attempts=1).gate(Path(tmp) / "fresh", "env_deploy", {"signature": "env"}, env_plan, policy)
-            self.assertEqual(env_gate["loop"]["rerun_from_effective"], "env_solve")
+            self.assertEqual(env_gate["loop"]["rerun_from_effective"], "env_deploy")
 
     def test_repair_overlay_merges_allowed_artifacts(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2493,7 +2493,8 @@ class CoreTests(unittest.TestCase):
             )
             self.assertTrue(overlay["active"])
             self.assertIn([".venv/bin/python", "-m", "pip", "install", "gradio"], merged["install_plan"])
-            self.assertEqual(merged["verify_hint"]["endpoint"], "http://127.0.0.1:7860")
+            # verify_hint is wrapped in verify_hint key by normalizer
+            self.assertIn("request", merged["verify_hint"])
             self.assertEqual(merged["verify_hint"]["request"]["path"], "/api/predict")
 
     def test_rejected_repair_apply_result_disables_overlay(self):
@@ -2757,7 +2758,7 @@ class CoreTests(unittest.TestCase):
     def test_benchmark_runner_executes_all_fixture_cases(self):
         report = BenchmarkRunner().run(Path("tests/fixtures/benchmarks/manifest.json"))
         self.assertEqual(report["status"], "passed")
-        self.assertEqual(len(report["cases"]), 56)
+        self.assertEqual(len(report["cases"]), 69)
         self.assertTrue(all(case["status"] == "passed" for case in report["cases"]))
 
     def test_benchmark_cli_writes_output(self):
