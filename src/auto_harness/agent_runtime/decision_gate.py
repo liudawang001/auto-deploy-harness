@@ -30,6 +30,7 @@ from auto_harness.agent_runtime.stage_planners import (
     ModelPlanner,
     RepairActuatorPlanner,
     PlanPlanner,
+    VerifyPlanner,
     parse_gate_decision,
 )
 from auto_harness.models.base import write_json
@@ -515,12 +516,11 @@ class AgentDecisionGate:
             if exec_result.get("executed") or exec_result.get("applied"):
                 break
 
-        # Compute llm_helped: true only when LLM decision was accepted, policy allowed, and state changed
-        result.llm_helped = (
-            result.decision_status == "ok"
-            and result.policy.get("allowed", False)
-            and (result.execution.get("executed") or result.execution.get("applied"))
-        )
+        # llm_helped: GateResult NEVER self-declares llm_helped=true.
+        # A single gate cannot know if state actually improved.
+        # llm_helped must be computed by AgentContributionAnalyzer or AgentLoop
+        # AFTER observing stage status improvement (before_status -> after_status).
+        result.llm_helped = False
 
         # Write gate result artifact
         artifact_writer.write_gate_result(stage, result)
@@ -573,6 +573,7 @@ class AgentDecisionGate:
             "model_prepare": ModelPlanner,
             "repair": RepairActuatorPlanner,
             "plan": PlanPlanner,
+            "verify": VerifyPlanner,
         }
         planner_cls = planners.get(stage)
         if planner_cls is None:

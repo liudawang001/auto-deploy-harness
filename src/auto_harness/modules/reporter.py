@@ -108,6 +108,23 @@ class ReportGenerator:
                 "- Agent artifacts: `agent_steps.jsonl`, `agent_state.json`, `agent_plan.json`, `agent_plan_revisions.jsonl`",
                 "",
             ])
+        # Agent Summary section
+        agent_summary = self._build_agent_summary(run_dir, results, contribution)
+        if agent_summary:
+            lines.extend([
+                "## Agent Summary",
+                "",
+                "- Mode: `%s`" % agent_summary.get("mode", "off"),
+                "- Runtime loop position: `%s`" % agent_summary.get("runtime_loop_position", "off"),
+                "- LLM helped: `%s`" % str(bool(agent_summary.get("llm_helped"))).lower(),
+                "- LLM required: `%s`" % str(bool(agent_summary.get("llm_required"))).lower(),
+                "- LLM required status: `%s`" % agent_summary.get("llm_required_status", "unknown_without_baseline"),
+                "- Helped stages: %s" % (", ".join("`%s`" % s for s in agent_summary.get("helped_stages") or []) or "`none`"),
+                "- Accepted tool calls: `%s`" % agent_summary.get("accepted_tool_calls", 0),
+                "- Rejected tool calls: `%s`" % agent_summary.get("rejected_tool_calls", 0),
+                "- Final verify status: `%s`" % agent_summary.get("final_verify_status", ""),
+                "",
+            ])
         llm_required_evidence = self._read_optional(run_dir / "reports" / "llm_required_evidence.json")
         if isinstance(llm_required_evidence, dict) and llm_required_evidence:
             lines.extend([
@@ -180,6 +197,63 @@ class ReportGenerator:
                     "rerun_from_adjustment_reason": "",
                 }
         return {}
+
+    def _build_agent_summary(self, run_dir: Path, results: Dict, contribution: Dict = None) -> Dict:
+        """Build agent summary for the report.
+
+        Returns dict with mode, runtime_loop_position, llm_helped, llm_required,
+        llm_required_status, helped_stages, accepted_tool_calls, rejected_tool_calls,
+        final_verify_status.
+        """
+        # Get mode from agent_state.json
+        agent_state = self._read_optional(run_dir / "agent_state.json")
+        mode = "off"
+        if isinstance(agent_state, dict):
+            mode = agent_state.get("mode", "off")
+
+        # Get runtime_loop_position from config or agent_loop_result
+        loop_result = self._read_optional(run_dir / "reports" / "agent_loop_result.json")
+        runtime_loop_position = "off"
+        if isinstance(loop_result, dict) and loop_result.get("status"):
+            runtime_loop_position = "primary" if loop_result.get("mode") == "gated_actor" else "post_pipeline"
+
+        # Get contribution data
+        if contribution is None:
+            contribution = self._read_optional(run_dir / "reports" / "agent_contribution.json") or {}
+
+        llm_helped = bool(contribution.get("llm_helped"))
+        llm_required = bool(contribution.get("llm_required"))
+        llm_required_status = contribution.get("llm_required_status", "unknown_without_baseline")
+
+        # Get helped stages from gate results
+        gate_results = contribution.get("gate_summary") or []
+        helped_stages = [
+            g.get("stage") for g in gate_results
+            if g.get("policy_allowed") and (g.get("executed") or g.get("applied"))
+        ]
+
+        # Get accepted/rejected counts
+        accepted_tool_calls = int(contribution.get("accepted_action_count") or 0)
+        rejected_tool_calls = int(contribution.get("rejected_action_count") or 0)
+
+        # Get final verify status
+        final_verify_status = contribution.get("final_verify_status", "")
+        if not final_verify_status:
+            verify_result = results.get("verify", {})
+            if isinstance(verify_result, dict):
+                final_verify_status = verify_result.get("status", "")
+
+        return {
+            "mode": mode,
+            "runtime_loop_position": runtime_loop_position,
+            "llm_helped": llm_helped,
+            "llm_required": llm_required,
+            "llm_required_status": llm_required_status,
+            "helped_stages": helped_stages,
+            "accepted_tool_calls": accepted_tool_calls,
+            "rejected_tool_calls": rejected_tool_calls,
+            "final_verify_status": final_verify_status,
+        }
 
     def _repair_effectiveness(self, run_dir: Path) -> Dict:
         apply_result = self._read_optional(run_dir / "repairs" / "repair_apply_result.json")

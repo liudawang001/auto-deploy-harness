@@ -1,7 +1,39 @@
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from auto_harness.models.base import read_json, write_json
+
+
+def compute_llm_helped(
+    *,
+    before_status: str,
+    after_status: str,
+    policy_allowed: bool,
+    applied: bool,
+    executed: bool,
+    final_verify_status: str = "",
+) -> bool:
+    """Compute whether LLM genuinely helped improve a stage outcome.
+
+    Returns True only if:
+      - policy_allowed == True
+      - applied == True or executed == True
+      - before_status in (failed, uncertain, no_action, empty)
+      - after_status in (passed, pass, planned, improved)
+      - if after_status is planned/improved, final_verify_status must be passed
+    """
+    if not policy_allowed:
+        return False
+    if not (applied or executed):
+        return False
+    if before_status not in ("failed", "uncertain", "no_action", ""):
+        return False
+    if after_status not in ("passed", "pass", "planned", "improved"):
+        return False
+    # For indirect improvements (planned/improved), final verify must confirm
+    if after_status in ("planned", "improved") and final_verify_status not in ("passed", "pass"):
+        return False
+    return True
 
 
 class AgentContributionAnalyzer:
@@ -43,20 +75,22 @@ class AgentContributionAnalyzer:
         # llm_helped: LLM decision was accepted, policy allowed, state actually changed, and verify passed
         llm_helped = bool(helped_types and any_gate_applied and final_verify in ("pass", "passed"))
 
-        # llm_required: needs baseline comparison - only true when baseline would have failed
-        # This is set by evaluate_llm_required() when baseline data is available
-        llm_required = llm_helped  # default: if helped, then required
+        # llm_required: MUST be based on baseline comparison.
+        # Without baseline, it is unknown — never default to llm_helped.
+        llm_required = False
+        llm_required_status = "unknown_without_baseline"
 
         payload = {
             "status": "generated",
             "llm_required": llm_required,
+            "llm_required_status": llm_required_status,
             "llm_helped": llm_helped,
             "help_type": helped_types,
             "selection_source": self._selection_source(analyze),
             "accepted_action_count": len(decision.get("accepted_actions") or []),
             "rejected_action_count": len(decision.get("rejected_actions") or []),
             "final_verify_status": final_verify,
-            "llm_required_reason": self._reason(helped_types),
+            "llm_required_reason": "LLM helped this run, but no baseline comparison exists." if llm_helped else self._reason(helped_types),
             "gate_summary": gate_results,
             "evidence": {
                 "agent_steps": "agent_steps.jsonl",
@@ -119,6 +153,7 @@ class AgentContributionAnalyzer:
 
         payload = {
             "llm_required": llm_required,
+            "llm_required_status": "proven_by_baseline_agent_delta" if llm_required else "baseline_did_not_fail",
             "baseline_status": baseline_status,
             "agent_status": agent_status,
             "evidence": evidence,

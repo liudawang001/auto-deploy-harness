@@ -300,5 +300,83 @@ class TestRepairLoopClosure(unittest.TestCase):
         self.assertEqual(result["loop"]["rerun_from_effective"], "env_deploy")
 
 
+class TestMetadataOnlyNotEffectiveRepair(unittest.TestCase):
+    """metadata_only actions must NEVER count as effective repair."""
+
+    def test_metadata_only_rerun_from_stage_not_effective_repair(self):
+        """rerun_from_stage metadata_only must not be treated as effective."""
+        from auto_harness.orchestrator import TaskRunner
+        from auto_harness.config import HarnessConfig
+        config = HarnessConfig()
+        runner = TaskRunner(config)
+        apply_result = {
+            "status": "applied",
+            "action_results": [
+                {
+                    "action_type": "rerun_from_stage",
+                    "executed": False,
+                    "status": "metadata_only",
+                    "rerun_from": "env_deploy",
+                }
+            ],
+        }
+        self.assertFalse(runner._repair_apply_effective(apply_result))
+
+    def test_metadata_only_update_verify_hint_not_effective_repair(self):
+        """update_verify_hint metadata_only must not be treated as effective."""
+        from auto_harness.orchestrator import TaskRunner
+        from auto_harness.config import HarnessConfig
+        config = HarnessConfig()
+        runner = TaskRunner(config)
+        apply_result = {
+            "status": "applied",
+            "action_results": [
+                {
+                    "action_type": "update_verify_hint",
+                    "executed": False,
+                    "status": "metadata_only",
+                }
+            ],
+        }
+        self.assertFalse(runner._repair_apply_effective(apply_result))
+
+    def test_executed_action_with_zero_exit_code_is_effective(self):
+        """An executed action with exit_code=0 should be effective."""
+        from auto_harness.orchestrator import TaskRunner
+        from auto_harness.config import HarnessConfig
+        config = HarnessConfig()
+        runner = TaskRunner(config)
+        apply_result = {
+            "status": "applied",
+            "action_results": [
+                {
+                    "action_type": "install_package",
+                    "executed": True,
+                    "exit_code": 0,
+                    "cmd": ["pip", "install", "gradio"],
+                }
+            ],
+        }
+        self.assertTrue(runner._repair_apply_effective(apply_result))
+
+    def test_strong_verify_pass_is_effective(self):
+        """tool_result with strong_verify_pass should be effective."""
+        from auto_harness.orchestrator import TaskRunner
+        from auto_harness.config import HarnessConfig
+        config = HarnessConfig()
+        runner = TaskRunner(config)
+        apply_result = {
+            "status": "applied",
+            "action_results": [
+                {
+                    "action_type": "verify_after_repair",
+                    "executed": False,
+                    "tool_result": {"strong_verify_pass": True},
+                }
+            ],
+        }
+        self.assertTrue(runner._repair_apply_effective(apply_result))
+
+
 if __name__ == "__main__":
     unittest.main()

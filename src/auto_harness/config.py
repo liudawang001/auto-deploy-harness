@@ -83,6 +83,7 @@ class HarnessConfig:
     agent_enable_runtime_loop: bool = False
     agent_runtime_loop_max_iterations: int = 5
     agent_runtime_loop_stop_on_verify_pass: bool = True
+    agent_runtime_loop_position: str = "primary"  # primary | post_pipeline
 
     def __post_init__(self) -> None:
         if self.allowed_commands is None:

@@ -41,8 +41,16 @@ REPAIR_TOOLS = (
 
 PLAN_TOOLS = ("set_deployment_strategy", "set_stage_hint")  # Plan gate only generates strategy hints
 
+VERIFY_TOOLS = (
+    "probe_http",
+    "discover_gradio_api",
+    "discover_openapi_schema",
+    "discover_openai_compatible_model",
+    "probe_browser_dom",
+)
+
 # All stage tools combined (for registry)
-ALL_STAGE_TOOLS = RUNNER_TOOLS + ENV_TOOLS + MODEL_TOOLS + REPAIR_TOOLS + PLAN_TOOLS
+ALL_STAGE_TOOLS = RUNNER_TOOLS + ENV_TOOLS + MODEL_TOOLS + REPAIR_TOOLS + PLAN_TOOLS + VERIFY_TOOLS
 
 # Pipeline stages that the plan gate can reference
 PIPELINE_STAGES = (

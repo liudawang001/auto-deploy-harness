@@ -385,8 +385,12 @@ class TestAgentDecisionGate(unittest.TestCase):
         )
         self.assertEqual(result.decision_status, "no_action")
 
-    def test_llm_helped_true_when_decision_applied(self):
-        """llm_helped should be True when LLM decision was accepted, policy allowed, and applied."""
+    def test_llm_helped_false_at_gate_level_even_when_applied(self):
+        """GateResult must NOT self-declare llm_helped=true.
+
+        llm_helped must be computed by AgentContributionAnalyzer after
+        observing actual stage status improvement, not at gate level.
+        """
         provider = self._make_mock_provider({
             "status": "ok",
             "hypothesis": "cand_1 is better",
@@ -406,7 +410,11 @@ class TestAgentDecisionGate(unittest.TestCase):
             mode="gated_actor",
             run_dir=self.run_dir,
         )
-        self.assertTrue(result.llm_helped, "llm_helped should be True when decision is applied")
+        # GateResult NEVER self-declares llm_helped=true
+        self.assertFalse(result.llm_helped, "GateResult must not self-declare llm_helped")
+        # But policy should have allowed and execution should have applied
+        self.assertTrue(result.policy.get("allowed", False))
+        self.assertTrue(result.execution.get("applied") or result.execution.get("executed"))
 
     def test_llm_helped_false_when_planner_mode(self):
         """llm_helped should be False in planner mode (no execution)."""
@@ -450,6 +458,72 @@ class TestAgentDecisionGate(unittest.TestCase):
             run_dir=self.run_dir,
         )
         self.assertFalse(result.llm_helped, "llm_helped should be False when policy rejects")
+
+
+class TestComputeLlmHelped(unittest.TestCase):
+    """Tests for the compute_llm_helped function."""
+
+    def test_helped_when_failed_to_passed(self):
+        from auto_harness.agent_runtime.contribution import compute_llm_helped
+        self.assertTrue(compute_llm_helped(
+            before_status="failed",
+            after_status="passed",
+            policy_allowed=True,
+            applied=True,
+            executed=False,
+            final_verify_status="passed",
+        ))
+
+    def test_not_helped_when_policy_rejected(self):
+        from auto_harness.agent_runtime.contribution import compute_llm_helped
+        self.assertFalse(compute_llm_helped(
+            before_status="failed",
+            after_status="passed",
+            policy_allowed=False,
+            applied=True,
+            executed=False,
+        ))
+
+    def test_not_helped_when_not_applied(self):
+        from auto_harness.agent_runtime.contribution import compute_llm_helped
+        self.assertFalse(compute_llm_helped(
+            before_status="failed",
+            after_status="passed",
+            policy_allowed=True,
+            applied=False,
+            executed=False,
+        ))
+
+    def test_not_helped_when_before_was_passed(self):
+        from auto_harness.agent_runtime.contribution import compute_llm_helped
+        self.assertFalse(compute_llm_helped(
+            before_status="passed",
+            after_status="passed",
+            policy_allowed=True,
+            applied=True,
+            executed=False,
+        ))
+
+    def test_helped_with_improved_needs_final_verify(self):
+        from auto_harness.agent_runtime.contribution import compute_llm_helped
+        # improved without final verify -> False
+        self.assertFalse(compute_llm_helped(
+            before_status="failed",
+            after_status="improved",
+            policy_allowed=True,
+            applied=True,
+            executed=False,
+            final_verify_status="",
+        ))
+        # improved with final verify passed -> True
+        self.assertTrue(compute_llm_helped(
+            before_status="failed",
+            after_status="improved",
+            policy_allowed=True,
+            applied=True,
+            executed=False,
+            final_verify_status="passed",
+        ))
 
 
 class TestGateArtifactWriter(unittest.TestCase):

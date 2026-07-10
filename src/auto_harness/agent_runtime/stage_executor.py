@@ -1,0 +1,314 @@
+"""AgentStageExecutor: maps Agent structured stage actions to real stage modules.
+
+This is the bridge between the AgentLoop and the deterministic pipeline modules.
+The Agent NEVER directly calls shell commands — it outputs structured stage actions,
+and this executor maps them to ProjectAnalyzer, ResourcePlanner, EnvSolveModule,
+EnvDeployModule, ModelPrepareModule, RunnerModule, VerifyModule.
+
+Key invariants:
+- AgentStageExecutor does NOT copy stage module logic
+- LLM cannot pass shell commands to executor
+- Executor does NOT bypass existing module policy
+- Executor does NOT directly write 'passed' — that comes from modules
+"""
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Callable, Dict, List, Optional
+
+from auto_harness.models.result import StageResult
+from auto_harness.models.base import to_plain
+
+
+@dataclass
+class StageExecutionResult:
+    """Result of executing a single stage through the executor."""
+    stage: str
+    before_status: str
+    after_status: str
+    result: dict
+    changed: bool
+    evidence_paths: list = field(default_factory=list)
+    error: str = ""
+
+
+class AgentStageExecutor:
+    """Maps Agent stage actions to real stage module calls.
+
+    Each execute_stage() call invokes the corresponding stage module with
+    the current state, and returns a StageExecutionResult with before/after
+    status comparison.
+    """
+
+    def __init__(
+        self,
+        *,
+        config=None,
+        store=None,
+        model_prepare=None,
+        repair_components: Dict = None,
+        provider_factory: Callable = None,
+    ) -> None:
+        self.config = config
+        self.store = store
+        self.model_prepare = model_prepare
+        self.repair_components = repair_components or {}
+        self.provider_factory = provider_factory
+
+    def execute_stage(
+        self,
+        *,
+        task_id: str,
+        run_dir: Path,
+        repo_dir: Path,
+        stage: str,
+        state: dict,
+        analysis: dict,
+        resource_data: dict,
+        deploy_analysis: dict,
+        runner_data: dict,
+        dry_run: bool,
+        stage_hints: dict = None,
+        repair_overlay: dict = None,
+    ) -> StageExecutionResult:
+        """Execute a single pipeline stage and return before/after status.
+
+        Args:
+            task_id: Task identifier
+            run_dir: Run directory for artifacts
+            repo_dir: Repository directory
+            stage: Stage name to execute
+            state: Current agent state dict
+            analysis: Analysis results
+            resource_data: Resource plan results
+            deploy_analysis: Deploy analysis (env_solve output)
+            runner_data: Runner results
+            dry_run: If True, don't execute real commands
+            stage_hints: Optional hints from plan gate
+            repair_overlay: Optional repair overlay
+
+        Returns:
+            StageExecutionResult with before/after status
+        """
+        stage_hints = stage_hints or {}
+        repair_overlay = repair_overlay or {}
+
+        # Get before status from current results
+        before_status = self._get_stage_status(stage, state)
+
+        try:
+            if stage == "analyze":
+                return self._execute_analyze(task_id, run_dir, repo_dir, state, before_status, dry_run)
+            elif stage == "resource_plan":
+                return self._execute_resource_plan(task_id, run_dir, repo_dir, analysis, before_status)
+            elif stage == "env_solve":
+                return self._execute_env_solve(task_id, run_dir, repo_dir, analysis, resource_data, before_status, stage_hints)
+            elif stage == "env_deploy":
+                return self._execute_env_deploy(task_id, run_dir, repo_dir, deploy_analysis, before_status, dry_run, repair_overlay)
+            elif stage == "model_prepare":
+                return self._execute_model_prepare(task_id, run_dir, repo_dir, resource_data, before_status, dry_run)
+            elif stage == "runner":
+                return self._execute_runner(task_id, run_dir, repo_dir, deploy_analysis, before_status, dry_run, stage_hints)
+            elif stage == "verify":
+                return self._execute_verify(task_id, run_dir, repo_dir, deploy_analysis, runner_data, before_status, stage_hints)
+            elif stage == "repair":
+                return self._execute_repair(task_id, run_dir, repo_dir, state, before_status, dry_run)
+            else:
+                return StageExecutionResult(
+                    stage=stage,
+                    before_status=before_status,
+                    after_status="failed",
+                    result={},
+                    changed=before_status != "failed",
+                    error="unknown stage: %s" % stage,
+                )
+        except Exception as exc:
+            return StageExecutionResult(
+                stage=stage,
+                before_status=before_status,
+                after_status="failed",
+                result={},
+                changed=before_status != "failed",
+                error=str(exc)[:2000],
+            )
+
+    def _execute_analyze(self, task_id, run_dir, repo_dir, state, before_status, dry_run):
+        from auto_harness.modules.analyzer import ProjectAnalyzer
+        from auto_harness.agents.claude_code import ClaudeCodeExecutor
+        analyzer = ProjectAnalyzer(
+            agent_executor=ClaudeCodeExecutor() if (self.config and self.config.use_agent_analyzer) else None,
+            use_agent=bool(self.config and self.config.use_agent_analyzer),
+            agent_timeout_seconds=self.config.agent_timeout_seconds if self.config else 900,
+            agent_mode=self.config.agent_mode if self.config else "off",
+            task_id=task_id,
+            agent_max_file_chars=self.config.agent_max_file_chars if self.config else 6000,
+        )
+        result = analyzer.analyze(repo_dir)
+        return StageExecutionResult(
+            stage="analyze",
+            before_status=before_status,
+            after_status=result.status,
+            result=to_plain(result),
+            changed=before_status != result.status,
+        )
+
+    def _execute_resource_plan(self, task_id, run_dir, repo_dir, analysis, before_status):
+        from auto_harness.modules.resource_plan import ResourcePlanner
+        result = ResourcePlanner().plan(repo_dir, analysis)
+        return StageExecutionResult(
+            stage="resource_plan",
+            before_status=before_status,
+            after_status=result.status,
+            result=to_plain(result),
+            changed=before_status != result.status,
+        )
+
+    def _execute_env_solve(self, task_id, run_dir, repo_dir, analysis, resource_data, before_status, stage_hints):
+        from auto_harness.modules.env_solve import EnvSolveModule
+        env_backend = self.config.env_backend if self.config else "auto"
+        conda_envs_dir = self.config.conda_envs_dir if self.config else ".conda/envs"
+        conda_prefer_mamba = self.config.conda_prefer_mamba if self.config else True
+        conda_allowed_channels = self.config.conda_allowed_channels if self.config else ["defaults", "conda-forge", "pytorch"]
+        conda_python_default = self.config.conda_python_default if self.config else "3.10"
+        torch_cuda_preference = self.config.torch_cuda_preference if self.config else "auto"
+        result = EnvSolveModule(
+            env_backend=env_backend,
+            conda_envs_dir=conda_envs_dir,
+            conda_prefer_mamba=conda_prefer_mamba,
+            conda_allowed_channels=conda_allowed_channels,
+            conda_python_default=conda_python_default,
+            torch_cuda_preference=torch_cuda_preference,
+        ).solve(repo_dir, analysis, resource_data, stage_hints=stage_hints)
+        return StageExecutionResult(
+            stage="env_solve",
+            before_status=before_status,
+            after_status=result.status,
+            result=to_plain(result),
+            changed=before_status != result.status,
+        )
+
+    def _execute_env_deploy(self, task_id, run_dir, repo_dir, deploy_analysis, before_status, dry_run, repair_overlay):
+        from auto_harness.modules.env_deploy import EnvDeployModule
+        # Merge repair overlay constraints into analysis
+        effective_analysis = dict(deploy_analysis)
+        if repair_overlay.get("active") and repair_overlay.get("install_commands"):
+            existing_plan = list(effective_analysis.get("install_plan", []))
+            for cmd in repair_overlay["install_commands"]:
+                if cmd not in existing_plan:
+                    existing_plan.append(cmd)
+            effective_analysis["install_plan"] = existing_plan
+        execute = not dry_run and (self.config.allow_dependency_install if self.config else False)
+        result = EnvDeployModule().deploy(
+            repo_dir,
+            effective_analysis,
+            execute=execute,
+            allowed_commands=self.config.allowed_commands if self.config else None,
+            execution_backend=self.config.execution_backend if self.config else "local",
+            docker_image=self.config.docker_image if self.config else "python:3.10-slim",
+            docker_network=self.config.docker_network if self.config else "bridge",
+            docker_gpus=self.config.docker_gpus if self.config else "none",
+            docker_model_cache_dir=self.config.docker_model_cache_dir if self.config else "",
+        )
+        return StageExecutionResult(
+            stage="env_deploy",
+            before_status=before_status,
+            after_status=result.status,
+            result=to_plain(result),
+            changed=before_status != result.status,
+        )
+
+    def _execute_model_prepare(self, task_id, run_dir, repo_dir, resource_data, before_status, dry_run):
+        if not self.model_prepare:
+            return StageExecutionResult(
+                stage="model_prepare",
+                before_status=before_status,
+                after_status="uncertain",
+                result={},
+                changed=False,
+                error="model_prepare module not available",
+            )
+        result = self.model_prepare.prepare(
+            run_dir,
+            resource_data,
+            execute=not dry_run,
+            repo_dir=repo_dir,
+            allowed_commands=self.config.allowed_commands if self.config else None,
+            timeout_seconds=self.config.default_timeout_seconds if self.config else 900,
+        )
+        return StageExecutionResult(
+            stage="model_prepare",
+            before_status=before_status,
+            after_status=result.status,
+            result=to_plain(result),
+            changed=before_status != result.status,
+        )
+
+    def _execute_runner(self, task_id, run_dir, repo_dir, deploy_analysis, before_status, dry_run, stage_hints):
+        from auto_harness.modules.runner import RunnerModule
+        execute = not dry_run and (self.config.allow_service_start if self.config else False)
+        result = RunnerModule().run(
+            repo_dir,
+            deploy_analysis,
+            execute=execute,
+            allowed_commands=self.config.allowed_commands if self.config else None,
+            execution_backend=self.config.execution_backend if self.config else "local",
+            docker_image=self.config.docker_image if self.config else "python:3.10-slim",
+            docker_network=self.config.docker_network if self.config else "bridge",
+            docker_gpus=self.config.docker_gpus if self.config else "none",
+            docker_model_cache_dir=self.config.docker_model_cache_dir if self.config else "",
+            stage_hints=stage_hints,
+        )
+        return StageExecutionResult(
+            stage="runner",
+            before_status=before_status,
+            after_status=result.status,
+            result=to_plain(result),
+            changed=before_status != result.status,
+        )
+
+    def _execute_verify(self, task_id, run_dir, repo_dir, deploy_analysis, runner_data, before_status, stage_hints):
+        from auto_harness.modules.verify import VerifyModule
+        result = VerifyModule().verify(
+            run_dir,
+            deploy_analysis,
+            runner_data,
+            stage_hints=stage_hints,
+        )
+        evidence_paths = list(result.evidence) if hasattr(result, 'evidence') and result.evidence else []
+        return StageExecutionResult(
+            stage="verify",
+            before_status=before_status,
+            after_status=result.status,
+            result=to_plain(result),
+            changed=before_status != result.status,
+            evidence_paths=evidence_paths,
+        )
+
+    def _execute_repair(self, task_id, run_dir, repo_dir, state, before_status, dry_run):
+        """Execute repair: delegate to repair components if available."""
+        repair_planner = self.repair_components.get("planner")
+        repair_policy = self.repair_components.get("policy")
+        repair_applier = self.repair_components.get("applier")
+        if not all([repair_planner, repair_policy, repair_applier]):
+            return StageExecutionResult(
+                stage="repair",
+                before_status=before_status,
+                after_status=before_status,
+                result={},
+                changed=False,
+                error="repair components not available",
+            )
+        # Repair execution is handled by the repair loop, not here
+        return StageExecutionResult(
+            stage="repair",
+            before_status=before_status,
+            after_status="pending",
+            result={"status": "repair_delegated_to_loop"},
+            changed=False,
+        )
+
+    def _get_stage_status(self, stage: str, state: dict) -> str:
+        """Get the current status of a stage from state."""
+        stage_results = state.get("stage_results", {})
+        if stage in stage_results:
+            return stage_results[stage].get("status", "")
+        return ""

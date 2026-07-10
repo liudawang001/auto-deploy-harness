@@ -13,6 +13,7 @@ from auto_harness.agent_runtime.stage_schemas import (
     MODEL_TOOLS,
     REPAIR_TOOLS,
     PLAN_TOOLS,
+    VERIFY_TOOLS,
     PIPELINE_STAGES,
 )
 from auto_harness.providers.json_utils import parse_json_object
@@ -404,3 +405,69 @@ class PlanPlanner:
             return GateDecision(stage="plan", status="invalid", stop_reason="provider_error", raw_response="")
 
         return parse_gate_decision(raw_response, allowed_tools=allowed, stage="plan")
+
+
+# ------------------------------------------------------------------
+# Verify Planner
+# ------------------------------------------------------------------
+
+VERIFY_OBSERVATION_TEMPLATE = """## Verify Stage Observation
+
+Service info:
+```json
+{service}
+```
+
+Trace ID: {trace_id}
+
+Checks to perform:
+```json
+{checks}
+```
+
+Frameworks detected: {frameworks}
+Previous verify status: {previous_verify_status}
+Allowed hosts: {allowed_hosts}
+
+## Task
+Choose one verification tool to probe the deployed service.
+You must use evidence to determine if the deployment is successful.
+Do NOT set verify status yourself - the runtime verifier decides from tool results.
+
+## Allowed Tools
+{allowed_tools}"""
+
+
+class VerifyPlanner:
+    """LLM planner for the verify stage.
+
+    Verify gate probes the deployed service to gather evidence.
+    The runtime verifier (not LLM) decides if verification passes.
+    """
+
+    def plan(self, observation: Dict, provider=None, allowed_tools: List[str] = None) -> GateDecision:
+        if provider is None:
+            return GateDecision(stage="verify", status="no_action", stop_reason="no_provider", raw_response="")
+
+        allowed = allowed_tools or list(VERIFY_TOOLS)
+        prompt = VERIFY_OBSERVATION_TEMPLATE.format(
+            service=_json_block(observation.get("service", {})),
+            trace_id=observation.get("trace_id", ""),
+            checks=_json_block(observation.get("checks", [])),
+            frameworks=", ".join(observation.get("frameworks", [])),
+            previous_verify_status=observation.get("previous_verify_status", "uncertain"),
+            allowed_hosts=", ".join(observation.get("allowed_hosts", ["127.0.0.1", "localhost"])),
+            allowed_tools=", ".join(allowed),
+        )
+
+        try:
+            from auto_harness.providers import Message
+            result = provider.complete([
+                Message(role="system", content=DECISION_SYSTEM_PROMPT.format(stage="verify")),
+                Message(role="user", content=prompt),
+            ])
+            raw_response = result.text if result and hasattr(result, "text") else ""
+        except Exception:
+            return GateDecision(stage="verify", status="invalid", stop_reason="provider_error", raw_response="")
+
+        return parse_gate_decision(raw_response, allowed_tools=allowed, stage="verify")

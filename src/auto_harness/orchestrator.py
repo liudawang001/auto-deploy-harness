@@ -121,7 +121,15 @@ class TaskRunner:
         return self.run_existing(spec.task_id, dry_run=dry_run)
 
     def run_existing(self, task_id: str, dry_run: bool = True, start_stage: str = "analyze") -> str:
-        # Run deterministic pipeline first
+        # Check if AgentLoop should be the primary controller
+        if (self.config.agent_enable_runtime_loop
+                and self.config.agent_mode == "gated_actor"
+                and self.config.agent_runtime_loop_position == "primary"):
+            # AgentLoop is the primary deployment controller
+            self._run_agent_runtime_loop(task_id, dry_run=dry_run)
+            return task_id
+
+        # Legacy path: deterministic pipeline first, then optional AgentLoop
         current_start_stage = start_stage
         max_iterations = int(self.config.agent_max_loop_iterations or 0)
         for iteration in range(max_iterations + 1):
@@ -132,14 +140,16 @@ class TaskRunner:
             self.store.events(task_id).append("task", "agent_auto_resume", decision)
             current_start_stage = decision["start_stage"]
 
-        # If agent runtime loop is enabled, run the unified AgentLoop
-        if self.config.agent_enable_runtime_loop and self.config.agent_mode == "gated_actor":
+        # If agent runtime loop is enabled in post_pipeline mode
+        if (self.config.agent_enable_runtime_loop
+                and self.config.agent_mode == "gated_actor"
+                and self.config.agent_runtime_loop_position == "post_pipeline"):
             self._run_agent_runtime_loop(task_id, dry_run=dry_run)
 
         return task_id
 
     def _run_agent_runtime_loop(self, task_id: str, dry_run: bool = True) -> None:
-        """Run the unified DeploymentAgentLoop after deterministic pipeline."""
+        """Run the unified DeploymentAgentLoop as primary controller."""
         run_dir = self.store.run_dir(task_id)
         repo_dir = run_dir / "workspace" / "repo"
 
@@ -155,10 +165,21 @@ class TaskRunner:
         # Create provider
         provider = self._create_agent_provider()
 
+        # Create AgentStageExecutor with real module dependencies
+        from auto_harness.agent_runtime.stage_executor import AgentStageExecutor
+        stage_executor = AgentStageExecutor(
+            config=self.config,
+            store=self.store,
+            model_prepare=getattr(self, '_model_prepare', None),
+            repair_components=getattr(self, '_repair_components', None),
+            provider_factory=lambda: self._create_agent_provider(),
+        )
+
         # Create and run the agent loop
         loop = DeploymentAgentLoop(
             provider=provider,
             config=self.config,
+            stage_executor=stage_executor,
             max_iterations=self.config.agent_runtime_loop_max_iterations,
             stop_on_verify_pass=self.config.agent_runtime_loop_stop_on_verify_pass,
         )
@@ -407,10 +428,17 @@ class TaskRunner:
         }
 
     def _repair_apply_effective(self, apply_result: Dict) -> bool:
-        if any(item.get("executed") and int(item.get("exit_code") or 0) == 0 for item in apply_result.get("action_results", [])):
-            return True
-        metadata_actions = {"update_verify_hint", "rerun_from_stage"}
-        return any(item.get("action_type") in metadata_actions and item.get("status") == "metadata_only" for item in apply_result.get("action_results", []))
+        """Check if repair had a truly effective action.
+
+        metadata_only actions (update_verify_hint, rerun_from_stage) NEVER count.
+        Only executed actions with exit_code=0 or strong_verify_pass qualify.
+        """
+        for item in apply_result.get("action_results", []):
+            if item.get("executed") is True and int(item.get("exit_code") or 0) == 0:
+                return True
+            if item.get("tool_result", {}).get("strong_verify_pass") is True:
+                return True
+        return False
 
     def _resume_request_from_pipeline(self, pipeline: Dict) -> Dict:
         for stage, result in pipeline.items():
