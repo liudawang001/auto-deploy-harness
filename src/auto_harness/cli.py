@@ -58,6 +58,10 @@ def build_parser() -> argparse.ArgumentParser:
     deploy.add_argument("--agent-runtime-loop", action="store_true", default=False)
     deploy.add_argument("--agent-runtime-loop-max-iterations", type=int, default=None)
     deploy.add_argument("--agent-runtime-loop-position", choices=["primary", "post_pipeline"], default=None)
+    deploy.add_argument("--agent-plan-first", action="store_true", default=False)
+    deploy.add_argument("--agent-plan-first-provider", choices=["mock", "xunfei"], default=None)
+    deploy.add_argument("--agent-plan-first-mode", choices=["planner", "gated_actor"], default=None)
+    deploy.add_argument("--agent-plan-first-max-replans", type=int, default=None)
 
     resume = sub.add_parser("resume", help="resume an existing task")
     resume.add_argument("--task-id", required=True)
@@ -278,6 +282,16 @@ def _apply_cli_overrides(config: HarnessConfig, args) -> None:
         config.agent_runtime_loop_max_iterations = max(1, args.agent_runtime_loop_max_iterations)
     if getattr(args, "agent_runtime_loop_position", None) is not None:
         config.agent_runtime_loop_position = args.agent_runtime_loop_position
+    # Plan-first CLI overrides
+    if getattr(args, "agent_plan_first", False):
+        config.agent_plan_first = True
+        config.agent_mode = "gated_actor"
+    if getattr(args, "agent_plan_first_provider", None):
+        config.agent_plan_first_provider = args.agent_plan_first_provider
+    if getattr(args, "agent_plan_first_mode", None):
+        config.agent_plan_first_mode = args.agent_plan_first_mode
+    if getattr(args, "agent_plan_first_max_replans", None) is not None:
+        config.agent_plan_first_max_replans = max(0, args.agent_plan_first_max_replans)
 
 
 def main(argv=None) -> int:

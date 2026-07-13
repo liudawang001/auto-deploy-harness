@@ -579,3 +579,53 @@ PYTHONPATH=src python3 -m auto_harness.cli benchmark --case-id gradio_config_dis
 默认情况下，`deploy` 是 dry-run，不会安装依赖，也不会启动长驻服务，除非显式传入执行参数。
 
 执行模式还受命令白名单保护。`env_deploy` 和 `runner` 会拒绝 `configs/default.json` 的 `allowed_commands` 之外的命令。
+
+## LLM Plan-first Agent Mode
+
+auto-deploy-harness 支持 Plan-first 部署模式。在此模式下，LLM 先读取经过脱敏的项目快照，生成结构化部署方案（install 命令、runner 候选、model asset 策略、verify request），框架将其当作不可信 proposal：经过 schema 校验、policy gate 验证、编译为 effective plan，再分阶段执行。最终是否部署成功仍由 trace-based evidence 判定，不由 LLM 自行声称。
+
+运行：
+
+```bash
+PYTHONPATH=src python3 -m auto_harness.cli deploy \
+  --repo tests/fixtures/e2e/llm_plan_first_http_trace \
+  --name plan-first-http \
+  --execute \
+  --allow-install \
+  --allow-start \
+  --agent-plan-first \
+  --agent-plan-first-provider mock \
+  --agent-plan-first-mode gated_actor
+```
+
+核心流程：
+
+```text
+项目代码/文件观察
+  -> LLM 生成部署方案和命令候选
+  -> 框架校验/编译（schema + policy gate + command allowlist + path boundary + secret redaction）
+  -> 分阶段执行
+  -> evidence verify（必须包含当前 trace_id）
+  -> 失败后 LLM replan
+```
+
+检查产出：
+
+```text
+runs/<task-id>/reports/project_snapshot.json
+runs/<task-id>/reports/llm_deployment_plan.raw.json
+runs/<task-id>/reports/llm_deployment_plan.parsed.json
+runs/<task-id>/reports/llm_plan_policy.json
+runs/<task-id>/reports/effective_deployment_plan.json
+runs/<task-id>/reports/plan_revisions.jsonl
+runs/<task-id>/reports/llm_contribution_evidence.json
+runs/<task-id>/evidence/*trace*.json
+```
+
+关键安全属性：
+
+- raw LLM plan 和 effective plan 必须分开。LLM 给的是 proposal，框架执行的是 policy-normalized plan。
+- LLM 不直接执行 shell，只能提出命令候选。
+- 所有命令必须通过 command allowlist、path boundary、secret redaction 和 verify trace 检查。
+- 失败后 LLM 可基于真实日志和 evidence replan，但新 plan 仍需通过 policy gate。
+- 最终成功只能由 VerifyModule 的当前 trace evidence 判定。

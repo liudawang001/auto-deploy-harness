@@ -84,6 +84,15 @@ class HarnessConfig:
     agent_runtime_loop_max_iterations: int = 5
     agent_runtime_loop_stop_on_verify_pass: bool = True
     agent_runtime_loop_position: str = "primary"  # primary | post_pipeline
+    # LLM Plan-first configuration
+    agent_plan_first: bool = False
+    agent_plan_first_provider: str = "mock"
+    agent_plan_first_mode: str = "planner"  # planner | gated_actor
+    agent_plan_first_max_replans: int = 2
+    agent_plan_first_max_files: int = 80
+    agent_plan_first_max_file_chars: int = 6000
+    agent_plan_first_require_grounding: bool = True
+    agent_plan_first_allow_external_network: bool = False
 
     def __post_init__(self) -> None:
         if self.allowed_commands is None:
@@ -142,6 +151,15 @@ class HarnessConfig:
             known["memory_evolution_enabled"] = os.environ.get("AUTO_HARNESS_MEMORY_EVOLUTION_ENABLED") == "1"
         if os.environ.get("AUTO_HARNESS_MEMORY_EVOLUTION_PROVIDER"):
             known["memory_evolution_provider"] = os.environ["AUTO_HARNESS_MEMORY_EVOLUTION_PROVIDER"]
+        # Plan-first env overrides
+        if os.environ.get("AUTO_HARNESS_AGENT_PLAN_FIRST"):
+            known["agent_plan_first"] = os.environ.get("AUTO_HARNESS_AGENT_PLAN_FIRST") == "1"
+        if os.environ.get("AUTO_HARNESS_AGENT_PLAN_FIRST_PROVIDER"):
+            known["agent_plan_first_provider"] = os.environ["AUTO_HARNESS_AGENT_PLAN_FIRST_PROVIDER"]
+        if os.environ.get("AUTO_HARNESS_AGENT_PLAN_FIRST_MODE"):
+            known["agent_plan_first_mode"] = os.environ["AUTO_HARNESS_AGENT_PLAN_FIRST_MODE"]
+        if os.environ.get("AUTO_HARNESS_AGENT_PLAN_FIRST_MAX_REPLANS"):
+            known["agent_plan_first_max_replans"] = int(os.environ["AUTO_HARNESS_AGENT_PLAN_FIRST_MAX_REPLANS"])
         return cls(**known)
 
     @property

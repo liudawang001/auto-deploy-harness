@@ -121,6 +121,11 @@ class TaskRunner:
         return self.run_existing(spec.task_id, dry_run=dry_run)
 
     def run_existing(self, task_id: str, dry_run: bool = True, start_stage: str = "analyze") -> str:
+        # Plan-first takes highest priority
+        if self.config.agent_plan_first:
+            self._run_plan_first_loop(task_id, dry_run=dry_run)
+            return task_id
+
         # Check if AgentLoop should be the primary controller
         if (self.config.agent_enable_runtime_loop
                 and self.config.agent_mode == "gated_actor"
@@ -147,6 +152,50 @@ class TaskRunner:
             self._run_agent_runtime_loop(task_id, dry_run=dry_run)
 
         return task_id
+
+    def _run_plan_first_loop(self, task_id: str, dry_run: bool = True) -> None:
+        """Run the Plan-first Deployment Loop."""
+        from auto_harness.agent_runtime.plan_first_loop import PlanFirstDeploymentLoop
+
+        run_dir = self.store.run_dir(task_id)
+        repo_dir = run_dir / "workspace" / "repo"
+
+        # Load task for runtime policy
+        task = self.store.load_task(task_id)
+        runtime_policy = {
+            "allow_dependency_install": task.runtime.allow_dependency_install,
+            "allow_service_start": task.runtime.allow_service_start,
+            "allow_source_edit": task.runtime.allow_source_edit,
+        }
+
+        # Create provider
+        provider = self._create_plan_first_provider()
+
+        loop = PlanFirstDeploymentLoop(
+            provider=provider,
+            config=self.config,
+            runtime_policy=runtime_policy,
+            max_replans=self.config.agent_plan_first_max_replans,
+        )
+
+        result = loop.run(
+            task_id=task_id,
+            run_dir=run_dir,
+            repo_dir=repo_dir,
+            dry_run=dry_run,
+        )
+
+        write_json(run_dir / "reports" / "plan_first_result.json", result)
+        self.store.events(task_id).append("task", "plan_first_loop_completed", {
+            "stop_reason": result.get("stop_reason", ""),
+            "plan_id": result.get("plan_id", ""),
+        })
+
+    def _create_plan_first_provider(self):
+        """Create the LLM provider for plan-first mode."""
+        if self.config.agent_plan_first_provider == "xunfei":
+            return XunfeiSparkProvider()
+        return MockLLMProvider()
 
     def _run_agent_runtime_loop(self, task_id: str, dry_run: bool = True) -> None:
         """Run the unified DeploymentAgentLoop as primary controller."""
