@@ -147,6 +147,10 @@ class ReportGenerator:
                 "- Reason: %s" % verified_memory.get("reason", ""),
                 "",
             ])
+        # Skill Usage / Effects / Outcomes
+        skill_sections = self._build_skill_sections(run_dir, results)
+        if skill_sections:
+            lines.extend(skill_sections)
         execution_audit = execution_audit or self._read_optional(run_dir / "reports" / "execution_audit.json")
         if isinstance(execution_audit, dict) and execution_audit:
             lines.extend([
@@ -308,6 +312,81 @@ class ReportGenerator:
             if value and value.upper() == value and all(ch.isalnum() or ch == "_" for ch in value):
                 safe.append(value)
         return safe
+
+    def _build_skill_sections(self, run_dir: Path, results: Dict[str, Dict]) -> List[str]:
+        """Build Skill Usage, Effects, and Outcomes report sections.
+
+        Returns list of markdown lines, or empty list if no skill data.
+        """
+        lines: List[str] = []
+
+        # Skill Usage: collect from stage control_context
+        skill_usage: Dict[str, List[str]] = {}  # stage -> [skill names]
+        for stage, result in results.items():
+            context = result.get("data", {}).get("control_context", {}) if isinstance(result.get("data"), dict) else {}
+            selected = context.get("selected_skills", [])
+            if selected:
+                names = []
+                for s in selected:
+                    name = s.get("name", "")
+                    version = s.get("version", "")
+                    if name:
+                        names.append("%s@%s" % (name, version) if version else name)
+                if names:
+                    skill_usage[stage] = names
+
+        # Also check project_snapshot.json for plan_first skills
+        snapshot = self._read_optional(run_dir / "reports" / "project_snapshot.json")
+        if isinstance(snapshot, dict):
+            snapshot_skills = snapshot.get("selected_skills", [])
+            if snapshot_skills and "plan_first" not in skill_usage:
+                names = []
+                for s in snapshot_skills:
+                    name = s.get("name", "")
+                    version = s.get("version", "")
+                    if name:
+                        names.append("%s@%s" % (name, version) if version else name)
+                if names:
+                    skill_usage["plan_first"] = names
+
+        if skill_usage:
+            lines.extend(["## Skill Usage", ""])
+            for stage, names in skill_usage.items():
+                lines.append("- %s: %s" % (stage, ", ".join("`%s`" % n for n in names)))
+            lines.append("")
+
+        # Skill Effects: from skill_effects.json
+        effects = self._read_optional(run_dir / "reports" / "skill_effects.json")
+        if isinstance(effects, dict) and effects.get("effects"):
+            lines.extend(["## Skill Effects", ""])
+            for effect in effects["effects"]:
+                name = effect.get("skill_name", "")
+                field = effect.get("field_changed", "")
+                accepted = effect.get("accepted_by_policy", False)
+                effect_type = effect.get("effect_type", "")
+                lines.append(
+                    "- `%s` influenced `%s`; policy accepted: `%s` (%s)" % (
+                        name, field, str(accepted).lower(), effect_type,
+                    )
+                )
+            lines.append("")
+
+        # Skill Outcomes: summary from skill_effects
+        if isinstance(effects, dict) and effects.get("effects"):
+            total_selected = len(set(e.get("skill_name", "") for e in effects["effects"]))
+            influenced = [e for e in effects["effects"] if e.get("field_changed")]
+            harmful = [e for e in effects["effects"] if not e.get("accepted_by_policy")]
+            verify_result = results.get("verify", {})
+            trace_verified = verify_result.get("status", "") in ("passed", "pass") if isinstance(verify_result, dict) else False
+
+            lines.extend(["## Skill Outcomes", ""])
+            lines.append("- Selected skills: `%d`" % total_selected)
+            lines.append("- Influenced plan: `%d`" % len(influenced))
+            lines.append("- Final trace verified: `%s`" % str(trace_verified).lower())
+            lines.append("- Harmful skill effects: `%d`" % len(harmful))
+            lines.append("")
+
+        return lines
 
     def _read_optional(self, path: Path):
         if not path.exists():

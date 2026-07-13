@@ -1,11 +1,30 @@
 ---
 name: diagnose-runtime-failure
-description: 诊断并沉淀自动部署中的复发问题。用于 env_deploy、runner、verify 阶段失败或 uncertain 时，处理依赖错误、进程退出、模型文件缺失、端口冲突、API key 缺失、验证证据不足，并写入可复用 issue memory。
+version: "1.0.0"
+type: repair_skill
+stages: [repair, replan, runner, env_deploy]
+frameworks: []
+failure_categories: [dependency_missing, port_conflict, import_error, process_exited]
+risk_level: medium
+side_effects: false
+allowed_tools: [classify_failure, propose_repair, apply_dependency_constraint]
+success_signals: [root_cause_classified, repair_plan_generated, issue_memory_written]
+regression_cases: [missing_dependency_detected, numpy_pydantic_conflict_resolved, wheel_build_failure_flagged, port_conflict_identified, api_key_missing_recorded]
 ---
 
-# 运行失败诊断
+# Purpose
 
-目标：把失败或不确定阶段转化为可复用的问题诊断，避免泄漏密钥，也不伪造成功。
+诊断并沉淀自动部署中的复发问题。用于 env_deploy、runner、verify 阶段失败或 uncertain 时，处理依赖错误、进程退出、模型文件缺失、端口冲突、API key 缺失、验证证据不足，并写入可复用 issue memory。
+
+把失败或不确定阶段转化为可复用的问题诊断，避免泄漏密钥，也不伪造成功。
+
+# When To Use
+
+- Pipeline 处于 repair、replan、runner 或 env_deploy 阶段且出现失败或 uncertain 时自动激活。
+- 需要对运行失败进行根因分类和修复建议时。
+- 需要将可复用问题模式写入 issue memory 时。
+
+# Guidance
 
 ## 排查顺序
 
@@ -40,3 +59,19 @@ description: 诊断并沉淀自动部署中的复发问题。用于 env_deploy�
 当 `allow_source_edit` 为 false 时，不要静默修改源码。不要无限重试。任何 workaround 都必须重新经过 verify 阶段并产生强证据后，才能视为成功。
 
 当前 repair apply 只会写入可审计 artifacts，例如依赖安装建议、verify hint 建议、所需环境变量名。不要把 repair artifacts 的存在视为修复已经执行。
+
+# Allowed Plan Effects
+
+- 分类失败根因并输出结构化诊断。
+- 生成修复建议（依赖安装、约束调整、verify hint 更新等）。
+- 写入 issue memory 记录可复用问题模式。
+- 写入受控 repair artifacts。
+
+# Forbidden
+
+- 不要泄漏密钥值。
+- 不要伪造成功。
+- 不要在 `allow_source_edit` 为 false 时静默修改源码。
+- 不要无限重试。
+- 不要把 repair artifacts 的存在视为修复已经执行。
+- 不要直接执行 shell 或修改源码（必须经过 pipeline 权限开关）。

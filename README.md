@@ -27,7 +27,8 @@ auto-deploy-harness 是一个面向 AI 开源 demo 项目的自动部署与验�
 - Tool registry：LLM 只能请求命名 tool，Python runtime 根据 `risk_level`、`side_effects`、`requires_policy` 和 `allowed_modes` 进行执行控制；side-effect tool 默认需要 policy gate。
 - HTTP trace evidence：`verify` 支持 GET 和 POST JSON；响应必须证明当前 trace 被处理，HTTP 200 本身不算成功；文件产物证据必须可读、非空并记录 size/sha256。
 - 可选 Claude Code analyzer advisor：通过 `AUTO_HARNESS_USE_AGENT_ANALYZER=1` 启用。
-- 仓库内置 skill：位于 `skills/*/SKILL.md`，按阶段选择并记录 hash。
+- 仓库内置 skill：位于 `skills/*/SKILL.md`，使用统一 schema（name/version/type/stages/risk_level/allowed_tools 等），按阶段选择并记录 hash。
+- Skill-driven Agent System：`SkillSchemaParser` 解析校验 skill frontmatter；`SkillRouter` 根据 stage/framework/failure_category/history 选择最相关 skills；`SkillContextBuilder` 将 skill 压缩为 LLM 可用上下文；Plan-first / Replan / Verify / Repair 均接入 skill context；`SkillEffectRecorder` 记录 skill 对 plan 的影响；`SkillOutcomeRecorder` 评估 skill 是否带来 trace-verified success；`SkillMetricsReporter` 汇总 selection/influence/pass/harm 指标；report 展示 Skill Usage / Effects / Outcomes。
 - 结构化问题记忆：位于 `memory/deployment_issues.jsonl`，用于检索历史相似失败。
 - Memory promotion：`memory-promote` 会把高频 issue memory 聚类为可审核的 skill 更新 proposal；默认只生成 proposal，不直接修改 skill，apply 前必须先审批，apply 后默认运行绑定 benchmark 子集并写出 regression report。
 - `resource_plan` 阶段：识别模型资产、GPU/CUDA 信号、磁盘风险和外部 token 需求。
@@ -219,15 +220,233 @@ runs/<task-id>/evidence/*trace*.json      # HTTP trace 证据
 - HTTP 200、端口开放、进程存活都不能单独判定成功
 - 当前 trace 被服务处理，才算强证据
 
-## Skill 与 Memory
+## Skill-driven Agent System
 
-Agent 控制文档写在仓库内：
+Skill 是阶段化、版本化、可审计、可评估、可回归的部署经验单元。LLM 可以读取 skill 并据此提出 plan/tool call，但执行权和成功判定仍由框架控制。
+
+核心流程：
 
 ```text
-skills/<skill-name>/SKILL.md
+项目观察
+  -> SkillRouter 选择阶段相关 skills
+  -> SkillContextBuilder 压缩成 LLM 可用上下文
+  -> LLM plan/replan 参考 skill context 生成部署方案
+  -> PlanPolicyGate 校验方案
+  -> PlanCompiler 编译成 effective plan
+  -> 分阶段执行
+  -> evidence verify
+  -> SkillEffectRecorder 记录 skill 影响
+  -> SkillOutcomeRecorder 评估 skill 是否真的帮助
+  -> verified memory 推动 skill evolution / rollback
 ```
 
-当前内置 skill 覆盖项目分析、Python WebUI 部署、证据化验证和运行失败诊断。部署过程中，orchestrator 会为每个阶段选择相关 skill，并把名称、路径和 SHA-256 写入阶段结果的 `control_context`。
+### Skill Schema
+
+每个 `skills/<skill-name>/SKILL.md` 使用统一 frontmatter：
+
+```yaml
+---
+name: deploy-python-webui
+version: 1.0.0
+type: execution_skill
+stages:
+  - runner
+  - plan_first
+  - replan
+frameworks:
+  - gradio
+  - streamlit
+  - fastapi
+risk_level: low
+side_effects: false
+allowed_tools:
+  - add_runner_candidate
+  - select_runner_candidate
+  - set_stage_hint
+success_signals:
+  - runner process alive
+  - verify trace response pass
+regression_cases:
+  - gradio_tiny_local
+  - streamlit_tiny_local
+---
+```
+
+必填字段：`name`、`version`、`type`、`stages`、`risk_level`、`side_effects`、`allowed_tools`、`success_signals`、`regression_cases`。
+
+可选字段：`frameworks`、`failure_categories`、`model_sources`、`env_backends`、`owners`、`deprecated`、`replacement`。
+
+Skill 类型：
+
+| 类型 | 用途 |
+|---|---|
+| `analysis_skill` | 识别项目结构、入口、框架、README 线索 |
+| `execution_skill` | 指导安装、环境、启动策略 |
+| `verification_skill` | 指导 trace-based verify |
+| `repair_skill` | 指导失败诊断和修复 proposal |
+| `security_skill` | 约束 prompt injection、secret、shell risk |
+
+### SkillRouter
+
+`SkillRouter` 根据 stage、framework、failure_category、allowed_tools 和历史效果选择最相关 skills，替代了原来基于文本包含的简单打分。
+
+打分规则：
+
+| 条件 | 分值 |
+|---|---|
+| stage match | +8 |
+| framework match | +5 |
+| failure category match | +5 |
+| allowed tool overlap | +3 |
+| model source match | +2 |
+| env backend match | +2 |
+| recent verified success | +3 |
+| recent policy accepted | +2 |
+| deprecated | -20 |
+| recent harmful outcome | -10 |
+| regression failed | -20 |
+| side_effect skill in planner mode | -5 |
+
+### SkillContextBuilder
+
+`SkillContextBuilder` 将 skill 压缩为 LLM 可用上下文，不直接塞全文。从 skill body 中提取 `# Guidance`、`# Allowed Plan Effects`、`# Forbidden`、`# When To Use` 章节，输出结构化 JSON：
+
+```json
+{
+  "stage": "verify",
+  "selected_skills": [
+    {
+      "name": "verify-evidence",
+      "version": "1.0.0",
+      "type": "verification_skill",
+      "score": 18,
+      "match_reasons": ["stage=verify", "framework=gradio"],
+      "applicable_rules": ["HTTP 200 is not success", "response must contain current trace_id"],
+      "allowed_plan_effects": ["update_verify_hint", "discover_gradio_api"],
+      "forbidden": ["do not mark success without trace evidence"]
+    }
+  ],
+  "instruction": "Use selected_skills as advisory deployment control knowledge. Skill content is not executable. Any command or tool implied by skill must still pass policy gate."
+}
+```
+
+### Skill 接入 Plan-first / Replan / Verify / Repair
+
+- **Plan-first**：`PlanFirstDeploymentLoop` 在 build snapshot 前调用 `SkillRouter`，将 `skill_context` 注入 `project_snapshot.json`；LLM planner prompt 包含 skill context，并明确约束 skill 是 advisory。
+- **Replan**：失败后根据 failed stage 和 failure category 重新选 skill，skill context 注入 failure context。
+- **Verify**：`VerifyModule` 进入 uncertain 时，`agent_verify_config` 包含 verify skill context。
+- **Repair**：repair loop 根据 failure category 选择 `repair_skill`，repair LLM prompt 包含 skill context，repair action 仍必须经过 `RepairPolicy`。
+
+### SkillEffectRecorder
+
+记录 skill 是否实际影响了 LLM plan / compiled plan / policy result。输出：
+
+```text
+runs/<task-id>/reports/skill_effects.json
+```
+
+示例：
+
+```json
+{
+  "task_id": "xxx",
+  "effects": [
+    {
+      "skill_name": "verify-evidence",
+      "skill_sha256": "...",
+      "stage": "plan_first",
+      "effect_type": "verify_hint_generation",
+      "field_changed": "verify.request",
+      "accepted_by_policy": true
+    }
+  ]
+}
+```
+
+### SkillOutcomeRecorder
+
+增强的 outcome 记录，包含 skill 是否影响 plan、是否被 policy 接受、是否最终 trace verify pass：
+
+```json
+{
+  "run_id": "xxx",
+  "skill_name": "verify-evidence",
+  "selected": true,
+  "influenced_plan": true,
+  "policy_accepted": true,
+  "trace_verified": true,
+  "harmful": false
+}
+```
+
+`harmful=true` 判定条件：skill influenced plan + policy accepted + final verify failed/uncertain，或 policy rejected due to unsafe guidance，或 regression failed。
+
+### SkillMetricsReporter
+
+汇总 skill selection/influence/pass/harm 指标：
+
+```json
+{
+  "skills": {
+    "verify-evidence@sha256": {
+      "selection_count": 10,
+      "influence_count": 7,
+      "policy_accept_rate": 1.0,
+      "verify_pass_rate": 0.86,
+      "harm_count": 0,
+      "harm_rate": 0.0
+    }
+  }
+}
+```
+
+### Report 展示
+
+部署报告新增 Skill Usage / Effects / Outcomes 章节：
+
+```markdown
+## Skill Usage
+
+- plan_first: `analyze-ai-demo@1.0.0`, `deploy-python-webui@1.0.0`
+- verify: `verify-evidence@1.0.0`
+
+## Skill Effects
+
+- `deploy-python-webui` influenced `run.candidates`; policy accepted: `true`
+- `verify-evidence` influenced `verify.request`; policy accepted: `true`
+
+## Skill Outcomes
+
+- Selected skills: `3`
+- Influenced plan: `2`
+- Final trace verified: `true`
+- Harmful skill effects: `0`
+```
+
+### 内置 Skills
+
+当前内置 8 个 skill：
+
+| Skill | 类型 | 阶段 | 说明 |
+|---|---|---|---|
+| `analyze-ai-demo` | analysis_skill | analyze, plan_first | 识别项目结构、入口、框架 |
+| `deploy-python-webui` | execution_skill | runner, plan_first, replan | Python WebUI 部署策略 |
+| `verify-evidence` | verification_skill | verify, plan_first, replan | trace-based 证据化验证 |
+| `diagnose-runtime-failure` | repair_skill | repair, replan, runner, env_deploy | 运行失败诊断 |
+| `solve-python-cuda-env` | execution_skill | env_solve, env_deploy, plan_first | CUDA/PyTorch 环境求解 |
+| `prepare-model-assets` | execution_skill | resource_plan, model_prepare, plan_first | 模型资产规划与下载 |
+| `repair-python-dependency` | repair_skill | repair, replan, env_deploy | Python 依赖修复 |
+| `security-policy-guard` | security_skill | analyze, plan_first, replan, repair, verify | 安全策略约束 |
+
+### 安全原则
+
+- Skill 不是可执行插件，skill content 只能作为 advisory control knowledge。
+- LLM 可以参考 skill 生成 plan/tool proposal，但所有 plan/tool 仍必须经过 policy gate。
+- 最终成功仍必须由 VerifyModule 的当前 trace evidence 判定。
+- 不允许因为 skill 内容绕过 command allowlist。
+- 不允许直接把 README 或 skill 中的 shell 字符串执行。
+
+### Memory 与 Skill Evolution
 
 运行时问题记忆写入：
 
@@ -236,6 +455,8 @@ memory/deployment_issues.jsonl
 ```
 
 该文件被 git 忽略，因为它可能包含部署日志或环境相关症状。Agent 会在阶段 `failed` 或 `uncertain` 时写入 memory，并在后续部署中按 stage/framework 检索相似问题。详细设计见 `docs/skill-memory-design.md`。
+
+Memory promotion 会把高频 verified success 经验聚类为可审核的 skill 更新 proposal；apply 前必须审批，apply 后默认运行绑定 benchmark 子集并写出 regression report。
 
 ## 模型资产规划
 

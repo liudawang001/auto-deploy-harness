@@ -1,11 +1,30 @@
 ---
 name: solve-python-cuda-env
-description: 求解 Python/CUDA/Torch 依赖环境。用于 env_solve 阶段，识别 Python 版本范围、Torch CUDA wheel、老 Gradio 与 numpy/pydantic 兼容风险、flash-attn/bitsandbytes/xformers 等 GPU 依赖风险，生成可审计 install plan 和 constraints。
+version: "1.0.0"
+type: execution_skill
+stages: [env_solve, env_deploy, plan_first]
+frameworks: [torch, transformers, vllm]
+risk_level: medium
+side_effects: false
+allowed_tools: [select_environment_backend, select_torch_variant, apply_dependency_constraint]
+success_signals: [install_plan_generated, constraints_applied, torch_solution_selected, gpu_package_matrix_produced]
+regression_cases: [cuda_121_torch_cu121_selected, cuda_118_torch_cu118_selected, no_cuda_cpu_fallback, numpy_pydantic_constraint_added, flash_attn_blocked_on_cpu, opencv_headless_suggested]
 ---
 
-# Python / CUDA 环境求解
+# Purpose
 
-目标：在真正执行 `pip install` 前，先把依赖安装方案变得可解释、可审计、可回滚。
+求解 Python/CUDA/Torch 依赖环境。用于 env_solve 阶段，识别 Python 版本范围、Torch CUDA wheel、老 Gradio 与 numpy/pydantic 兼容风险、flash-attn/bitsandbytes/xformers 等 GPU 依赖风险，生成可审计 install plan 和 constraints。
+
+在真正执行 `pip install` 前，先把依赖安装方案变得可解释、可审计、可回滚。
+
+# When To Use
+
+- Pipeline 处于 env_solve、env_deploy 或 plan_first 阶段时自动激活。
+- 项目包含 PyTorch、Transformers、vLLM 等 GPU 相关依赖时。
+- 需要确定 CUDA 版本与 Torch wheel 兼容性时。
+- 需要处理 numpy/pydantic/protobuf 版本冲突时。
+
+# Guidance
 
 ## 输入证据
 
@@ -45,6 +64,16 @@ description: 求解 Python/CUDA/Torch 依赖环境。用于 env_solve 阶段，�
 - `gpu_package_matrix`: 每个 GPU 包的 declared requirement、status、requires_cuda、reasons 和 recommended_actions
 - `risk_reasons`: GPU/CUDA/Torch/构建相关风险
 
-## 安全边界
+# Allowed Plan Effects
 
-不要修改源码。不要执行 shell。不要为了提高成功率随意升级核心依赖；所有新增约束必须有可解释原因，并写入阶段结果。
+- 选择环境后端（local_venv 等）。
+- 选择 Torch wheel variant（cu121、cu118、cpu）。
+- 应用依赖约束（numpy、pydantic、protobuf 版本限制等）。
+- 生成 install plan 供 env_deploy 执行。
+
+# Forbidden
+
+- 不要修改源码。
+- 不要执行 shell。
+- 不要为了提高成功率随意升级核心依赖；所有新增约束必须有可解释原因，并写入阶段结果。
+- 不要在 CPU Torch fallback 或无 CUDA 时假装 GPU 包可安装。

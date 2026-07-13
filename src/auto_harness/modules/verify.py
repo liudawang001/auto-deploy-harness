@@ -836,6 +836,11 @@ class VerifyModule:
 
         runtime = AgentRuntime()
         try:
+            # Build skill context for verify if not already in config
+            skill_context = cfg.get("skill_context", {})
+            if not skill_context and analysis:
+                skill_context = self._build_verify_skill_context(analysis)
+
             result = runtime.act_verify(
                 run_dir=run_dir,
                 repo_path=repo_path,
@@ -854,6 +859,7 @@ class VerifyModule:
                 max_steps=max_steps,
                 agent_mode=agent_mode,
                 allowed_hosts=allowed_hosts,
+                skill_context=skill_context,
             )
             return result
         except Exception as exc:
@@ -873,3 +879,40 @@ class VerifyModule:
                 "evidence_paths": [],
                 "mode": "",
             }
+
+    def _build_verify_skill_context(self, analysis: Dict) -> Dict:
+        """Build skill context for verify stage using SkillRouter.
+
+        Falls back to empty context if skills_dir is not available.
+        """
+        try:
+            from auto_harness.skills.router import SkillRouter, SkillRouteRequest
+            from auto_harness.skills.context import SkillContextBuilder
+
+            skills_dir = getattr(self, '_skills_dir', None)
+            if not skills_dir:
+                # Try to get from stage_context
+                ctx = getattr(self, 'stage_context', {}) or {}
+                # No skills_dir available, return empty context
+                return {}
+
+            skills_dir = Path(skills_dir)
+            if not skills_dir.exists():
+                return {}
+
+            router = SkillRouter(skills_dir=skills_dir)
+            request = SkillRouteRequest(
+                stage="verify",
+                analysis=analysis,
+                frameworks=analysis.get("frameworks", []),
+                allowed_tools=["probe_http", "discover_gradio_api", "discover_openapi_schema", "probe_browser_dom"],
+            )
+            routed = router.route(request, limit=3)
+            if not routed:
+                return {}
+
+            builder = SkillContextBuilder()
+            return builder.build(routed, stage="verify")
+        except Exception:
+            # Skill context building must not crash verify
+            return {}

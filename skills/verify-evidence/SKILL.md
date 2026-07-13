@@ -1,11 +1,29 @@
 ---
 name: verify-evidence
-description: 对 AI 自动部署结果做证据化验证。用于 verify 阶段，覆盖 WebUI/API 服务，尤其是 Gradio、FastAPI、Flask、Streamlit 项目；要求发送可追踪 trace 请求、检查响应/产物/日志，诊断 uncertain，避免把 HTTP 200 误判为成功。
+version: "1.0.0"
+type: verification_skill
+stages: [verify, plan_first, replan]
+frameworks: []
+risk_level: low
+side_effects: false
+allowed_tools: [probe_http, discover_gradio_api, discover_openapi_schema, probe_browser_dom]
+success_signals: [trace_id_observed_in_response, output_artifact_generated, framework_log_confirms_trace]
+regression_cases: [gradio_config_discovery, fastapi_openapi_discovery, vllm_chat_completions_trace, streamlit_dom_probe, http_200_not_treated_as_success, uncertain_on_missing_evidence]
 ---
 
-# 证据化 Verify
+# Purpose
 
-目标：证明本次部署的服务处理了当前 run 生成的新 trace；如果无法证明，必须返回 `uncertain`。
+对 AI 自动部署结果做证据化验证。用于 verify 阶段，覆盖 WebUI/API 服务，尤其是 Gradio、FastAPI、Flask、Streamlit 项目；要求发送可追踪 trace 请求、检查响应/产物/日志，诊断 uncertain，避免把 HTTP 200 误判为成功。
+
+证明本次部署的服务处理了当前 run 生成的新 trace；如果无法证明，必须返回 `uncertain`。
+
+# When To Use
+
+- Pipeline 处于 verify、plan_first 或 replan 阶段时自动激活。
+- 需要验证已部署服务是否真正处理了请求时。
+- 需要区分"服务存活"和"业务链路成功"时。
+
+# Guidance
 
 ## 验证策略
 
@@ -37,4 +55,18 @@ description: 对 AI 自动部署结果做证据化验证。用于 verify 阶段�
 
 当前 Streamlit DOM probe 不是完整浏览器自动化。它可以作为 readiness/DOM evidence，但复杂表单输入、按钮点击、文件上传仍需要后续 browser backend。
 
-对于大模型首次推理，不要因为等待时间长就提前判失败；应通过进度状态和日志证据区分“仍在加载模型”和“已经抛出异常”。
+对于大模型首次推理，不要因为等待时间长就提前判失败；应通过进度状态和日志证据区分"仍在加载模型"和"已经抛出异常"。
+
+# Allowed Plan Effects
+
+- 发送 HTTP trace 请求到已部署服务。
+- 读取框架 API 配置（Gradio /config、OpenAPI schema 等）。
+- 探测浏览器 DOM 获取页面状态。
+- 输出验证结果和诊断分类。
+
+# Forbidden
+
+- 不要把 HTTP 200 误判为业务成功。
+- 不要为了让 pipeline 变绿而降低验证标准。
+- 不要因为等待时间长就提前判失败（应区分"仍在加载"和"已抛出异常"）。
+- 不要假定 Streamlit DOM probe 等同于完整浏览器自动化。

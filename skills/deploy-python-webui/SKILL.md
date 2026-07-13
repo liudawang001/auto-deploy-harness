@@ -1,11 +1,29 @@
 ---
 name: deploy-python-webui
-description: 部署 Python AI WebUI 项目。用于 env_deploy 和 runner 阶段，覆盖 Gradio、Streamlit、Flask、FastAPI、PyTorch、Transformers、requirements 项目的虚拟环境创建、依赖安装、启动命令选择和端口就绪检查。
+version: "1.0.0"
+type: execution_skill
+stages: [runner, plan_first, replan]
+frameworks: [gradio, streamlit, fastapi, flask]
+risk_level: low
+side_effects: false
+allowed_tools: [add_runner_candidate, select_runner_candidate, set_stage_hint]
+success_signals: [process_alive, port_ready, run_log_written]
+regression_cases: [gradio_launch_success, streamlit_launch_success, fastapi_uvicorn_launch, flask_launch, docker_plan_generated, process_exit_detected]
 ---
 
-# Python WebUI 部署
+# Purpose
 
-目标：在隔离的运行目录中构建 Python 环境，并用受控权限启动最可能正确的服务命令。
+部署 Python AI WebUI 项目。用于 env_deploy 和 runner 阶段，覆盖 Gradio、Streamlit、Flask、FastAPI、PyTorch、Transformers、requirements 项目的虚拟环境创建、依赖安装、启动命令选择和端口就绪检查。
+
+在隔离的运行目录中构建 Python 环境，并用受控权限启动最可能正确的服务命令。
+
+# When To Use
+
+- Pipeline 处于 runner、plan_first 或 replan 阶段时自动激活。
+- 需要为 Python WebUI 项目创建虚拟环境、安装依赖、启动服务时。
+- 需要生成 Docker 部署计划时。
+
+# Guidance
 
 ## 执行流程
 
@@ -34,3 +52,18 @@ description: 部署 Python AI WebUI 项目。用于 env_deploy 和 runner 阶段
 ## 证据要求
 
 部署阶段不等于验证成功。runner 阶段至少需要活跃进程、端口就绪证据以及可供后续诊断的日志路径。
+
+# Allowed Plan Effects
+
+- 向 pipeline 提交 runner candidate（启动命令、端口、环境）。
+- 选择并确认 runner candidate 执行。
+- 设置 stage hint 指导后续验证行为。
+- 生成 Docker 部署计划（需经权限校验后执行）。
+
+# Forbidden
+
+- 不要用空白 UI 伪造成功。
+- 不要绕过白名单执行 Docker 命令。
+- 不要吞掉容器侧 stdout/stderr。
+- 不要在进程退出后仅凭日志中的 URL 判定成功。
+- 不要记录密钥值。

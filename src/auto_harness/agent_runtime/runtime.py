@@ -98,6 +98,7 @@ class AgentRuntime:
         max_steps: int = 3,
         agent_mode: str = "gated_actor",
         allowed_hosts: List[str] = None,
+        skill_context: Optional[Dict] = None,
     ) -> Dict:
         """Runtime LLM-driven verify agent loop.
 
@@ -120,6 +121,9 @@ class AgentRuntime:
             allowed_hosts=allowed_hosts or ["127.0.0.1", "localhost"],
         )
         executor = ToolExecutor()
+
+        # Store skill_context for use in observations
+        self._skill_context = skill_context or {}
 
         # Determine allowed tools based on service context
         allowed_tools = self._allowed_tools_for_verify(service_context, initial_verify_result)
@@ -451,6 +455,7 @@ class AgentRuntime:
             "allowed_tools": allowed_tools,
             "constraints": constraints,
             "previous_steps": prev,
+            "skill_context": getattr(self, '_skill_context', {}),
         }
 
     def _critic_evaluate(self, tool_call: ToolCall, observation: Dict) -> Dict:

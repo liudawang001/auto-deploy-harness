@@ -1,11 +1,30 @@
 ---
 name: prepare-model-assets
-description: 规划和准备开源模型资产。用于 resource_plan 和 model_prepare 阶段，识别 Hugging Face、ModelScope、Git LFS、大文件 checkpoint、safetensors、bin 权重，估算磁盘/GPU 资源，生成可恢复下载 manifest 和本地 model_cache 缓存策略。
+version: "1.0.0"
+type: execution_skill
+stages: [resource_plan, model_prepare, plan_first]
+frameworks: []
+risk_level: low
+side_effects: false
+allowed_tools: [select_model_asset_strategy, select_model_source, link_cached_model_asset]
+success_signals: [model_manifest_generated, resource_estimation_completed, download_plan_ready]
+regression_cases: [huggingface_model_identified, modelscope_model_identified, git_lfs_weights_detected, disk_space_checked, sha256_verified, partial_download_resumed]
 ---
 
-# 模型资产准备
+# Purpose
 
-目标：在真正下载或启动服务前，先识别模型资产、评估资源风险，并生成可恢复的资产清单。
+规划和准备开源模型资产。用于 resource_plan 和 model_prepare 阶段，识别 Hugging Face、ModelScope、Git LFS、大文件 checkpoint、safetensors、bin 权重，估算磁盘/GPU 资源，生成可恢复下载 manifest 和本地 model_cache 缓存策略。
+
+在真正下载或启动服务前，先识别模型资产、评估资源风险，并生成可恢复的资产清单。
+
+# When To Use
+
+- Pipeline 处于 resource_plan、model_prepare 或 plan_first 阶段时自动激活。
+- 项目引用了 Hugging Face、ModelScope 模型或包含 Git LFS 权重时。
+- 需要估算磁盘/GPU 资源需求时。
+- 需要生成可恢复下载计划时。
+
+# Guidance
 
 ## 识别来源
 
@@ -31,10 +50,6 @@ description: 规划和准备开源模型资产。用于 resource_plan 和 model_
 - 缓存路径和 cache key。
 - 是否依赖 Git LFS 或 Git submodule，以及对应准备命令。
 
-## 安全边界
-
-不要在 skill 中写密钥。不要在未检查磁盘空间和 token 的情况下直接下载大文件。下载计划必须写入 manifest，便于中断后恢复。
-
 ## 当前实现状态
 
 当前阶段已经支持 Hugging Face 资产下载的第一版实现：
@@ -51,3 +66,17 @@ description: 规划和准备开源模型资产。用于 resource_plan 和 model_
 - Git submodule 应在 `resource_plan.git_submodules` 中记录 name、path、url、branch、initialized 和准备命令；真实执行只能在 `model_prepare` 且 `git` 通过命令白名单后运行 `git submodule sync --recursive` 与 `git submodule update --init --recursive`。
 
 当前已支持并发下载、etag 缓存失效和受控缓存清理。sha256 只在远端清单提供该字段时可用，不要假定所有模型文件都有 checksum。
+
+# Allowed Plan Effects
+
+- 选择模型资产策略（下载、缓存、跳过等）。
+- 选择模型来源（Hugging Face、ModelScope 等）。
+- 链接已缓存的模型资产。
+- 生成下载 manifest 和资源估算。
+
+# Forbidden
+
+- 不要在 skill 中写密钥。
+- 不要在未检查磁盘空间和 token 的情况下直接下载大文件。
+- 下载计划必须写入 manifest，便于中断后恢复。
+- 不要假定所有模型文件都有 sha256 checksum。

@@ -48,8 +48,15 @@ class AgentLoopController:
         if result.status not in ("failed", "uncertain") or not entry:
             return {"handled": False, "stop_reason": "success" if result.status in ("passed", "pass") else "not_recordable"}
 
+        # Route repair skills based on failure category
+        repair_skill_context = self._route_repair_skills(stage, result, analysis)
+
         agent_diagnosis = self._maybe_diagnose(task_id, stage, result, analysis, runtime_policy, run_dir)
         repair_plan = self.repair_planner.propose(stage, result, analysis)
+
+        # Inject skill_context into repair plan if available
+        if repair_skill_context and repair_skill_context.get("selected_skills"):
+            repair_plan["skill_context"] = repair_skill_context
         # Repair Actuator Gate: LLM proposes repair tool_call through decision gate
         if self._repair_gate_enabled():
             repair_gate_result = self._apply_repair_gate(task_id, stage, result, analysis, run_dir)
@@ -132,6 +139,48 @@ class AgentLoopController:
             self.config.agent_mode in ("planner", "gated_actor")
             and getattr(self.config, "agent_enable_repair_gate", False)
         )
+
+    def _route_repair_skills(self, stage: str, result, analysis: Dict) -> Dict:
+        """Route repair skills based on failure category and stage.
+
+        Returns skill_context dict or empty dict if routing fails.
+        """
+        try:
+            from auto_harness.skills.router import SkillRouter, SkillRouteRequest
+            from auto_harness.skills.context import SkillContextBuilder
+
+            skills_dir = getattr(self.config, 'skills_path', None)
+            if not skills_dir:
+                return {}
+            skills_dir = Path(skills_dir)
+            if not skills_dir.exists():
+                return {}
+
+            # Determine failure category from diagnosis
+            failure_category = ""
+            data = result.data if isinstance(result.data, dict) else {}
+            diagnosis = data.get("diagnosis", {})
+            if isinstance(diagnosis, dict):
+                failure_category = diagnosis.get("category", "")
+
+            router = SkillRouter(skills_dir=skills_dir)
+            request = SkillRouteRequest(
+                stage=stage,
+                analysis=analysis,
+                frameworks=analysis.get("frameworks", []),
+                failure_category=failure_category,
+                allowed_tools=["apply_dependency_constraint", "propose_repair"],
+                mode=self.config.agent_mode,
+            )
+            routed = router.route(request, limit=3)
+            if not routed:
+                return {}
+
+            builder = SkillContextBuilder()
+            return builder.build(routed, stage=stage)
+        except Exception:
+            # Skill routing must not crash the repair loop
+            return {}
 
     def _apply_repair_gate(self, task_id: str, stage: str, result, analysis: Dict, run_dir: Path) -> Dict:
         """Apply repair decision gate: LLM proposes repair action through decision gate."""

@@ -60,10 +60,22 @@ class ProjectSnapshotBuilder:
         repo_dir: Path,
         task_id: str = "",
         memory_hits: Optional[List[Dict]] = None,
+        selected_skills: Optional[List[Dict]] = None,
+        skill_context: Optional[Dict] = None,
     ) -> Dict:
-        """Build a project snapshot dict."""
+        """Build a project snapshot dict.
+
+        Args:
+            repo_dir: Repository directory.
+            task_id: Task identifier.
+            memory_hits: Optional memory hits for context.
+            selected_skills: Optional list of selected skill dicts.
+            skill_context: Optional skill context from SkillContextBuilder.
+        """
         repo_dir = Path(repo_dir)
         memory_hits = memory_hits or []
+        selected_skills = selected_skills or []
+        skill_context = skill_context or {}
 
         # 1. Collect file tree
         file_tree = self._collect_file_tree(repo_dir)
@@ -99,6 +111,8 @@ class ProjectSnapshotBuilder:
             "selected_files": selected_with_meta,
             "detected_signals": detected_signals,
             "memory_hits": memory_hits,
+            "selected_skills": selected_skills,
+            "skill_context": skill_context,
             "redactions": sanitizer.redactions,
             "untrusted_content_risks": sanitizer.risks,
         }

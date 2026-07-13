@@ -66,3 +66,9 @@ class PlanArtifactWriter:
         path = self.reports_dir / "pipeline_results.json"
         write_json(path, results)
         return path
+
+    def write_skill_effects(self, effects: Dict) -> Path:
+        """Write skill effects to reports/skill_effects.json."""
+        path = self.reports_dir / "skill_effects.json"
+        write_json(path, effects)
+        return path

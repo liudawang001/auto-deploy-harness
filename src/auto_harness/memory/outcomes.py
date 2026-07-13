@@ -36,6 +36,9 @@ class SkillOutcomeRecorder:
     ) -> Dict:
         """Record skill outcomes for a single run.
 
+        Enhanced with: influenced_plan, policy_accepted, stage_status_before,
+        stage_status_after, final_verify_status, trace_verified, llm_helped, harmful.
+
         Args:
             run_id: The deployment run ID.
             stage: The pipeline stage (e.g. "verify").
@@ -49,6 +52,13 @@ class SkillOutcomeRecorder:
         agent_metadata = agent_metadata or {}
         records = []
 
+        # Determine stage status before/after from agent_metadata
+        stage_status_before = agent_metadata.get("stage_status_before", "")
+        stage_status_after = result.get("status", "unknown")
+        final_verify_status = agent_metadata.get("final_verify_status", "")
+        trace_verified = agent_metadata.get("trace_verified", False)
+        llm_helped = agent_metadata.get("llm_helped", False)
+
         if not selected_skills:
             # Record that no skill was selected
             record = {
@@ -60,11 +70,17 @@ class SkillOutcomeRecorder:
                 "skill_sha256": "",
                 "candidate_id": "",
                 "selected": False,
-                "status": result.get("status", "unknown"),
-                "llm_helped": agent_metadata.get("llm_helped", False),
+                "influenced_plan": False,
+                "policy_accepted": False,
+                "status": stage_status_after,
+                "stage_status_before": stage_status_before,
+                "stage_status_after": stage_status_after,
+                "final_verify_status": final_verify_status,
+                "trace_verified": trace_verified,
+                "llm_helped": llm_helped,
                 "tool_selected": agent_metadata.get("tool_selected", ""),
                 "policy_rejected": agent_metadata.get("policy_rejected", False),
-                "trace_verified": agent_metadata.get("trace_verified", False),
+                "harmful": False,
             }
             self._append(record)
             records.append(record)
@@ -80,6 +96,20 @@ class SkillOutcomeRecorder:
 
                 skill_sha = skill.get("sha256") or (hashlib.sha256(skill_content.encode("utf-8")).hexdigest() if skill_content else "")
 
+                # Determine if skill influenced plan
+                influenced_plan = skill.get("influenced_plan", agent_metadata.get("influenced_plan", False))
+                policy_accepted = not agent_metadata.get("policy_rejected", False)
+
+                # Determine harmful: skill influenced plan, policy accepted, but verify failed/uncertain
+                harmful = False
+                if influenced_plan and policy_accepted:
+                    if final_verify_status and final_verify_status not in ("passed", "pass"):
+                        harmful = True
+                    if agent_metadata.get("policy_rejected_due_to_unsafe_guidance"):
+                        harmful = True
+                    if agent_metadata.get("regression_failed"):
+                        harmful = True
+
                 record = {
                     "created_at": utc_now_iso(),
                     "run_id": run_id,
@@ -89,11 +119,17 @@ class SkillOutcomeRecorder:
                     "skill_sha256": skill_sha,
                     "candidate_id": skill.get("candidate_id", ""),
                     "selected": True,
-                    "status": result.get("status", "unknown"),
-                    "llm_helped": agent_metadata.get("llm_helped", False),
+                    "influenced_plan": influenced_plan,
+                    "policy_accepted": policy_accepted,
+                    "status": stage_status_after,
+                    "stage_status_before": stage_status_before,
+                    "stage_status_after": stage_status_after,
+                    "final_verify_status": final_verify_status,
+                    "trace_verified": trace_verified,
+                    "llm_helped": llm_helped,
                     "tool_selected": agent_metadata.get("tool_selected", ""),
                     "policy_rejected": agent_metadata.get("policy_rejected", False),
-                    "trace_verified": agent_metadata.get("trace_verified", False),
+                    "harmful": harmful,
                 }
                 self._append(record)
                 records.append(record)
