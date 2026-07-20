@@ -2,7 +2,7 @@ import json
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Dict
+from typing import Any, Dict, Optional
 
 from auto_harness.agent import AgentDecisionEngine, AgentDiagnoser, AgentLoopController, AgentMetricsCollector, AgentObservation, AgentTraceWriter, AgentVerifyPlanner
 from auto_harness.agent_runtime import AgentContributionAnalyzer, AgentGoal, AgentRuntime
@@ -10,6 +10,9 @@ from auto_harness.agent_runtime.loop import DeploymentAgentLoop
 from auto_harness.config import HarnessConfig
 from auto_harness.agents.claude_code import ClaudeCodeExecutor
 from auto_harness.assets import HuggingFaceDownloader, ModelCache, ModelScopeDownloader
+from auto_harness.controllers.base import DeploymentContext, DeploymentResult
+from auto_harness.controllers.factory import ControllerUnavailableError, create_controller
+from auto_harness.controllers.legacy import LegacyController
 from auto_harness.models.base import read_json, to_plain, write_json
 from auto_harness.models.task import ProjectSpec, RuntimePolicy, TaskSpec
 from auto_harness.memory import MemoryStore
@@ -69,6 +72,7 @@ class TaskRunner:
         dry_run: bool = True,
         allow_install: bool = False,
         allow_start: bool = False,
+        controller: str = "legacy",
     ) -> TaskSpec:
         base_name = safe_name(name or repo_url.rsplit("/", 1)[-1].replace(".git", ""))
         task_id = "%s_%s_%s" % (base_name, compact_timestamp(), short_hash(repo_url, 6))
@@ -83,6 +87,7 @@ class TaskRunner:
                 allow_source_edit=self.config.allow_source_edit,
             ),
             created_at=utc_now_iso(),
+            controller=controller,
         )
 
     def deploy(
@@ -93,6 +98,7 @@ class TaskRunner:
         skip_clone: bool = False,
         allow_install: bool = False,
         allow_start: bool = False,
+        controller: str = "legacy",
     ) -> str:
         spec = self.create_spec(
             repo_url,
@@ -100,6 +106,7 @@ class TaskRunner:
             dry_run=dry_run,
             allow_install=allow_install,
             allow_start=allow_start,
+            controller=controller,
         )
         run_dir = self.store.create_task(spec)
         repo_dir = run_dir / "workspace" / "repo"
@@ -121,18 +128,103 @@ class TaskRunner:
         return self.run_existing(spec.task_id, dry_run=dry_run)
 
     def run_existing(self, task_id: str, dry_run: bool = True, start_stage: str = "analyze") -> str:
-        # Plan-first takes highest priority
-        if self.config.agent_plan_first:
-            self._run_plan_first_loop(task_id, dry_run=dry_run)
-            return task_id
+        # Select controller based on task metadata
+        task = self.store.load_task(task_id)
+        controller_name = task.controller
 
-        # Check if AgentLoop should be the primary controller
+        # Build context
+        run_dir = self.store.run_dir(task_id)
+        repo_dir = run_dir / "workspace" / "repo"
+        runtime_policy = {
+            "allow_dependency_install": task.runtime.allow_dependency_install,
+            "allow_service_start": task.runtime.allow_service_start,
+            "allow_source_edit": task.runtime.allow_source_edit,
+        }
+        context = DeploymentContext(
+            task_id=task_id,
+            run_dir=str(run_dir),
+            repo_dir=str(repo_dir),
+            dry_run=dry_run,
+            runtime_policy=runtime_policy,
+        )
+
+        # Build and run controller
+        ctrl = self._build_controller(controller_name)
+        result = ctrl.run(context)
+
+        # Write unified controller result
+        write_json(run_dir / "reports" / "controller_result.json", {
+            "task_id": result.task_id,
+            "status": result.status,
+            "stop_reason": result.stop_reason,
+            "controller": result.controller,
+            "verify_status": result.verify_status,
+            "artifacts": result.artifacts,
+            "metrics": result.metrics,
+        })
+
+        return task_id
+
+    def _build_controller(self, name: str):
+        """Build a deployment controller by name.
+
+        For the legacy controller, injects the existing TaskRunner methods
+        as callables. For langgraph, delegates to the factory.
+
+        Uses lambda wrappers so that monkey-patching _run_existing_once
+        in tests still works (the lambda resolves the method at call time,
+        not at build time).
+
+        run_pipeline maps to _run_legacy_pipeline which includes the
+        auto-resume loop (the old run_existing behavior for the
+        deterministic pipeline path).
+        """
+        if name == "legacy":
+            return LegacyController(
+                config=self.config,
+                run_plan_first=lambda task_id, dry_run=True: self._run_plan_first_loop(task_id, dry_run=dry_run),
+                run_agent_loop=lambda task_id, dry_run=True: self._run_agent_runtime_loop(task_id, dry_run=dry_run),
+                run_pipeline=lambda task_id, dry_run=True: self._run_legacy_pipeline(task_id, dry_run=dry_run),
+                resume_existing=lambda task_id, dry_run=True, resume_input=None: self._resume_legacy(task_id, dry_run=dry_run, resume_input=resume_input),
+                result_adapter=self._result_adapter,
+            )
+        return create_controller(name, self)
+
+    def _run_legacy_pipeline(self, task_id: str, dry_run: bool = True) -> None:
+        """Run the legacy deterministic pipeline with auto-resume loop.
+
+        This is the original run_existing() logic for the pipeline path:
+        deterministic pipeline first, then optional AgentLoop.
+        """
+        current_start_stage = "analyze"
+        max_iterations = int(self.config.agent_max_loop_iterations or 0)
+        for iteration in range(max_iterations + 1):
+            self._run_existing_once(task_id, dry_run=dry_run, start_stage=current_start_stage)
+            decision = self._next_agent_resume_decision(task_id, iteration)
+            if not decision.get("should_resume"):
+                break
+            self.store.events(task_id).append("task", "agent_auto_resume", decision)
+            current_start_stage = decision["start_stage"]
+
+        # If agent runtime loop is enabled in post_pipeline mode
         if (self.config.agent_enable_runtime_loop
                 and self.config.agent_mode == "gated_actor"
-                and self.config.agent_runtime_loop_position == "primary"):
-            # AgentLoop is the primary deployment controller
+                and self.config.agent_runtime_loop_position == "post_pipeline"):
             self._run_agent_runtime_loop(task_id, dry_run=dry_run)
-            return task_id
+
+    def _resume_legacy(self, task_id: str, dry_run: bool = True, resume_input: Optional[Dict[str, Any]] = None) -> None:
+        """Resume using the legacy path.
+
+        Extracted from the old TaskRunner.resume() logic.
+        Does not pass resume_input to _run_existing_once since its
+        signature does not accept it.
+        """
+        run_dir = self.store.run_dir(task_id)
+        start_stage = self._repair_resume_stage(run_dir)
+        self.store.events(task_id).append("task", "legacy_resume", {
+            "dry_run": dry_run,
+            "start_stage": start_stage,
+        })
 
         # Legacy path: deterministic pipeline first, then optional AgentLoop
         current_start_stage = start_stage
@@ -151,7 +243,68 @@ class TaskRunner:
                 and self.config.agent_runtime_loop_position == "post_pipeline"):
             self._run_agent_runtime_loop(task_id, dry_run=dry_run)
 
-        return task_id
+    @staticmethod
+    def _result_adapter(context: DeploymentContext, controller: str, strategy: str) -> DeploymentResult:
+        """Adapt legacy execution results to DeploymentResult.
+
+        Reads the final state from the run directory to determine
+        verify status and artifacts.
+        """
+        run_dir = Path(context.run_dir)
+        verify_status = ""
+        artifacts: Dict[str, str] = {}
+        metrics: Dict[str, Any] = {"strategy": strategy}
+
+        # Read pipeline results for verify status
+        pipeline_path = run_dir / "reports" / "pipeline_results.json"
+        if pipeline_path.exists():
+            try:
+                pipeline = read_json(pipeline_path)
+                verify_result = pipeline.get("verify", {})
+                if isinstance(verify_result, dict):
+                    verify_status = verify_result.get("status", "")
+            except (OSError, ValueError):
+                pass
+
+        # Read plan_first result if available
+        plan_first_path = run_dir / "reports" / "plan_first_result.json"
+        if plan_first_path.exists():
+            artifacts["plan_first_result"] = "reports/plan_first_result.json"
+
+        # Read agent loop result if available
+        agent_loop_path = run_dir / "reports" / "agent_loop_result.json"
+        if agent_loop_path.exists():
+            artifacts["agent_loop_result"] = "reports/agent_loop_result.json"
+
+        # Determine overall status
+        if verify_status in ("passed", "pass"):
+            status = "completed"
+            stop_reason = "verify_passed"
+        elif verify_status in ("failed", "uncertain"):
+            status = "failed"
+            stop_reason = "verify_failed"
+        else:
+            status = "completed"
+            stop_reason = "pipeline_completed"
+
+        return DeploymentResult(
+            task_id=context.task_id,
+            status=status,
+            stop_reason=stop_reason,
+            controller=controller,
+            verify_status=verify_status,
+            artifacts=artifacts,
+            metrics=metrics,
+        )
+
+    def graph_dependencies(self):
+        """Provide graph dependencies for LangGraphController.
+
+        Returns a LangGraphControllerDependencies object that wires the
+        real modules to the graph nodes.
+        """
+        from auto_harness.controllers.langgraph_deps import LangGraphControllerDependencies
+        return LangGraphControllerDependencies(self)
 
     def _run_plan_first_loop(self, task_id: str, dry_run: bool = True) -> None:
         """Run the Plan-first Deployment Loop."""
@@ -519,11 +672,50 @@ class TaskRunner:
                 }
         return {"should_auto_resume": False}
 
-    def resume(self, task_id: str, dry_run: bool = True) -> str:
+    def resume(self, task_id: str, dry_run: bool = True, controller: Optional[str] = None) -> str:
+        task = self.store.load_task(task_id)
+        stored_controller = task.controller
+
+        # If CLI explicitly passes a different controller, reject
+        if controller is not None and controller != stored_controller:
+            raise ValueError(
+                "Controller mismatch: task was created with '%s', "
+                "but '%s' was requested. Resume must use the same controller." % (
+                    stored_controller, controller,
+                )
+            )
+
         run_dir = self.store.run_dir(task_id)
-        start_stage = self._repair_resume_stage(run_dir)
-        self.store.events(task_id).append("task", "resume_requested", {"dry_run": dry_run, "start_stage": start_stage})
-        return self.run_existing(task_id, dry_run=dry_run, start_stage=start_stage)
+        repo_dir = run_dir / "workspace" / "repo"
+        runtime_policy = {
+            "allow_dependency_install": task.runtime.allow_dependency_install,
+            "allow_service_start": task.runtime.allow_service_start,
+            "allow_source_edit": task.runtime.allow_source_edit,
+        }
+        context = DeploymentContext(
+            task_id=task_id,
+            run_dir=str(run_dir),
+            repo_dir=str(repo_dir),
+            dry_run=dry_run,
+            runtime_policy=runtime_policy,
+        )
+
+        self.store.events(task_id).append("task", "resume_requested", {"dry_run": dry_run, "controller": stored_controller})
+
+        ctrl = self._build_controller(stored_controller)
+        result = ctrl.resume(context)
+
+        write_json(run_dir / "reports" / "controller_result.json", {
+            "task_id": result.task_id,
+            "status": result.status,
+            "stop_reason": result.stop_reason,
+            "controller": result.controller,
+            "verify_status": result.verify_status,
+            "artifacts": result.artifacts,
+            "metrics": result.metrics,
+        })
+
+        return task_id
 
     def approve_repair(self, task_id: str, note: str = "") -> Dict:
         run_dir = self.store.run_dir(task_id)

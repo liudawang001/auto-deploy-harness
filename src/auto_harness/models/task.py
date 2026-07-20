@@ -29,4 +29,5 @@ class TaskSpec:
     runtime: RuntimePolicy
     created_at: str
     source_report: Optional[str] = None
+    controller: str = "legacy"
 

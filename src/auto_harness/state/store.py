@@ -52,6 +52,7 @@ class StateStore:
             runtime=runtime,
             created_at=data["created_at"],
             source_report=data.get("source_report"),
+            controller=data.get("controller", "legacy"),
         )
 
     def load_state(self, task_id: str) -> TaskState:

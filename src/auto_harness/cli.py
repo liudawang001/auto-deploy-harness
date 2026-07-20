@@ -62,6 +62,7 @@ def build_parser() -> argparse.ArgumentParser:
     deploy.add_argument("--agent-plan-first-provider", choices=["mock", "xunfei"], default=None)
     deploy.add_argument("--agent-plan-first-mode", choices=["planner", "gated_actor"], default=None)
     deploy.add_argument("--agent-plan-first-max-replans", type=int, default=None)
+    deploy.add_argument("--controller", choices=["legacy", "langgraph"], default=None)
 
     resume = sub.add_parser("resume", help="resume an existing task")
     resume.add_argument("--task-id", required=True)
@@ -78,6 +79,7 @@ def build_parser() -> argparse.ArgumentParser:
     resume.add_argument("--docker-network", default=None)
     resume.add_argument("--docker-gpus", default=None)
     resume.add_argument("--docker-model-cache-dir", default=None)
+    resume.add_argument("--controller", choices=["legacy", "langgraph"], default=None)
 
     status = sub.add_parser("status", help="show task status")
     status.add_argument("--task-id", required=True)
@@ -292,6 +294,7 @@ def _apply_cli_overrides(config: HarnessConfig, args) -> None:
         config.agent_plan_first_mode = args.agent_plan_first_mode
     if getattr(args, "agent_plan_first_max_replans", None) is not None:
         config.agent_plan_first_max_replans = max(0, args.agent_plan_first_max_replans)
+    # Controller selection is handled at deploy/resume time, not stored in config
 
 
 def main(argv=None) -> int:
@@ -307,6 +310,7 @@ def main(argv=None) -> int:
 
     if args.command == "deploy":
         dry_run = args.dry_run or not args.execute
+        controller = getattr(args, "controller", None) or "legacy"
         task_id = runner.deploy(
             args.repo,
             args.name,
@@ -314,13 +318,15 @@ def main(argv=None) -> int:
             skip_clone=args.skip_clone,
             allow_install=args.allow_install,
             allow_start=args.allow_start,
+            controller=controller,
         )
         print(task_id)
         return 0
 
     if args.command == "resume":
         dry_run = args.dry_run or not args.execute
-        task_id = runner.resume(args.task_id, dry_run=dry_run)
+        controller = getattr(args, "controller", None)
+        task_id = runner.resume(args.task_id, dry_run=dry_run, controller=controller)
         print(task_id)
         return 0
 

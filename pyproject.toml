@@ -13,6 +13,9 @@ authors = [
 ]
 dependencies = []
 
+[project.optional-dependencies]
+langgraph = ["langgraph", "langgraph-checkpoint-sqlite"]
+
 [project.scripts]
 auto-deploy-harness = "auto_harness.cli:main"
 auto-harness = "auto_harness.cli:main"
