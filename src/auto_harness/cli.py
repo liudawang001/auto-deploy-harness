@@ -218,6 +218,14 @@ def build_parser() -> argparse.ArgumentParser:
     cache.add_argument("--keep-repo-id", action="append", default=None)
     cache.add_argument("--apply", action="store_true", default=False)
 
+    approval_show = sub.add_parser("approval-show", help="show pending approval for a task")
+    approval_show.add_argument("--task-id", required=True)
+
+    approval_resolve = sub.add_parser("approval-resolve", help="approve or reject a pending approval")
+    approval_resolve.add_argument("--task-id", required=True)
+    approval_resolve.add_argument("--decision", choices=["approve", "reject"], required=True)
+    approval_resolve.add_argument("--note", default="")
+
     return parser
 
 
@@ -623,6 +631,69 @@ def main(argv=None) -> int:
                 "entries": runner.model_cache.entries(),
             }
         print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0
+
+    if args.command == "approval-show":
+        from auto_harness.graph.approval import ApprovalStore
+        from auto_harness.state.store import StateStore
+        store = StateStore(config.runs_path)
+        run_dir = store.run_dir(args.task_id)
+        # Find pending approvals
+        approvals_dir = Path(run_dir) / "approvals"
+        results = []
+        if approvals_dir.exists():
+            for f in sorted(approvals_dir.glob("*.json")):
+                try:
+                    record = json.loads(f.read_text(encoding="utf-8"))
+                    if record.get("status") == "pending":
+                        results.append(record)
+                except (OSError, ValueError):
+                    pass
+        print(json.dumps(results, ensure_ascii=False, indent=2))
+        return 0
+
+    if args.command == "approval-resolve":
+        from auto_harness.graph.approval import ApprovalStore
+        from auto_harness.state.store import StateStore
+        from auto_harness.utils.time import utc_now_iso
+        store = StateStore(config.runs_path)
+        run_dir = store.run_dir(args.task_id)
+        approval_store = ApprovalStore(run_dir)
+        # Find the pending approval
+        approvals_dir = Path(run_dir) / "approvals"
+        resolved = None
+        if approvals_dir.exists():
+            for f in sorted(approvals_dir.glob("*.json")):
+                try:
+                    record = json.loads(f.read_text(encoding="utf-8"))
+                    if record.get("status") == "pending":
+                        approval_id = record.get("request", {}).get("approval_id", "")
+                        if approval_id:
+                            decision = {
+                                "approval_id": approval_id,
+                                "operation_id": record.get("request", {}).get("operation_id", ""),
+                                "decision": args.decision,
+                                "reviewer": "cli",
+                                "note": args.note,
+                                "resolved_at": utc_now_iso(),
+                            }
+                            record["status"] = "resolved"
+                            record["decision"] = {
+                                "approval_id": approval_id,
+                                "operation_id": record.get("request", {}).get("operation_id", ""),
+                                "decision": args.decision,
+                                "reviewer": "cli",
+                            }
+                            approval_store.save(approval_id, record)
+                            resolved = record
+                            break
+                except (OSError, ValueError):
+                    pass
+        if resolved:
+            print(json.dumps({"status": "resolved", "decision": args.decision}, ensure_ascii=False, indent=2))
+        else:
+            print(json.dumps({"status": "no_pending_approval"}, ensure_ascii=False, indent=2))
+            return 2
         return 0
 
     return 1

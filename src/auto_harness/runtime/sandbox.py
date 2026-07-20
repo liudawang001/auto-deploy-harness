@@ -50,18 +50,25 @@ class DockerSandboxBackend:
         self.gpus = gpus or "none"
         self.model_cache_dir = Path(model_cache_dir).resolve() if model_cache_dir else None
 
-    def wrap(self, repo_dir: Path, cmd: List[str], ports: Optional[List[int]] = None, container_name: str = "") -> SandboxCommand:
+    def wrap(self, repo_dir: Path, cmd: List[str], ports: Optional[List[int]] = None, container_name: str = "", auto_remove: bool = True, detached: bool = False, labels: Optional[Dict[str, str]] = None) -> SandboxCommand:
         ports = [int(port) for port in (ports or []) if int(port) > 0]
         repo_dir = Path(repo_dir).resolve()
         effective = [
             "docker",
             "run",
-            "--rm",
+        ]
+        if auto_remove:
+            effective.append("--rm")
+        if detached:
+            effective.append("-d")
+        for key, value in sorted((labels or {}).items()):
+            effective.extend(["--label", "%s=%s" % (key, value)])
+        effective.extend([
             "-v",
             "%s:/workspace/repo" % repo_dir,
             "-w",
             "/workspace/repo",
-        ]
+        ])
         if container_name:
             effective.extend(["--name", container_name])
         if self.network:
