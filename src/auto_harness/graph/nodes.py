@@ -12,18 +12,14 @@ from pathlib import Path
 from typing import Any
 
 from auto_harness.agent_runtime.deployment_plan import DeploymentPlan
+from auto_harness.graph.failure import FailureObserver
 from auto_harness.models.base import read_json, write_json
 from auto_harness.utils.time import utc_now_iso
 
 
 @dataclass
 class GraphNodeDependencies:
-    """Dependencies injected into graph nodes.
-
-    Each field is a callable or object that the node uses.
-    In production, these point to real modules.
-    In tests, they are replaced with mocks.
-    """
+    """Dependencies injected into graph nodes."""
     build_snapshot: Any
     build_replan_input: Any
     determine_resume_stage: Any
@@ -35,6 +31,15 @@ class GraphNodeDependencies:
     stage_executor: Any
     artifact_writer_factory: Any
     runtime_config: Any
+    diagnoser_factory: Any = None
+    failure_observer: Any = None
+    repair_planner: Any = None
+    repair_policy: Any = None
+    repair_applier: Any = None
+    repair_loop: Any = None
+    repair_overlay: Any = None
+    recovery_adapter: Any = None
+    runtime_policy_factory: Any = None
 
 
 def stage_data(state, stage):
@@ -44,68 +49,130 @@ def stage_data(state, stage):
     return data if isinstance(data, dict) else {}
 
 
-def make_stage_node(stage, deps):
-    """Create a node function for a specific pipeline stage.
+def _sanitize_error(exc):
+    """Sanitize exception for state storage — no secrets or full prompts."""
+    msg = str(exc)[:500]
+    import re
+    msg = re.sub(r'(api[_-]?key|token|secret|password|credential)["\s:=]+\S+', r'\1=***', msg, flags=re.IGNORECASE)
+    return msg
 
-    The returned function takes state and returns a state delta
-    with updated stage_results, current_stage, and node_history.
-    """
+
+def effective_stage_hints(state):
+    """Compute effective stage hints from compiled analysis and repair overlay."""
+    analysis = state.get("compiled_analysis", {})
+    hints = dict(analysis.get("verify_hint") or {})
+    overlay = state.get("repair_overlay", {})
+    for item in overlay.get("verify_hints") or []:
+        if isinstance(item, dict):
+            hints.update(item.get("verify_hint", item))
+    return hints
+
+
+def make_recovery_gate_node(stage, deps):
+    """Create a recovery gate node for a side-effect stage."""
+    def recovery_gate(state):
+        adapter = deps.recovery_adapter
+        if not adapter:
+            return {
+                "recovery_stage": stage,
+                "recovery_decision": "execute",
+                "pending_operation_id": "",
+                "recovery_result": {},
+                "recovery_skip_stage": False,
+                "current_stage": "recover_%s" % stage,
+            }
+        decision = adapter.prepare_or_reconcile(state, stage)
+        update = {
+            "recovery_stage": stage,
+            "recovery_decision": decision.decision,
+            "pending_operation_id": decision.operation.get("operation_id", ""),
+            "recovery_result": decision.reconcile_result,
+            "pending_operation": decision.operation,
+            "current_stage": "recover_%s" % stage,
+        }
+        if decision.decision == "reuse":
+            hydrated = decision.hydrated_stage_result
+            if hydrated:
+                results = dict(state.get("stage_results", {}))
+                results[stage] = hydrated
+                update["stage_results"] = results
+                update["recovery_skip_stage"] = True
+                if stage == "verify" and hydrated.get("status") in ("pass", "passed"):
+                    update["verify_status"] = hydrated["status"]
+        elif decision.decision == "stop":
+            update["stop_reason"] = decision.stop_reason or "recovery_gate_blocked"
+        elif decision.decision == "approval":
+            update["approval_kind"] = "recovery"
+            update["approval_resume_target"] = stage
+            update["pending_approval"] = {
+                "approval_id": "recovery-%s-%s" % (stage, utc_now_iso().replace(":", "-").replace(".", "-")),
+                "approval_kind": "recovery",
+                "requested_action": "cleanup_then_retry",
+                "risk": "high",
+                "reason": decision.stop_reason or "manual_recovery_required",
+            }
+        return update
+    return recovery_gate
+
+
+def make_stage_node(stage, deps):
+    """Create a node function for a specific pipeline stage."""
+    SIDE_EFFECT_STAGES = {"env_deploy", "model_prepare", "runner"}
+
     def execute_stage(state):
+        if stage in SIDE_EFFECT_STAGES:
+            recovery_stage = state.get("recovery_stage", "")
+            recovery_decision = state.get("recovery_decision", "")
+            if recovery_stage != stage:
+                return {"stop_reason": "recovery_gate_missing", "current_stage": stage}
+            if recovery_decision not in {"execute", "continue", "retry"}:
+                return {"stop_reason": "recovery_execution_not_allowed", "current_stage": stage}
+            if state.get("recovery_skip_stage"):
+                return {"current_stage": stage, "node_history": [{"node": stage, "status": "skipped_recovery_reuse", "at": utc_now_iso()}]}
+
         deterministic_analysis = stage_data(state, "analyze")
-        analysis = deps.merge_analysis(
-            deterministic_analysis,
-            state.get("compiled_analysis", {}),
-        )
+        analysis = deps.merge_analysis(deterministic_analysis, state.get("compiled_analysis", {}))
         resource_data = stage_data(state, "resource_plan")
         deploy_analysis = stage_data(state, "env_solve").get("analysis", analysis)
         runner_data = stage_data(state, "runner")
+        current_overlay = state.get("repair_overlay", {})
+        hints = effective_stage_hints(state)
 
         executed = deps.stage_executor.execute_stage(
-            task_id=state["task_id"],
-            run_dir=Path(state["run_dir"]),
-            repo_dir=Path(state["repo_dir"]),
-            stage=stage,
-            state=state,
-            analysis=analysis,
-            resource_data=resource_data,
-            deploy_analysis=deploy_analysis,
-            runner_data=runner_data,
-            dry_run=state["dry_run"],
-            stage_hints={},
-            repair_overlay={},
+            task_id=state["task_id"], run_dir=Path(state["run_dir"]),
+            repo_dir=Path(state["repo_dir"]), stage=stage, state=state,
+            analysis=analysis, resource_data=resource_data,
+            deploy_analysis=deploy_analysis, runner_data=runner_data,
+            dry_run=state["dry_run"], stage_hints=hints,
+            repair_overlay=current_overlay,
+            runtime_policy=state.get("runtime_policy", {}),
         )
 
         results = dict(state.get("stage_results", {}))
-        results[stage] = executed.result or {
-            "status": executed.after_status,
-            "error": executed.error,
-            "data": {},
-        }
+        results[stage] = executed.result or {"status": executed.after_status, "error": executed.error, "data": {}}
         update = {
             "current_stage": stage,
             "stage_results": results,
-            "node_history": [{
-                "node": stage,
-                "status": executed.after_status,
-                "at": utc_now_iso(),
-            }],
+            "node_history": [{"node": stage, "status": executed.after_status, "at": utc_now_iso()}],
         }
         if stage == "verify":
             update["verify_status"] = executed.after_status
             update["verify_evidence_paths"] = list(executed.evidence_paths)
         if executed.after_status in ("failed", "uncertain"):
             update["failed_stage"] = stage
-        return update
 
+        if stage in SIDE_EFFECT_STAGES and deps.recovery_adapter:
+            if executed.after_status in ("failed", "uncertain"):
+                deps.recovery_adapter.fail(state, stage, executed.error or "stage_failed")
+            else:
+                result_for_journal = executed.result or {"status": executed.after_status, "data": {}}
+                deps.recovery_adapter.commit(state, stage, result_for_journal)
+        return update
     return execute_stage
 
 
 def merge_plan_analysis(deterministic, compiled):
-    """Merge deterministic analysis with compiled plan analysis.
-
-    Preserves PlanFirstDeploymentLoop._execute_analyze() override semantics:
-    compiled plan keys take priority over deterministic ones.
-    """
+    """Merge deterministic analysis with compiled plan analysis."""
     merged = dict(deterministic or {})
     plan_owned_keys = (
         "install_plan", "run_candidates", "verify_hint", "environment_strategy",
@@ -128,23 +195,20 @@ class DeploymentGraphNodes:
         return self.deps.artifact_writer_factory(Path(state["run_dir"]))
 
     def build_snapshot(self, state):
-        """Build project snapshot and write to artifact."""
         snapshot = self.deps.build_snapshot(state)
         path = self._artifacts(state).write_project_snapshot(snapshot)
         return {"snapshot_path": str(path), "current_stage": "snapshot"}
 
     def plan(self, state):
-        """Ask LLM to generate a deployment plan."""
         snapshot = read_json(Path(state["snapshot_path"]))
-        raw = self.deps.planner.plan(
-            snapshot,
-            skill_context=snapshot.get("skill_context", {}),
-        )
+        try:
+            raw = self.deps.planner.plan(snapshot, skill_context=snapshot.get("skill_context", {}))
+        except Exception as exc:
+            return {"llm_error": _sanitize_error(exc), "stop_reason": "llm_plan_failed", "raw_plan_path": "", "current_stage": "plan"}
         path = self._artifacts(state).write_raw_plan({"raw_text": raw.text[:10000]})
         return {"raw_plan_path": str(path), "current_stage": "plan"}
 
     def parse(self, state):
-        """Parse the raw plan text into a structured plan."""
         raw = read_json(Path(state["raw_plan_path"]))
         try:
             parsed = self.deps.parser.parse(raw.get("raw_text", ""))
@@ -156,96 +220,177 @@ class DeploymentGraphNodes:
         return {"parsed_plan_path": str(path), "stop_reason": stop_reason}
 
     def policy(self, state):
-        """Validate the parsed plan through the policy gate."""
         parsed = read_json(Path(state["parsed_plan_path"]))
         snapshot = read_json(Path(state["snapshot_path"]))
-        result = self.deps.policy_gate.validate(
-            parsed,
-            snapshot,
-            runtime_policy=state.get("runtime_policy", {}),
-            config=self.deps.runtime_config,
-        )
+        result = self.deps.policy_gate.validate(parsed, snapshot, runtime_policy=state.get("runtime_policy", {}), config=self.deps.runtime_config)
         path = self._artifacts(state).write_policy_result(result)
-        return {
-            "policy_result_path": str(path),
-            "stop_reason": "" if result.get("allowed") else "policy_rejected",
-        }
+        return {"policy_result_path": str(path), "stop_reason": "" if result.get("allowed") else "policy_rejected"}
 
     def compile(self, state):
-        """Compile the policy-validated plan into effective plan and analysis."""
         parsed = read_json(Path(state["parsed_plan_path"]))
         policy = read_json(Path(state["policy_result_path"]))
         compiled = self.deps.compiler.compile(policy.get("normalized_plan", parsed))
-        path = self._artifacts(state).write_effective_plan(
-            compiled.get("effective_plan", {})
-        )
-        return {
-            "effective_plan_path": str(path),
-            "compiled_analysis": compiled.get("analysis", {}),
-        }
+        path = self._artifacts(state).write_effective_plan(compiled.get("effective_plan", {}))
+        return {"effective_plan_path": str(path), "compiled_analysis": compiled.get("analysis", {})}
 
     def select_resume(self, state):
-        """Determine which stage to resume from after (re)plan."""
         if int(state.get("replan_count", 0)) == 0:
             return {"resume_from_stage": "analyze"}
         previous_path = state.get("previous_plan_path", "")
         if not previous_path:
-            return {
-                "resume_from_stage": "analyze",
-                "errors": [{"node": "select_resume", "error": "previous_plan_missing"}],
-            }
+            return {"resume_from_stage": "analyze", "errors": [{"node": "select_resume", "error": "previous_plan_missing"}]}
         previous = read_json(Path(previous_path))
         current = read_json(Path(state["parsed_plan_path"]))
         requested = self.deps.determine_resume_stage(previous, current)
-        allowed = {
-            "analyze", "resource_plan", "env_solve", "env_deploy",
-            "model_prepare", "runner", "verify",
-        }
+        allowed = {"analyze", "resource_plan", "env_solve", "env_deploy", "model_prepare", "runner", "verify"}
         selected = requested if requested in allowed else "analyze"
         revision = int(state.get("replan_count", 0))
-        revision_path = Path(state["run_dir"]) / "reports" / "replans" / (
-            "replan_%s.revision.json" % revision
-        )
+        revision_path = Path(state["run_dir"]) / "reports" / "replans" / ("replan_%s.revision.json" % revision)
         revision_path.parent.mkdir(parents=True, exist_ok=True)
-        write_json(revision_path, {
-            "revision": revision,
-            "trigger_stage": state.get("failed_stage", ""),
-            "previous_plan_id": previous.get("plan_id", ""),
-            "new_plan_id": current.get("plan_id", ""),
-            "resume_from": selected,
-            "policy_allowed": True,
-        })
+        write_json(revision_path, {"revision": revision, "trigger_stage": state.get("failed_stage", ""), "previous_plan_id": previous.get("plan_id", ""), "new_plan_id": current.get("plan_id", ""), "resume_from": selected, "policy_allowed": True})
         revision_paths = dict(state.get("plan_revision_paths", {}))
         revision_paths[str(revision)] = str(revision_path)
-        return {
-            "resume_from_stage": selected,
-            "plan_revision_paths": revision_paths,
-        }
+        return {"resume_from_stage": selected, "plan_revision_paths": revision_paths}
 
     def replan(self, state):
-        """Generate a revised plan based on failure context."""
         snapshot, previous_plan, failure = self.deps.build_replan_input(state)
-        raw = self.deps.planner.replan(snapshot, previous_plan, failure)
+        try:
+            raw = self.deps.planner.replan(snapshot, previous_plan, failure)
+        except Exception as exc:
+            return {"llm_error": _sanitize_error(exc), "stop_reason": "llm_replan_failed", "raw_plan_path": "", "previous_plan_path": "", "replan_count": int(state.get("replan_count", 0)) + 1}
         revision = int(state.get("replan_count", 0)) + 1
         replans_dir = Path(state["run_dir"]) / "reports" / "replans"
         replans_dir.mkdir(parents=True, exist_ok=True)
         path = replans_dir / ("replan_%s.raw.json" % revision)
         previous_path = replans_dir / ("replan_%s.previous.json" % revision)
-        # Save previous plan snapshot before it gets overwritten
         write_json(previous_path, previous_plan)
         write_json(path, {"raw_text": raw.text[:10000], "revision": revision})
-        return {
-            "raw_plan_path": str(path),
-            "previous_plan_path": str(previous_path),
-            "replan_count": revision,
-            "stop_reason": "",
+        return {"raw_plan_path": str(path), "previous_plan_path": str(previous_path), "replan_count": revision, "stop_reason": ""}
+
+    def observe_failure(self, state):
+        observer = self.deps.failure_observer or FailureObserver()
+        context = observer.build(state)
+        signature = observer.compute_signature(context)
+        same_count = int(state.get("same_failure_count", 0))
+        prev_signature = state.get("failure_signature", "")
+        if signature == prev_signature:
+            same_count += 1
+        else:
+            same_count = 1
+        run_dir = Path(state["run_dir"])
+        failures_dir = run_dir / "reports" / "failures"
+        failures_dir.mkdir(parents=True, exist_ok=True)
+        write_json(failures_dir / ("%s.json" % same_count), {"failure_context": context, "failure_signature": signature, "same_failure_count": same_count})
+        update = {"failure_context": context, "failure_signature": signature, "same_failure_count": same_count, "current_stage": "observe_failure"}
+        max_same = int(self.deps.runtime_config.langgraph_max_same_failure) if self.deps.runtime_config and hasattr(self.deps.runtime_config, "langgraph_max_same_failure") else 2
+        if same_count >= max_same:
+            update["stop_reason"] = "same_failure_limit_reached"
+        return update
+
+    def diagnose(self, state):
+        if not self.deps.diagnoser_factory:
+            return {"diagnosis": {"status": "unavailable", "accepted_actions": []}, "diagnose_count": int(state.get("diagnose_count", 0)) + 1, "current_stage": "diagnose"}
+        diagnose_count = int(state.get("diagnose_count", 0))
+        max_diagnoses = int(state.get("max_diagnoses", 2))
+        if diagnose_count >= max_diagnoses:
+            return {"stop_reason": "diagnose_limit_reached", "current_stage": "diagnose"}
+        from auto_harness.agent.schemas import AgentObservation
+        snapshot = {}
+        snapshot_path = state.get("snapshot_path", "")
+        if snapshot_path:
+            try:
+                snapshot = read_json(Path(snapshot_path))
+            except (OSError, ValueError):
+                pass
+        observation = AgentObservation(
+            task_id=state["task_id"], stage=state.get("failed_stage", ""),
+            repo_dir=state.get("repo_dir", ""), file_tree=snapshot.get("file_tree", []),
+            selected_files=snapshot.get("selected_files", {}),
+            deterministic_result=state.get("failure_context", {}),
+            previous_results=state.get("stage_results", {}),
+            memory_hits=snapshot.get("memory_hits", []),
+            selected_skills=snapshot.get("selected_skills", []),
+            runtime_policy=state.get("runtime_policy", {}),
+            allowed_action_types=["install_package", "install_conda_package", "update_verify_hint", "rerun_from_stage", "select_run_candidate", "adjust_runtime", "set_env_var_name_only"],
+            extra={"compiled_analysis": state.get("compiled_analysis", {}), "replan_count": state.get("replan_count", 0), "repair_count": state.get("repair_count", 0)},
+        )
+        try:
+            diagnoser = self.deps.diagnoser_factory(state)
+            diagnosis = diagnoser.diagnose(observation)
+        except Exception as exc:
+            return {"llm_error": _sanitize_error(exc), "stop_reason": "llm_diagnosis_failed", "diagnose_count": diagnose_count + 1, "agent_call_count": int(state.get("agent_call_count", 0)) + 1, "current_stage": "diagnose"}
+        run_dir = Path(state["run_dir"])
+        diag_dir = run_dir / "reports" / "diagnoses"
+        diag_dir.mkdir(parents=True, exist_ok=True)
+        new_count = diagnose_count + 1
+        write_json(diag_dir / ("diagnosis_%s.json" % new_count), diagnosis)
+        trace_paths = []
+        if hasattr(diagnoser, 'trace_writer') and diagnoser.trace_writer:
+            trace_dir = Path(state["run_dir"]) / "logs" / "agent_calls"
+            if trace_dir.exists():
+                trace_paths = [str(f) for f in sorted(trace_dir.glob("*.json"))[-1:]]
+        return {"diagnosis": diagnosis, "diagnosis_path": str(diag_dir / ("diagnosis_%s.json" % new_count)), "diagnose_count": new_count, "agent_call_count": int(state.get("agent_call_count", 0)) + 1, "agent_trace_paths": trace_paths, "current_stage": "diagnose"}
+
+    def generate_agent_contribution(self, state):
+        plan_calls = 1 if state.get("raw_plan_path") else 0
+        replan_count = int(state.get("replan_count", 0))
+        diagnose_calls = int(state.get("diagnose_count", 0))
+        repair_attempts = int(state.get("repair_count", 0))
+        agent_call_count = int(state.get("agent_call_count", 0))
+        policy_result = state.get("repair_policy_result", {})
+        decisions = policy_result.get("decisions", [])
+        rejected_actions = sum(1 for d in decisions if isinstance(d, dict) and not d.get("allowed"))
+        accepted_actions = sum(1 for d in decisions if isinstance(d, dict) and d.get("allowed"))
+        recovery_events = state.get("recovery_events", [])
+        recovery_decisions = {}
+        for event in recovery_events:
+            if isinstance(event, dict):
+                decision = event.get("decision", "unknown")
+                recovery_decisions[decision] = recovery_decisions.get(decision, 0) + 1
+        contribution = {
+            "controller": "langgraph", "llm_required": state.get("llm_required", True),
+            "provider": state.get("llm_provider", ""), "plan_calls": plan_calls,
+            "diagnose_calls": diagnose_calls, "replan_calls": replan_count,
+            "agent_verify_calls": 0, "accepted_actions": accepted_actions,
+            "rejected_actions": rejected_actions, "repair_attempts": repair_attempts,
+            "recovery_decisions": recovery_decisions,
+            "final_verify_status": state.get("verify_status", ""),
+            "llm_claimed_success": False, "success_decided_by": "evidence_gate",
+            "agent_call_count": agent_call_count, "generated_at": utc_now_iso(),
         }
+        run_dir = Path(state["run_dir"])
+        reports_dir = run_dir / "reports"
+        reports_dir.mkdir(parents=True, exist_ok=True)
+        write_json(reports_dir / "agent_contribution.json", contribution)
+        return {"current_stage": "generate_contribution"}
+
+    def _write_recovery_summary(self, state):
+        """Phase 10: write recovery_summary.json from actual recovery events."""
+        recovery_events = state.get("recovery_events", [])
+        recovery_capabilities = state.get("recovery_capabilities", {})
+        summary = {
+            "total_recovery_events": len(recovery_events),
+            "capabilities": recovery_capabilities,
+            "decisions": {},
+            "operations": [],
+        }
+        for event in recovery_events:
+            if isinstance(event, dict):
+                decision = event.get("decision", "unknown")
+                summary["decisions"][decision] = summary["decisions"].get(decision, 0) + 1
+                op_id = event.get("operation_id", "")
+                if op_id:
+                    summary["operations"].append(op_id)
+        run_dir = Path(state["run_dir"])
+        reports_dir = run_dir / "reports"
+        reports_dir.mkdir(parents=True, exist_ok=True)
+        write_json(reports_dir / "recovery_summary.json", summary)
 
     def report(self, state):
-        """Write pipeline results and mark report stage."""
         self._artifacts(state).write_pipeline_results(state.get("stage_results", {}))
+        self.generate_agent_contribution(state)
+        self._write_recovery_summary(state)
         return {"current_stage": "report"}
 
     def stop(self, state):
-        """Terminal node: marks the graph as stopped."""
         return {"current_stage": "stop"}

@@ -93,6 +93,17 @@ class HarnessConfig:
     agent_plan_first_max_file_chars: int = 6000
     agent_plan_first_require_grounding: bool = True
     agent_plan_first_allow_external_network: bool = False
+    default_controller: str = "langgraph"
+    langgraph_require_llm: bool = True
+    langgraph_allow_mock_in_dry_run: bool = True
+    langgraph_allow_mock_in_execute: bool = False
+    langgraph_enable_diagnose: bool = True
+    langgraph_enable_repair: bool = True
+    langgraph_enable_agent_verify: bool = True
+    langgraph_enable_recovery: bool = True
+    langgraph_max_diagnoses: int = 2
+    langgraph_max_repairs: int = 2
+    langgraph_max_same_failure: int = 2
 
     def __post_init__(self) -> None:
         if self.allowed_commands is None:
@@ -107,6 +118,14 @@ class HarnessConfig:
             self.agent_allowed_hosts = ["127.0.0.1", "localhost", "::1"]
         if self.conda_allowed_channels is None:
             self.conda_allowed_channels = ["defaults", "conda-forge", "pytorch", "nvidia", "fastai"]
+        if self.default_controller not in {"legacy", "langgraph"}:
+            raise ValueError("default_controller must be 'legacy' or 'langgraph', got: %s" % self.default_controller)
+        if self.langgraph_max_diagnoses < 0:
+            raise ValueError("langgraph_max_diagnoses must be non-negative, got: %s" % self.langgraph_max_diagnoses)
+        if self.langgraph_max_repairs < 0:
+            raise ValueError("langgraph_max_repairs must be non-negative, got: %s" % self.langgraph_max_repairs)
+        if self.langgraph_max_same_failure < 0:
+            raise ValueError("langgraph_max_same_failure must be non-negative, got: %s" % self.langgraph_max_same_failure)
 
     @classmethod
     def load(cls, path: str = None) -> "HarnessConfig":

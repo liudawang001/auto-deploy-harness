@@ -1,13 +1,18 @@
 # auto-deploy-harness
 
-auto-deploy-harness 是一个面向 AI 开源 demo 项目的自动部署与验证 Agent。
+auto-deploy-harness 是一个基于 LangGraph 编排、由 LLM 负责不确定性决策的自动部署与验证 Agent。
 
-项目采用“确定性 Python 编排 + 受控 Agent 执行”的架构：
+**默认采用 LangGraph Plan-first 编排：** LLM 负责部署规划、候选选择、失败诊断与差异化 Replan；所有模型输出经 Schema 和 Policy Gate 裁决为受控动作，由确定性 stage executor 执行，最终成功仅由 Evidence Gate 裁决。Legacy deterministic pipeline 作为显式 baseline 和无 LLM 降级路径保留。
 
-- Python 负责工作流状态、重试、超时、文件边界和证据校验。
-- Claude Code headless 或其他 executor 负责项目阅读、日志诊断等不确定任务。
-- 讯飞 Spark 等 LLM provider 通过统一接口接入。
-- `verify` 是证据驱动的，不能把端口开放或 HTTP 200 直接当成部署成功。
+**恢复能力：** 结合 SQLite Checkpoint、Operation Journal 和资源 Reconciler，对下载、依赖环境、服务进程及 Docker 容器执行恢复前状态对账，避免 checkpoint resume 导致重复副作用。
+
+核心架构原则：
+
+- LLM 不直接执行 shell、Docker、文件修改、模型下载或进程启动。
+- 所有 LLM 输出经 parser → schema → policy → compiler → typed executor 管道。
+- VerifyModule Evidence Gate 是唯一部署成功裁判。
+- Checkpoint 只描述图状态；外部副作用恢复必须经过 Operation Journal 和 Reconciler。
+- 禁止副作用发生后自动从 LangGraph 切到 legacy。
 
 项目发布名和主命令为 `auto-deploy-harness`。为避免破坏历史 import 和已有脚本，Python 包名继续保留为 `auto_harness`，旧命令 `auto-harness` 也继续兼容。
 

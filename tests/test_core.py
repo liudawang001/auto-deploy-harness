@@ -2908,6 +2908,7 @@ class CoreTests(unittest.TestCase):
                 "task_queue_dir": str(root / "queue"),
                 "queue_max_concurrent_tasks": 1,
                 "queue_gpu_slots": 0,
+                "default_controller": "legacy",
             }), encoding="utf-8")
             old_config = os.environ.get("AUTO_HARNESS_CONFIG")
             os.environ["AUTO_HARNESS_CONFIG"] = str(config_path)
@@ -3361,6 +3362,7 @@ class CoreTests(unittest.TestCase):
                 runs_dir=str(root / "runs"),
                 memory_dir=str(root / "memory"),
                 model_cache_dir=str(root / "model_cache"),
+                default_controller="legacy",
             )
             task_id = TaskRunner(config).deploy(str(repo), "demo", dry_run=True)
             pipeline_path = root / "runs" / task_id / "reports" / "pipeline_results.json"
@@ -3556,6 +3558,7 @@ class CoreTests(unittest.TestCase):
                 runs_dir=str(root / "runs"),
                 memory_dir=str(root / "memory"),
                 model_cache_dir=str(root / "model_cache"),
+                default_controller="legacy",
             )
             runner = TaskRunner(config)
             task_id = runner.deploy(str(repo), "demo", dry_run=True)
@@ -3623,6 +3626,7 @@ class CoreTests(unittest.TestCase):
                 runs_dir=str(root / "runs"),
                 memory_dir=str(root / "memory"),
                 model_cache_dir=str(root / "model_cache"),
+                default_controller="legacy",
             )
             runner = TaskRunner(config)
             task_id = runner.deploy(str(repo), "demo", dry_run=True)
@@ -3652,6 +3656,7 @@ class CoreTests(unittest.TestCase):
                 runs_dir=str(root / "runs"),
                 memory_dir=str(root / "memory"),
                 model_cache_dir=str(root / "model_cache"),
+                default_controller="legacy",
             )
             runner = TaskRunner(config)
             task_id = runner.deploy(str(repo), "demo", dry_run=True)
@@ -3668,7 +3673,7 @@ class CoreTests(unittest.TestCase):
 
             runner.resume(task_id, dry_run=True)
             events = [json.loads(line) for line in (run_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()]
-            resume_events = [event for event in events if event["type"] == "resume_requested"]
+            resume_events = [event for event in events if event["type"] == "legacy_resume"]
             self.assertEqual(resume_events[-1]["data"]["start_stage"], "analyze")
 
     def test_conda_environment_yml_parser_extracts_channels_and_pip(self):
@@ -3894,6 +3899,7 @@ class CoreTests(unittest.TestCase):
                 runs_dir=str(root / "runs"),
                 memory_dir=str(root / "memory"),
                 model_cache_dir=str(root / "model_cache"),
+                default_controller="legacy",
                 agent_auto_resume_after_repair=True,
                 agent_max_loop_iterations=2,
             )
@@ -3931,7 +3937,7 @@ class CoreTests(unittest.TestCase):
     def test_task_runner_does_not_auto_resume_when_config_disabled(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            runner = TaskRunner(HarnessConfig(runs_dir=str(root / "runs"), memory_dir=str(root / "memory"), model_cache_dir=str(root / "model_cache"), agent_auto_resume_after_repair=False))
+            runner = TaskRunner(HarnessConfig(runs_dir=str(root / "runs"), memory_dir=str(root / "memory"), model_cache_dir=str(root / "model_cache"), default_controller="legacy", agent_auto_resume_after_repair=False))
             spec = runner.create_spec(str(root / "repo"), "demo", dry_run=True)
             runner.store.create_task(spec)
             calls = []
@@ -3951,7 +3957,7 @@ class CoreTests(unittest.TestCase):
     def test_task_runner_stops_auto_resume_after_max_iterations(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            runner = TaskRunner(HarnessConfig(runs_dir=str(root / "runs"), memory_dir=str(root / "memory"), model_cache_dir=str(root / "model_cache"), agent_auto_resume_after_repair=True, agent_max_loop_iterations=1))
+            runner = TaskRunner(HarnessConfig(runs_dir=str(root / "runs"), memory_dir=str(root / "memory"), model_cache_dir=str(root / "model_cache"), default_controller="legacy", agent_auto_resume_after_repair=True, agent_max_loop_iterations=1))
             spec = runner.create_spec(str(root / "repo"), "demo", dry_run=True)
             runner.store.create_task(spec)
             calls = []
@@ -3971,7 +3977,7 @@ class CoreTests(unittest.TestCase):
     def test_task_runner_stops_auto_resume_after_verify_pass(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            runner = TaskRunner(HarnessConfig(runs_dir=str(root / "runs"), memory_dir=str(root / "memory"), model_cache_dir=str(root / "model_cache"), agent_auto_resume_after_repair=True, agent_stop_on_verify_pass=True))
+            runner = TaskRunner(HarnessConfig(runs_dir=str(root / "runs"), memory_dir=str(root / "memory"), model_cache_dir=str(root / "model_cache"), default_controller="legacy", agent_auto_resume_after_repair=True, agent_stop_on_verify_pass=True))
             spec = runner.create_spec(str(root / "repo"), "demo", dry_run=True)
             runner.store.create_task(spec)
             calls = []
@@ -3991,7 +3997,7 @@ class CoreTests(unittest.TestCase):
     def test_task_runner_does_not_auto_resume_when_policy_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            runner = TaskRunner(HarnessConfig(runs_dir=str(root / "runs"), memory_dir=str(root / "memory"), model_cache_dir=str(root / "model_cache"), agent_auto_resume_after_repair=True))
+            runner = TaskRunner(HarnessConfig(runs_dir=str(root / "runs"), memory_dir=str(root / "memory"), model_cache_dir=str(root / "model_cache"), default_controller="legacy", agent_auto_resume_after_repair=True))
             spec = runner.create_spec(str(root / "repo"), "demo", dry_run=True)
             runner.store.create_task(spec)
             calls = []

@@ -28,7 +28,7 @@ class LangGraphControllerDependencies:
     def initial_state(self, context: DeploymentContext) -> Dict:
         """Build initial graph state for a new deployment."""
         max_replans = getattr(self.runner.config, "agent_plan_first_max_replans", 2)
-        return build_initial_state(context, max_replans)
+        return build_initial_state(context, max_replans, config=self.runner.config)
 
     def graph_deps(self) -> GraphNodeDependencies:
         """Build GraphNodeDependencies with real modules."""
@@ -59,6 +59,9 @@ class LangGraphControllerDependencies:
             },
             provider_factory=lambda: self.runner._create_plan_first_provider(),
             runtime_policy={},
+            # Phase 5: Agent Verify integration factories
+            verify_planner_factory=self._verify_planner_factory(),
+            agent_verify_config_factory=self._agent_verify_config_factory(),
         )
 
         def build_snapshot(state):
@@ -119,6 +122,21 @@ class LangGraphControllerDependencies:
                 return "verify"
             return "runner"
 
+        # Phase 3: diagnoser_factory creates a per-state AgentDiagnoser
+        def diagnoser_factory(state):
+            from auto_harness.agent import AgentDiagnoser, AgentTraceWriter
+            trace_dir = Path(state["run_dir"]) / "logs" / "agent_calls"
+            return AgentDiagnoser(
+                provider=self.runner._create_plan_first_provider(),
+                config=self.runner.config,
+                trace_writer=AgentTraceWriter(trace_dir),
+            )
+
+        # Phase 6: recovery adapter with available reconcilers
+        from auto_harness.recovery.graph_adapter import GraphRecoveryAdapter
+        reconcilers = self._build_reconcilers()
+        recovery_adapter = GraphRecoveryAdapter(reconcilers=reconcilers)
+
         return GraphNodeDependencies(
             build_snapshot=build_snapshot,
             build_replan_input=build_replan_input,
@@ -131,20 +149,90 @@ class LangGraphControllerDependencies:
             stage_executor=stage_executor,
             artifact_writer_factory=lambda run_dir: PlanArtifactWriter(run_dir),
             runtime_config=self.runner.config,
+            # Phase 3 additions
+            diagnoser_factory=diagnoser_factory,
+            failure_observer=self._failure_observer(),
+            # Phase 4 additions
+            repair_planner=self.runner.repair_planner,
+            repair_policy=self.runner.repair_policy,
+            repair_applier=self.runner.repair_applier,
+            repair_loop=self.runner.repair_loop,
+            repair_overlay=self.runner.repair_overlay,
+            # Phase 6 additions
+            recovery_adapter=recovery_adapter,
+            runtime_policy_factory=lambda state: state.get("runtime_policy", {}),
         )
 
+    def _failure_observer(self):
+        """Phase 3: FailureObserver for deterministic failure extraction."""
+        from auto_harness.graph.failure import FailureObserver
+        return FailureObserver()
+
+    def _verify_planner_factory(self):
+        """Phase 5: factory creating AgentVerifyPlanner per call."""
+        def factory():
+            from auto_harness.agent import AgentVerifyPlanner, AgentTraceWriter
+            return AgentVerifyPlanner(
+                self.runner._create_plan_first_provider(),
+                config=self.runner.config,
+                trace_writer=AgentTraceWriter(Path("/tmp/_verify_traces")),
+            )
+        return factory
+
+    def _agent_verify_config_factory(self):
+        """Phase 5: factory creating agent verify config dict."""
+        def factory():
+            config = self.runner.config
+            return {
+                "agent_mode": "gated_actor",
+                "agent_enable_verify": getattr(config, "langgraph_enable_agent_verify", True),
+                "agent_verify_max_steps": getattr(config, "agent_verify_max_steps", 5),
+                "agent_allowed_hosts": getattr(config, "agent_allowed_hosts", ["localhost", "127.0.0.1"]),
+                "provider": self.runner._create_plan_first_provider(),
+            }
+        return factory
+
+    def _build_reconcilers(self):
+        """Phase 6: build available reconcilers based on config."""
+        reconcilers = {}
+        config = self.runner.config
+        try:
+            if getattr(config, "langgraph_enable_recovery", True):
+                from auto_harness.recovery.download import DownloadReconciler
+                from auto_harness.recovery.process import ProcessReconciler
+                from auto_harness.recovery.docker import DockerReconciler
+                from auto_harness.recovery.dependency import DependencyReconciler
+                reconcilers["model_download"] = DownloadReconciler()
+                reconcilers["local_process"] = ProcessReconciler()
+                reconcilers["docker_service"] = DockerReconciler()
+                reconcilers["dependency_install"] = DependencyReconciler()
+        except Exception:
+            # Reconcilers may not be available in all environments
+            pass
+        return reconcilers
+
     def to_controller_result(self, output: Dict) -> DeploymentResult:
-        """Convert graph output to DeploymentResult."""
+        """Convert graph output to DeploymentResult.
+
+        Per Phase 10 spec:
+        - verify pass/passed -> completed
+        - pending approval -> interrupted
+        - explicit stop_reason -> stopped
+        - graph ended without verify pass -> stopped/failed
+        """
         verify_status = output.get("verify_status", "")
         if verify_status in ("passed", "pass"):
             status = "completed"
             stop_reason = "verify_passed"
+        elif output.get("pending_approval"):
+            status = "interrupted"
+            stop_reason = "approval_pending"
         elif output.get("stop_reason"):
             status = "stopped"
             stop_reason = output["stop_reason"]
         else:
-            status = "completed"
-            stop_reason = "graph_completed"
+            status = "stopped"
+            stop_reason = "graph_ended_without_verify_pass"
         return DeploymentResult(
             task_id=output.get("task_id", ""),
             status=status,

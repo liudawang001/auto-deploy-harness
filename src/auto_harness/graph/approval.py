@@ -33,7 +33,7 @@ class ApprovalStore:
 
     def save(self, approval_id, payload):
         """Save an approval record atomically."""
-        if not approval_id or not approval_id.replace("-", "").isalnum():
+        if not approval_id or not approval_id.replace("-", "").replace("_", "").isalnum():
             raise ValueError("invalid approval_id")
         path = self.root / (approval_id + ".json")
         with FileLock(path):
@@ -45,7 +45,7 @@ class ApprovalStore:
 
     def load(self, approval_id):
         """Load an approval record by ID."""
-        if not approval_id or not approval_id.replace("-", "").isalnum():
+        if not approval_id or not approval_id.replace("-", "").replace("_", "").isalnum():
             raise ValueError("invalid approval_id")
         path = self.root / (approval_id + ".json")
         if not path.exists():

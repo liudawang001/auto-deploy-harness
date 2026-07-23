@@ -48,6 +48,8 @@ class AgentStageExecutor:
         repair_components: Dict = None,
         provider_factory: Callable = None,
         runtime_policy: Dict = None,
+        verify_planner_factory: Callable = None,
+        agent_verify_config_factory: Callable = None,
     ) -> None:
         self.config = config
         self.store = store
@@ -55,6 +57,10 @@ class AgentStageExecutor:
         self.repair_components = repair_components or {}
         self.provider_factory = provider_factory
         self.runtime_policy = runtime_policy or {}
+        # Phase 5: Agent Verify integration — factories let the graph inject
+        # the orchestrator's verify planner/provider config into VerifyModule.
+        self.verify_planner_factory = verify_planner_factory
+        self.agent_verify_config_factory = agent_verify_config_factory
 
     def execute_stage(
         self,
@@ -71,6 +77,7 @@ class AgentStageExecutor:
         dry_run: bool,
         stage_hints: dict = None,
         repair_overlay: dict = None,
+        runtime_policy: Dict = None,
     ) -> StageExecutionResult:
         """Execute a single pipeline stage and return before/after status.
 
@@ -87,12 +94,21 @@ class AgentStageExecutor:
             dry_run: If True, don't execute real commands
             stage_hints: Optional hints from plan gate
             repair_overlay: Optional repair overlay
+            runtime_policy: Optional per-call runtime policy override (Phase 2).
+                When provided, takes precedence over the executor's default.
 
         Returns:
             StageExecutionResult with before/after status
         """
         stage_hints = stage_hints or {}
         repair_overlay = repair_overlay or {}
+        # Phase 2: use the per-call runtime policy if provided, else fall back
+        # to the executor's default. Never rely on an empty dict + config fallback.
+        effective_runtime_policy = dict(runtime_policy or self.runtime_policy or {})
+        # Temporarily set effective policy for the duration of this call so
+        # the _execute_* helpers pick it up via self.runtime_policy.
+        saved_policy = self.runtime_policy
+        self.runtime_policy = effective_runtime_policy
 
         # Get before status from current results
         before_status = self._get_stage_status(stage, state)
@@ -132,6 +148,9 @@ class AgentStageExecutor:
                 changed=before_status != "failed",
                 error=str(exc)[:2000],
             )
+        finally:
+            # Phase 2: restore the executor's default runtime policy
+            self.runtime_policy = saved_policy
 
     def _execute_analyze(self, task_id, run_dir, repo_dir, state, before_status, dry_run):
         from auto_harness.modules.analyzer import ProjectAnalyzer
@@ -285,7 +304,25 @@ class AgentStageExecutor:
                 effective_runner_data = inner_data["data"]
             else:
                 effective_runner_data = inner_data
-        result = VerifyModule().verify(
+
+        # Phase 5: inject verify_planner and agent_verify_config from factories
+        verify_planner = None
+        agent_verify_config = None
+        if self.verify_planner_factory:
+            try:
+                verify_planner = self.verify_planner_factory()
+            except Exception:
+                pass
+        if self.agent_verify_config_factory:
+            try:
+                agent_verify_config = self.agent_verify_config_factory()
+            except Exception:
+                pass
+
+        result = VerifyModule(
+            verify_planner=verify_planner,
+            agent_verify_config=agent_verify_config,
+        ).verify(
             run_dir,
             deploy_analysis,
             effective_runner_data,

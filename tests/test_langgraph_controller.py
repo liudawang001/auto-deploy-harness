@@ -270,7 +270,7 @@ class TestBuildInitialState:
     def test_initial_state_fields(self, tmp_path):
         ctx = make_context(tmp_path)
         state = build_initial_state(ctx, max_replans=2)
-        assert state["schema_version"] == 1
+        assert state["schema_version"] == 2
         assert state["task_id"] == "test_task"
         assert state["controller"] == "langgraph"
         assert state["dry_run"] is True

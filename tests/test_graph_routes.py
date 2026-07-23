@@ -48,51 +48,35 @@ class TestRouteAfterStage:
         }
         assert route_after_stage(state) == "continue"
 
-    def test_failed_with_replan_available(self):
+    def test_failed_goes_to_observe_failure(self):
+        """Failed stages route to observe_failure for diagnosis."""
         state = {
             "current_stage": "runner",
             "stage_results": {"runner": {"status": "failed"}},
             "replan_count": 0,
             "max_replans": 2,
         }
-        assert route_after_stage(state) == "replan"
+        assert route_after_stage(state) == "observe_failure"
 
-    def test_failed_with_replan_exhausted(self):
-        state = {
-            "current_stage": "runner",
-            "stage_results": {"runner": {"status": "failed"}},
-            "replan_count": 2,
-            "max_replans": 2,
-        }
-        assert route_after_stage(state) == "stop"
-
-    def test_uncertain_with_replan_available(self):
+    def test_uncertain_goes_to_observe_failure(self):
+        """Uncertain stages route to observe_failure for diagnosis."""
         state = {
             "current_stage": "env_deploy",
             "stage_results": {"env_deploy": {"status": "uncertain"}},
             "replan_count": 0,
             "max_replans": 1,
         }
-        assert route_after_stage(state) == "replan"
-
-    def test_uncertain_with_replan_exhausted(self):
-        state = {
-            "current_stage": "env_deploy",
-            "stage_results": {"env_deploy": {"status": "uncertain"}},
-            "replan_count": 1,
-            "max_replans": 1,
-        }
-        assert route_after_stage(state) == "stop"
+        assert route_after_stage(state) == "observe_failure"
 
     def test_default_status_is_failed(self):
-        """If stage result has no status, treat as failed."""
+        """If stage result has no status, treat as failed -> observe_failure."""
         state = {
             "current_stage": "runner",
             "stage_results": {"runner": {}},
             "replan_count": 0,
             "max_replans": 2,
         }
-        assert route_after_stage(state) == "replan"
+        assert route_after_stage(state) == "observe_failure"
 
 
 class TestRouteAfterVerify:
@@ -104,17 +88,15 @@ class TestRouteAfterVerify:
         state = {"verify_status": "pass", "replan_count": 0, "max_replans": 2}
         assert route_after_verify(state) == "report"
 
-    def test_failed_with_replan_available(self):
+    def test_failed_goes_to_observe_failure(self):
+        """Failed verify routes to observe_failure for diagnosis."""
         state = {"verify_status": "failed", "replan_count": 0, "max_replans": 2}
-        assert route_after_verify(state) == "replan"
+        assert route_after_verify(state) == "observe_failure"
 
-    def test_failed_with_replan_exhausted(self):
-        state = {"verify_status": "failed", "replan_count": 2, "max_replans": 2}
-        assert route_after_verify(state) == "stop"
-
-    def test_uncertain_with_replan_available(self):
+    def test_uncertain_goes_to_observe_failure(self):
+        """Uncertain verify routes to observe_failure for diagnosis."""
         state = {"verify_status": "uncertain", "replan_count": 0, "max_replans": 1}
-        assert route_after_verify(state) == "replan"
+        assert route_after_verify(state) == "observe_failure"
 
 
 class TestRouteResumeStage:

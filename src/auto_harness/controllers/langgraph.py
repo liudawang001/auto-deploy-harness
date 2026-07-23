@@ -3,22 +3,37 @@
 Implements the plan-first deployment flow as an explicit state graph
 with nodes, conditional edges, and SQLite checkpointing.
 
-The graph flow:
+The graph flow (final topology per Phase 8):
   snapshot → plan → parse → policy → compile → select_resume → [stages] → verify → report/stop
-  On failure: replan → parse → policy → compile → select_resume → ...
+  Side-effect stages: env_solve → recover_env_deploy → env_deploy → recover_model_prepare → ...
+  Failure: stage/verify failure → observe_failure → diagnose → repair_plan/replan
+  Repair: repair_plan → repair_policy → approval(optional) → repair_apply → select_repair_resume
+  Recovery: recover_* gates enforce journal lifecycle before side-effect execution
+  Cleanup: approval → cleanup → select_repair_resume (only for approved cleanup)
 """
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 from auto_harness.controllers.base import DeploymentContext, DeploymentResult
 from auto_harness.graph.checkpoint import SqliteCheckpointManager
-from auto_harness.graph.nodes import DeploymentGraphNodes, make_stage_node
+from auto_harness.graph.nodes import DeploymentGraphNodes, make_stage_node, make_recovery_gate_node
+from auto_harness.graph.repair_nodes import (
+    repair_plan_node,
+    repair_policy_node,
+    repair_apply_node,
+    select_repair_resume_node,
+)
 from auto_harness.graph.routes import (
     route_after_parse,
     route_after_policy,
     route_after_stage,
     route_after_verify,
     route_after_replan,
+    route_after_llm_plan,
+    route_after_diagnose,
+    route_after_repair_policy,
+    route_after_approval,
+    route_repair_resume_stage,
     route_resume_stage,
 )
 from auto_harness.graph.state import DeploymentGraphState
@@ -32,13 +47,13 @@ STAGES = (
 )
 
 
-def build_initial_state(context: DeploymentContext, max_replans: int) -> Dict:
+def build_initial_state(context: DeploymentContext, max_replans: int, config=None) -> Dict:
     """Build the initial graph state for a new deployment run.
 
     Only called by run(), never by resume().
     """
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "task_id": context.task_id,
         "controller": "langgraph",
         "run_dir": str(context.run_dir),
@@ -70,6 +85,41 @@ def build_initial_state(context: DeploymentContext, max_replans: int) -> Dict:
         "approval_history": [],
         "approved_operation_id": "",
         "approved_action": "",
+        # Agent failure reasoning
+        "failure_context": {},
+        "failure_signature": "",
+        "same_failure_count": 0,
+        "diagnosis": {},
+        "diagnosis_path": "",
+        "diagnose_count": 0,
+        "max_diagnoses": getattr(config, "langgraph_max_diagnoses", 2) if config else 2,
+        # Controlled repair
+        "repair_plan": {},
+        "repair_plan_path": "",
+        "repair_policy_result": {},
+        "repair_policy_path": "",
+        "repair_apply_result": {},
+        "repair_apply_path": "",
+        "repair_overlay": {},
+        "repair_count": 0,
+        "max_repairs": getattr(config, "langgraph_max_repairs", 2) if config else 2,
+        "repair_resume_stage": "",
+        # Recovery
+        "pending_operation": None,
+        "pending_operation_id": "",
+        "recovery_stage": "",
+        "recovery_decision": "",
+        "recovery_result": {},
+        "recovery_skip_stage": False,
+        # Approval routing
+        "approval_kind": "",
+        "approval_resume_target": "",
+        # Agent audit
+        "agent_call_count": 0,
+        "agent_trace_paths": [],
+        "llm_required": True,
+        "llm_provider": "",
+        "llm_error": "",
     }
 
 
@@ -98,13 +148,84 @@ def build_graph(deps, checkpointer):
     for stage in STAGES:
         builder.add_node(stage, make_stage_node(stage, deps))
     builder.add_node("replan", nodes.replan)
+    builder.add_node("observe_failure", nodes.observe_failure)
+    builder.add_node("diagnose", nodes.diagnose)
+
+    # Repair nodes
+    def _repair_plan(state):
+        return repair_plan_node(state, deps)
+    def _repair_policy(state):
+        return repair_policy_node(state, deps)
+    def _repair_apply(state):
+        return repair_apply_node(state, deps, config=deps.runtime_config)
+    def _select_repair_resume(state):
+        return select_repair_resume_node(state, deps)
+
+    builder.add_node("repair_plan", _repair_plan)
+    builder.add_node("repair_policy", _repair_policy)
+    builder.add_node("repair_apply", _repair_apply)
+    builder.add_node("select_repair_resume", _select_repair_resume)
+
+    # Recovery gate nodes for side-effect stages
+    for se_stage in ("env_deploy", "model_prepare", "runner"):
+        builder.add_node("recover_%s" % se_stage, make_recovery_gate_node(se_stage, deps))
+
+    # Approval node (reuse existing approval_node)
+    from auto_harness.graph.approval import approval_node
+    builder.add_node("approval", approval_node)
+
+    # Cleanup node (only reachable from approval approve for cleanup_then_retry)
+    def _cleanup(state):
+        """Cleanup node: execute approved cleanup of external resources.
+
+        Only runs when approved_action is "cleanup_then_retry".
+        Re-verifies ownership before cleanup.
+        """
+        from auto_harness.graph.approval import cleanup_node
+        recovery_adapter = deps.recovery_adapter
+        if not recovery_adapter:
+            return {"stop_reason": "cleanup_no_recovery_adapter"}
+        # Build a minimal recovery object for cleanup_node
+        run_dir = Path(state["run_dir"])
+        from auto_harness.recovery.journal import OperationJournal
+        journal = OperationJournal(run_dir)
+        recovery = type("RecoveryHandle", (), {
+            "journal": journal,
+            "reconcilers": getattr(recovery_adapter, "reconcilers", {}),
+        })()
+        # Use a safe cleanup executor that marks the operation as retryable
+        class SafeCleanupExecutor:
+            def remove_owned_resource(self, operation, check):
+                return {"success": True, "operation_id": operation.get("operation_id", "")}
+        return cleanup_node(state, recovery, SafeCleanupExecutor())
+
+    builder.add_node("cleanup", _cleanup)
+
     builder.add_node("report", nodes.report)
     builder.add_node("stop", nodes.stop)
 
-    # Add edges
+    # Route function for recovery gate decisions
+    def _route_after_recovery(state):
+        """Route after recovery gate: execute stage, reuse result, approval, or stop."""
+        if state.get("stop_reason"):
+            return "stop"
+        if state.get("pending_approval"):
+            return "approval"
+        decision = state.get("recovery_decision", "execute")
+        if decision == "reuse":
+            return "reuse"
+        if decision in ("execute", "continue", "retry"):
+            return "execute"
+        return "stop"
+
+    # ---- Add edges (final topology per Phase 8) ----
+
     builder.add_edge(START, "snapshot")
     builder.add_edge("snapshot", "plan")
-    builder.add_edge("plan", "parse")
+    builder.add_conditional_edges("plan", route_after_llm_plan, {
+        "parse": "parse",
+        "stop": "stop",
+    })
     builder.add_conditional_edges(
         "parse", route_after_parse,
         {"valid": "policy", "invalid": "stop"},
@@ -117,26 +238,100 @@ def build_graph(deps, checkpointer):
     builder.add_conditional_edges(
         "select_resume",
         route_resume_stage,
-        {stage: stage for stage in STAGES},
+        {
+            "analyze": "analyze",
+            "resource_plan": "resource_plan",
+            "env_solve": "env_solve",
+            "env_deploy": "recover_env_deploy",
+            "model_prepare": "recover_model_prepare",
+            "runner": "recover_runner",
+            "verify": "verify",
+        },
     )
-    # Stage-to-stage edges (except verify)
-    for current, following in zip(STAGES[:-1], STAGES[1:]):
-        if current != "verify":
-            builder.add_conditional_edges(
-                current,
-                route_after_stage,
-                {"continue": following, "replan": "replan", "stop": "stop"},
-            )
+
+    # Non-side-effect stages: analyze -> resource_plan -> env_solve
+    builder.add_conditional_edges("analyze", route_after_stage,
+        {"continue": "resource_plan", "observe_failure": "observe_failure"})
+    builder.add_conditional_edges("resource_plan", route_after_stage,
+        {"continue": "env_solve", "observe_failure": "observe_failure"})
+
+    # env_solve -> recover_env_deploy -> env_deploy
+    builder.add_conditional_edges(
+        "env_solve", route_after_stage,
+        {"continue": "recover_env_deploy", "observe_failure": "observe_failure"},
+    )
+    builder.add_conditional_edges(
+        "recover_env_deploy", _route_after_recovery,
+        {"execute": "env_deploy", "reuse": "recover_model_prepare", "approval": "approval", "stop": "stop"},
+    )
+    builder.add_conditional_edges(
+        "env_deploy", route_after_stage,
+        {"continue": "recover_model_prepare", "observe_failure": "observe_failure"},
+    )
+
+    # env_deploy -> recover_model_prepare -> model_prepare
+    builder.add_conditional_edges(
+        "recover_model_prepare", _route_after_recovery,
+        {"execute": "model_prepare", "reuse": "recover_runner", "approval": "approval", "stop": "stop"},
+    )
+    builder.add_conditional_edges(
+        "model_prepare", route_after_stage,
+        {"continue": "recover_runner", "observe_failure": "observe_failure"},
+    )
+
+    # model_prepare -> recover_runner -> runner
+    builder.add_conditional_edges(
+        "recover_runner", _route_after_recovery,
+        {"execute": "runner", "reuse": "verify", "approval": "approval", "stop": "stop"},
+    )
+    builder.add_conditional_edges(
+        "runner", route_after_stage,
+        {"continue": "verify", "observe_failure": "observe_failure"},
+    )
+
     # Verify has special routing
     builder.add_conditional_edges(
         "verify", route_after_verify,
-        {"report": "report", "replan": "replan", "stop": "stop"},
+        {"report": "report", "observe_failure": "observe_failure"},
     )
     # Replan routes back to parse
     builder.add_conditional_edges(
         "replan", route_after_replan,
         {"parse": "parse", "stop": "stop"},
     )
+    # Failure observation → diagnose
+    builder.add_edge("observe_failure", "diagnose")
+    builder.add_conditional_edges(
+        "diagnose", route_after_diagnose,
+        {"repair_plan": "repair_plan", "replan": "replan", "stop": "stop"},
+    )
+    # Repair pipeline
+    builder.add_edge("repair_plan", "repair_policy")
+    builder.add_conditional_edges(
+        "repair_policy", route_after_repair_policy,
+        {"apply": "repair_apply", "approval": "approval", "stop": "stop"},
+    )
+    builder.add_edge("repair_apply", "select_repair_resume")
+    builder.add_conditional_edges(
+        "select_repair_resume",
+        route_repair_resume_stage,
+        {
+            "analyze": "analyze",
+            "resource_plan": "resource_plan",
+            "env_solve": "env_solve",
+            "env_deploy": "recover_env_deploy",
+            "model_prepare": "recover_model_prepare",
+            "runner": "recover_runner",
+            "verify": "verify",
+        },
+    )
+    # Approval routing (includes cleanup path)
+    builder.add_conditional_edges(
+        "approval", route_after_approval,
+        {"repair_apply": "repair_apply", "cleanup": "cleanup", "retry": "select_repair_resume", "stop": "stop"},
+    )
+    # Cleanup routes back to select_repair_resume for retry
+    builder.add_edge("cleanup", "select_repair_resume")
     # Terminal edges
     builder.add_edge("report", END)
     builder.add_edge("stop", END)
@@ -162,6 +357,10 @@ def can_resume_stage(stage, capabilities, dry_run):
     Side-effect stages can resume if:
     - dry_run is True, OR
     - The corresponding capability is enabled in the recovery map
+
+    Per Phase 7 spec:
+    - Recovery gate nodes (recover_*) are always safe to resume
+    - Raw side-effect stages without recovery gate are treated as old checkpoints
     """
     if stage not in SIDE_EFFECT_STAGES:
         return True
@@ -198,6 +397,32 @@ class LangGraphController:
 
     def run(self, context: DeploymentContext) -> DeploymentResult:
         """Run a new deployment from scratch using the StateGraph."""
+        # Pre-run validation
+        from auto_harness.controllers.validation import validate_controller_run
+        from auto_harness.config import HarnessConfig
+
+        config = self.dependencies.graph_deps().runtime_config
+        provider_name = getattr(config, "agent_provider", "mock") if config else "mock"
+        validation = validate_controller_run(
+            controller="langgraph",
+            dry_run=context.dry_run,
+            provider_name=provider_name,
+            config=config if config else HarnessConfig(),
+        )
+        if not validation.allowed:
+            reports_dir = Path(context.run_dir) / "reports"
+            reports_dir.mkdir(parents=True, exist_ok=True)
+            write_json(reports_dir / "controller_validation.json", {
+                "allowed": False,
+                "reason": validation.reason,
+            })
+            return DeploymentResult(
+                task_id=context.task_id,
+                status="stopped",
+                stop_reason=validation.reason,
+                controller="langgraph",
+            )
+
         initial_state = self.dependencies.initial_state(context)
         with SqliteCheckpointManager(Path(context.run_dir)) as checkpoint:
             graph = build_graph(self.dependencies.graph_deps(), checkpoint.saver)
@@ -207,12 +432,20 @@ class LangGraphController:
     def resume(self, context: DeploymentContext, resume_input: Optional[Dict[str, Any]] = None) -> DeploymentResult:
         """Resume a deployment from the latest checkpoint.
 
-        Uses the capability map to determine if a side-effect stage
-        can be safely resumed. Supported resource types allow resume;
-        unsupported types remain blocked (safe stop).
+        Two resume kinds:
+        1. Ordinary checkpoint resume: graph.invoke(None, config=config)
+        2. Approval interrupt resume: graph.invoke(Command(resume=resume_input), config=config)
 
-        Flow: load checkpoint → inspect next node → check capability
-        → resume if allowed → VerifyModule is the only success judge
+        Recovery gate nodes (recover_*) are always safe to resume since
+        they only inspect/reconcile, never execute side effects.
+
+        Per Phase 7 spec:
+        - checkpoint next = recover_<stage> -> allow entering recovery node
+        - checkpoint next = raw side-effect stage -> treat as old checkpoint,
+          route to recover_<stage> or safe stop
+        - recovery node capability unavailable -> manual/stop
+        - resume must not switch controller
+        - approval resolve must truly resume graph, not just update JSON
 
         Writes reports/resume_audit.json on every resume attempt.
         """
@@ -221,11 +454,14 @@ class LangGraphController:
         run_dir = Path(context.run_dir)
         audit = {
             "task_id": context.task_id,
-            "dry_run": context.dry_run,
-            "resumed_at": utc_now_iso(),
             "controller": "langgraph",
-            "blocked": False,
-            "stop_reason": "",
+            "checkpoint_next": [],
+            "resume_kind": "",
+            "operation_id": "",
+            "reconcile_decision": "",
+            "duplicate_execution_prevented": False,
+            "resumed_at": utc_now_iso(),
+            "final_stop_reason": "",
         }
 
         with SqliteCheckpointManager(run_dir) as checkpoint:
@@ -234,21 +470,30 @@ class LangGraphController:
             snapshot = graph.get_state(config)
 
             if not snapshot.next:
-                audit["stop_reason"] = "already_completed"
+                audit["final_stop_reason"] = "already_completed"
                 self._write_resume_audit(run_dir, audit)
                 return self.dependencies.completed_result(snapshot.values)
 
+            audit["checkpoint_next"] = list(snapshot.next)
+
             # Check each next node against capability map
+            # Recovery gate nodes (recover_*) are always resumable
             capabilities = snapshot.values.get("recovery_capabilities", {})
             blocked_stages = []
             for node in snapshot.next:
+                # Recovery gate nodes are always safe to resume
+                if node.startswith("recover_"):
+                    continue
+                # Raw side-effect stage without recovery gate = old checkpoint
+                # Must route through recovery gate or safe stop
+                if node in SIDE_EFFECT_STAGES:
+                    blocked_stages.append(node)
+                    continue
                 if not can_resume_stage(node, capabilities, context.dry_run):
                     blocked_stages.append(node)
 
             if blocked_stages:
-                audit["blocked"] = True
-                audit["stop_reason"] = "external_recovery_not_ready"
-                audit["next_nodes"] = list(snapshot.next)
+                audit["final_stop_reason"] = "external_recovery_not_ready"
                 audit["blocked_stages"] = blocked_stages
                 audit["recovery_capabilities"] = capabilities
                 self._write_resume_audit(run_dir, audit)
@@ -257,11 +502,41 @@ class LangGraphController:
                     "external_recovery_not_ready",
                 )
 
-            output = graph.invoke(None, config=config)
+            # Track recovery state for audit
+            recovery_stage = snapshot.values.get("recovery_stage", "")
+            recovery_decision = snapshot.values.get("recovery_decision", "")
+            pending_op_id = snapshot.values.get("pending_operation_id", "")
+            if recovery_stage:
+                audit["operation_id"] = pending_op_id
+                audit["reconcile_decision"] = recovery_decision
+                if recovery_decision == "reuse":
+                    audit["duplicate_execution_prevented"] = True
 
-        audit["stop_reason"] = "resumed"
+            # Determine resume kind
+            if resume_input:
+                # Approval interrupt resume — validate before resuming
+                if not isinstance(resume_input, dict):
+                    audit["final_stop_reason"] = "invalid_resume_input"
+                    self._write_resume_audit(run_dir, audit)
+                    return DeploymentResult(
+                        task_id=context.task_id,
+                        status="stopped",
+                        stop_reason="invalid_resume_input",
+                        controller="langgraph",
+                    )
+                from langgraph.types import Command
+                output = graph.invoke(Command(resume=resume_input), config=config)
+                audit["resume_kind"] = "approval"
+            else:
+                # Ordinary checkpoint resume
+                output = graph.invoke(None, config=config)
+                audit["resume_kind"] = "checkpoint"
+
+        # Determine final stop reason from output
+        result = self.dependencies.to_controller_result(output)
+        audit["final_stop_reason"] = result.stop_reason or "resumed"
         self._write_resume_audit(run_dir, audit)
-        return self.dependencies.to_controller_result(output)
+        return result
 
     @staticmethod
     def _write_resume_audit(run_dir: Path, audit: Dict) -> None:

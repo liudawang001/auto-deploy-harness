@@ -672,17 +672,15 @@ class TaskRunner:
                 }
         return {"should_auto_resume": False}
 
-    def resume(self, task_id: str, dry_run: bool = True, controller: Optional[str] = None) -> str:
+    def resume(self, task_id: str, dry_run: bool = True, controller: Optional[str] = None, resume_input: Optional[Dict[str, Any]] = None) -> str:
         task = self.store.load_task(task_id)
         stored_controller = task.controller
 
-        # If CLI explicitly passes a different controller, reject
+        # Controller consistency: cannot switch controller on resume
         if controller is not None and controller != stored_controller:
             raise ValueError(
-                "Controller mismatch: task was created with '%s', "
-                "but '%s' was requested. Resume must use the same controller." % (
-                    stored_controller, controller,
-                )
+                "controller_switch_on_resume_is_not_allowed: "
+                "requested=%s stored=%s" % (controller, stored_controller)
             )
 
         run_dir = self.store.run_dir(task_id)
@@ -698,12 +696,13 @@ class TaskRunner:
             repo_dir=str(repo_dir),
             dry_run=dry_run,
             runtime_policy=runtime_policy,
+            resume_input=resume_input,
         )
 
         self.store.events(task_id).append("task", "resume_requested", {"dry_run": dry_run, "controller": stored_controller})
 
         ctrl = self._build_controller(stored_controller)
-        result = ctrl.resume(context)
+        result = ctrl.resume(context, resume_input=resume_input)
 
         write_json(run_dir / "reports" / "controller_result.json", {
             "task_id": result.task_id,
