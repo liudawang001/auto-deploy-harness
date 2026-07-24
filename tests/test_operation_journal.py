@@ -474,3 +474,77 @@ class TestCommittedNotReExecuted:
         # Second call: prepare returns the committed record
         second = service.prepare(record)
         assert second["status"] == "committed"
+
+
+# -------------------------------------------------------------------
+# begin() atomic entry tests (Task 3)
+# -------------------------------------------------------------------
+
+class TestJournalBegin:
+    """begin() atomically persists an operation as running."""
+
+    def test_begin_creates_running_atomically(self, tmp_path):
+        journal = OperationJournal(tmp_path)
+        record = make_record()
+        result = journal.begin(record)
+        assert result["status"] == "running"
+        assert result["attempt"] == 1
+        assert result["started_at"]
+        # Persisted to disk
+        loaded = journal.load(record["operation_id"])
+        assert loaded["status"] == "running"
+        assert loaded["attempt"] == 1
+
+    def test_begin_increments_retryable_attempt(self, tmp_path):
+        journal = OperationJournal(tmp_path)
+        record = make_record()
+        # Create, run, crash to unknown, then to retryable
+        journal.create(record)
+        journal.transition(record["operation_id"], "running")
+        journal.recover_running(record["operation_id"])  # running -> unknown
+        journal.transition(record["operation_id"], "retryable")  # unknown -> retryable
+        loaded = journal.load(record["operation_id"])
+        assert loaded["status"] == "retryable"
+        # begin should increment attempt and set running
+        result = journal.begin(record)
+        assert result["status"] == "running"
+        assert result["attempt"] == 1
+
+    def test_begin_increments_planned_attempt(self, tmp_path):
+        journal = OperationJournal(tmp_path)
+        record = make_record()
+        journal.create(record)
+        loaded = journal.load(record["operation_id"])
+        assert loaded["status"] == "planned"
+        assert loaded["attempt"] == 0
+        result = journal.begin(record)
+        assert result["status"] == "running"
+        assert result["attempt"] == 1
+
+    def test_begin_returns_existing_running_without_increment(self, tmp_path):
+        journal = OperationJournal(tmp_path)
+        record = make_record()
+        first = journal.begin(record)
+        assert first["attempt"] == 1
+        # Calling begin again on already-running should be a no-op
+        second = journal.begin(record)
+        assert second["status"] == "running"
+        assert second["attempt"] == 1
+
+    def test_begin_returns_committed_without_change(self, tmp_path):
+        journal = OperationJournal(tmp_path)
+        record = make_record()
+        journal.begin(record)
+        journal.transition(record["operation_id"], "committed")
+        result = journal.begin(record)
+        assert result["status"] == "committed"
+
+    def test_begin_rejects_hash_collision(self, tmp_path):
+        journal = OperationJournal(tmp_path)
+        record = make_record()
+        journal.create(record)
+        # Same operation_id, different hash
+        colliding = make_record(operation_id=record["operation_id"])
+        colliding["normalized_input_hash"] = "different_hash_value"
+        with pytest.raises(ValueError, match="operation identity collision"):
+            journal.begin(colliding)

@@ -19,6 +19,15 @@ class HarnessConfig:
     docker_network: str = "bridge"
     docker_gpus: str = "none"
     docker_model_cache_dir: str = ""
+    docker_read_only_rootfs: bool = False
+    docker_user: str = ""
+    docker_memory: str = "8g"
+    docker_cpus: float = 4.0
+    docker_pids_limit: int = 512
+    docker_tmpfs_size: str = "1g"
+    docker_cap_drop_all: bool = True
+    docker_no_new_privileges: bool = True
+    docker_repo_mount_mode: str = "rw"
     verify_workspace_name: str = "verify_workspace"
     allowed_commands: List[str] = None
     use_agent_analyzer: bool = False
@@ -104,6 +113,7 @@ class HarnessConfig:
     langgraph_max_diagnoses: int = 2
     langgraph_max_repairs: int = 2
     langgraph_max_same_failure: int = 2
+    langgraph_planner_mode: str = "llm"  # llm | deterministic
 
     def __post_init__(self) -> None:
         if self.allowed_commands is None:
@@ -126,6 +136,22 @@ class HarnessConfig:
             raise ValueError("langgraph_max_repairs must be non-negative, got: %s" % self.langgraph_max_repairs)
         if self.langgraph_max_same_failure < 0:
             raise ValueError("langgraph_max_same_failure must be non-negative, got: %s" % self.langgraph_max_same_failure)
+        if self.langgraph_planner_mode not in ("llm", "deterministic"):
+            raise ValueError(
+                "langgraph_planner_mode must be 'llm' or 'deterministic', got: %s" % self.langgraph_planner_mode
+            )
+        if self.docker_network == "host":
+            raise ValueError("host network is not allowed")
+        if not self.docker_memory:
+            raise ValueError("docker_memory must be non-empty")
+        if self.docker_cpus <= 0:
+            raise ValueError("docker_cpus must be positive, got: %s" % self.docker_cpus)
+        if self.docker_pids_limit <= 0:
+            raise ValueError("docker_pids_limit must be positive, got: %s" % self.docker_pids_limit)
+        if self.docker_repo_mount_mode not in ("ro", "rw"):
+            raise ValueError(
+                "docker_repo_mount_mode must be 'ro' or 'rw', got: %s" % self.docker_repo_mount_mode
+            )
 
     @classmethod
     def load(cls, path: str = None) -> "HarnessConfig":

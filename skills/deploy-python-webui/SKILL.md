@@ -2,7 +2,7 @@
 name: deploy-python-webui
 version: "1.0.0"
 type: execution_skill
-stages: [runner, plan_first, replan]
+stages: [runner, plan, plan_first, replan]
 frameworks: [gradio, streamlit, fastapi, flask]
 risk_level: low
 side_effects: false

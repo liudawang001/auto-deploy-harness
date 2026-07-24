@@ -16,6 +16,29 @@ from auto_harness.models.base import read_json, write_json
 from auto_harness.utils.time import utc_now_iso
 
 
+def _decision_dict(step):
+    """Safely extract decision dict from a step.
+
+    Handles the case where step.get("decision") returns None,
+    which would cause .get() to raise AttributeError.
+    """
+    if not isinstance(step, dict):
+        return {}
+    decision = step.get("decision")
+    return decision if isinstance(decision, dict) else {}
+
+
+def _migrate_execution_category(category):
+    """Migrate legacy 'execution' category to 'side_effect'.
+
+    Old artifacts may contain category='execution'. New code must
+    never produce it. This function is only for reading old data.
+    """
+    if category == "execution":
+        return "side_effect"
+    return category
+
+
 class LLMContributionEvidenceWriter:
     """Writes llm_contribution_evidence.json for each deployment run.
 
@@ -81,12 +104,23 @@ class LLMContributionEvidenceWriter:
             rejected_tool_count = agent_result.get("rejected_tool_count", 0)
 
         # Compute llm_helped: baseline failed/uncertain AND agent passed AND trace evidence exists
+        # AND LLM had an accepted effective decision (not metadata_only, not policy_rejected)
         baseline_failed = baseline_status in ("failed", "uncertain", "unknown")
         agent_passed = agent_status in ("pass", "passed")
         evidence_has_trace = self._evidence_contains_trace(evidence_paths, trace_id)
 
-        llm_changed_decision = bool(agent_steps) and any(
-            step.get("decision", {}).get("decision_status") == "ok"
+        # An accepted effective decision requires:
+        # - decision_status == ok
+        # - policy_allowed == true
+        # - executed == true or applied == true
+        # - metadata_only == false (or absent)
+        accepted_effective_decision = any(
+            (
+                _decision_dict(step).get("decision_status") == "ok"
+                and _decision_dict(step).get("policy_allowed") is True
+                and (_decision_dict(step).get("executed") is True or _decision_dict(step).get("applied") is True)
+                and _decision_dict(step).get("metadata_only") is not True
+            )
             for step in agent_steps
             if isinstance(step, dict)
         )
@@ -95,7 +129,7 @@ class LLMContributionEvidenceWriter:
             baseline_failed
             and agent_passed
             and evidence_has_trace
-            and llm_changed_decision
+            and accepted_effective_decision
         )
 
         # Compute llm_required status
@@ -134,7 +168,7 @@ class LLMContributionEvidenceWriter:
                 "accepted_tool_count": accepted_tool_count,
                 "rejected_tool_count": rejected_tool_count,
             },
-            "llm_changed_decision": llm_changed_decision,
+            "llm_changed_decision": accepted_effective_decision,
             "llm_helped": llm_helped,
             "llm_required": llm_required,
             "llm_required_status": llm_required_status,
@@ -192,19 +226,18 @@ class LLMContributionEvidenceWriter:
             if not isinstance(step, dict):
                 continue
             stage = step.get("stage", "")
-            decision = step.get("decision", {})
-            if isinstance(decision, dict):
-                tool_call = decision.get("tool_call", {})
-                if isinstance(tool_call, dict):
-                    tool_name = tool_call.get("name", "")
-                    if tool_name in ("select_runner_candidate", "add_runner_candidate"):
-                        help_types.append("runner_candidate_selection")
-                    elif tool_name in ("discover_gradio_api", "discover_openapi_schema", "probe_http"):
-                        help_types.append("verify_probe_selection")
-                    elif tool_name in ("apply_dependency_constraint", "propose_dependency_constraint"):
-                        help_types.append("repair_dependency_missing")
-                    elif tool_name == "set_deployment_strategy":
-                        help_types.append("deployment_strategy")
+            decision = _decision_dict(step)
+            tool_call = decision.get("tool_call", {})
+            if isinstance(tool_call, dict):
+                tool_name = tool_call.get("name", "")
+                if tool_name in ("select_runner_candidate", "add_runner_candidate"):
+                    help_types.append("runner_candidate_selection")
+                elif tool_name in ("discover_gradio_api", "discover_openapi_schema", "probe_http"):
+                    help_types.append("verify_probe_selection")
+                elif tool_name in ("apply_dependency_constraint", "propose_dependency_constraint"):
+                    help_types.append("repair_dependency_missing")
+                elif tool_name == "set_deployment_strategy":
+                    help_types.append("deployment_strategy")
 
         # Deduplicate
         return list(set(help_types))
@@ -217,11 +250,10 @@ class LLMContributionEvidenceWriter:
         for step in agent_steps:
             if not isinstance(step, dict):
                 continue
-            decision = step.get("decision", {})
-            if isinstance(decision, dict):
-                # Count side-effect tools executed
-                if decision.get("executed") and decision.get("policy_allowed"):
-                    side_effect_count += 1
+            decision = _decision_dict(step)
+            # Count side-effect tools executed
+            if decision.get("executed") and decision.get("policy_allowed"):
+                side_effect_count += 1
 
         return {
             "policy_gated": True,

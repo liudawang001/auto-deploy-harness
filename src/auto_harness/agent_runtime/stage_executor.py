@@ -78,6 +78,7 @@ class AgentStageExecutor:
         stage_hints: dict = None,
         repair_overlay: dict = None,
         runtime_policy: Dict = None,
+        skill_context: dict = None,
     ) -> StageExecutionResult:
         """Execute a single pipeline stage and return before/after status.
 
@@ -102,6 +103,7 @@ class AgentStageExecutor:
         """
         stage_hints = stage_hints or {}
         repair_overlay = repair_overlay or {}
+        skill_context = skill_context or {}
         # Phase 2: use the per-call runtime policy if provided, else fall back
         # to the executor's default. Never rely on an empty dict + config fallback.
         effective_runtime_policy = dict(runtime_policy or self.runtime_policy or {})
@@ -127,7 +129,16 @@ class AgentStageExecutor:
             elif stage == "runner":
                 return self._execute_runner(task_id, run_dir, repo_dir, deploy_analysis, before_status, dry_run, stage_hints)
             elif stage == "verify":
-                return self._execute_verify(task_id, run_dir, repo_dir, deploy_analysis, runner_data, before_status, stage_hints)
+                return self._execute_verify(
+                    task_id,
+                    run_dir,
+                    repo_dir,
+                    deploy_analysis,
+                    runner_data,
+                    before_status,
+                    stage_hints,
+                    skill_context,
+                )
             elif stage == "repair":
                 return self._execute_repair(task_id, run_dir, repo_dir, state, before_status, dry_run)
             else:
@@ -231,6 +242,7 @@ class AgentStageExecutor:
             docker_network=self.config.docker_network if self.config else "bridge",
             docker_gpus=self.config.docker_gpus if self.config else "none",
             docker_model_cache_dir=self.config.docker_model_cache_dir if self.config else "",
+            docker_security_options=self._docker_security_options(),
         )
         return StageExecutionResult(
             stage="env_deploy",
@@ -282,6 +294,7 @@ class AgentStageExecutor:
             docker_network=self.config.docker_network if self.config else "bridge",
             docker_gpus=self.config.docker_gpus if self.config else "none",
             docker_model_cache_dir=self.config.docker_model_cache_dir if self.config else "",
+            docker_security_options=self._docker_security_options(),
             stage_hints=stage_hints,
         )
         return StageExecutionResult(
@@ -292,7 +305,17 @@ class AgentStageExecutor:
             changed=before_status != result.status,
         )
 
-    def _execute_verify(self, task_id, run_dir, repo_dir, deploy_analysis, runner_data, before_status, stage_hints):
+    def _execute_verify(
+        self,
+        task_id,
+        run_dir,
+        repo_dir,
+        deploy_analysis,
+        runner_data,
+        before_status,
+        stage_hints,
+        skill_context,
+    ):
         from auto_harness.modules.verify import VerifyModule
         # runner_data from agent loop may be a StageResult wrapper with {stage, status, summary, data}
         # VerifyModule._service_discovery expects the inner data (pid, service_ready, expected_port, etc.)
@@ -318,6 +341,8 @@ class AgentStageExecutor:
                 agent_verify_config = self.agent_verify_config_factory()
             except Exception:
                 pass
+        agent_verify_config = dict(agent_verify_config or {})
+        agent_verify_config["skill_context"] = dict(skill_context or {})
 
         result = VerifyModule(
             verify_planner=verify_planner,
@@ -367,3 +392,18 @@ class AgentStageExecutor:
         if stage in stage_results:
             return stage_results[stage].get("status", "")
         return ""
+
+    def _docker_security_options(self) -> Dict:
+        if not self.config:
+            return {}
+        return {
+            "read_only_rootfs": self.config.docker_read_only_rootfs,
+            "user": self.config.docker_user,
+            "memory": self.config.docker_memory,
+            "cpus": self.config.docker_cpus,
+            "pids_limit": self.config.docker_pids_limit,
+            "tmpfs_size": self.config.docker_tmpfs_size,
+            "cap_drop_all": self.config.docker_cap_drop_all,
+            "no_new_privileges": self.config.docker_no_new_privileges,
+            "repo_mount_mode": self.config.docker_repo_mount_mode,
+        }

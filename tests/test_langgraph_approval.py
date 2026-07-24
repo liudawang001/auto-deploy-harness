@@ -2,6 +2,7 @@
 
 Phase 5 tests: approval request building, store persistence,
 sanitize, route functions, and approval node behavior.
+Updated for schema-versioned build_approval_request factory.
 """
 import json
 import pytest
@@ -11,12 +12,14 @@ from unittest.mock import MagicMock, patch
 from auto_harness.graph.approval import (
     ApprovalStore,
     build_approval_request,
+    canonical_hash,
     sanitize_approval,
     approval_node,
     cleanup_node,
     route_after_recovery,
     route_after_approval,
     ALLOWED_APPROVAL_FIELDS,
+    APPROVAL_SCHEMA_VERSION,
 )
 from auto_harness.recovery.schemas import compute_operation_id, canonical_json
 
@@ -25,16 +28,18 @@ from auto_harness.recovery.schemas import compute_operation_id, canonical_json
 # Helpers
 # -------------------------------------------------------------------
 
-def make_operation(
-    task_id="test_task",
-    operation_id="op123",
-    normalized_input_hash="hash123",
-):
-    return {
-        "operation_id": operation_id,
-        "task_id": task_id,
-        "normalized_input_hash": normalized_input_hash,
+def make_approval_request(**overrides):
+    """Build a valid approval request using the factory."""
+    defaults = {
+        "approval_id": "test-approval-001",
+        "operation_id": "op123",
+        "approval_kind": "recovery",
+        "requested_action": "cleanup_then_retry",
+        "risk": "high",
+        "reason": "config changed",
     }
+    defaults.update(overrides)
+    return build_approval_request(**defaults)
 
 
 # -------------------------------------------------------------------
@@ -69,44 +74,63 @@ class TestApprovalStore:
 
 
 # -------------------------------------------------------------------
-# Build Approval Request Tests
+# Build Approval Request Tests (schema-versioned)
 # -------------------------------------------------------------------
 
 class TestBuildApprovalRequest:
-    def test_deterministic_id(self):
-        op = make_operation()
-        req1 = build_approval_request(op, "cleanup_then_retry", "config changed")
-        req2 = build_approval_request(op, "cleanup_then_retry", "config changed")
-        assert req1["approval_id"] == req2["approval_id"]
+    def test_schema_version(self):
+        req = make_approval_request()
+        assert req["schema_version"] == APPROVAL_SCHEMA_VERSION
 
-    def test_different_action_different_id(self):
-        op = make_operation()
-        req1 = build_approval_request(op, "cleanup_then_retry", "reason1")
-        req2 = build_approval_request(op, "retry", "reason2")
-        assert req1["approval_id"] != req2["approval_id"]
+    def test_deterministic_request_hash(self):
+        req1 = make_approval_request()
+        req2 = make_approval_request()
+        # Same inputs -> same hash
+        assert req1["request_hash"] == req2["request_hash"]
+
+    def test_different_inputs_different_hash(self):
+        req1 = make_approval_request(requested_action="cleanup_then_retry")
+        req2 = make_approval_request(requested_action="apply_repair")
+        assert req1["request_hash"] != req2["request_hash"]
 
     def test_required_fields(self):
-        op = make_operation()
-        req = build_approval_request(op, "cleanup_then_retry", "config changed")
+        req = make_approval_request()
         assert "approval_id" in req
-        assert req["task_id"] == "test_task"
         assert req["operation_id"] == "op123"
+        assert req["approval_kind"] == "recovery"
         assert req["requested_action"] == "cleanup_then_retry"
         assert req["risk"] == "high"
         assert "approve" in req["allowed_decisions"]
         assert "reject" in req["allowed_decisions"]
-        assert req["normalized_input_hash"] == "hash123"
+        assert "request_hash" in req
+        assert "created_at" in req
 
     def test_custom_risk(self):
-        op = make_operation()
-        req = build_approval_request(op, "retry", "low risk", risk="low")
+        req = make_approval_request(risk="low")
         assert req["risk"] == "low"
 
     def test_reason_truncated(self):
-        op = make_operation()
         long_reason = "x" * 5000
-        req = build_approval_request(op, "retry", long_reason)
+        req = make_approval_request(reason=long_reason)
         assert len(req["reason"]) <= 2000
+
+    def test_empty_operation_id_rejected(self):
+        """Empty operation_id is still allowed (string of empty)."""
+        req = make_approval_request(operation_id="")
+        assert req["operation_id"] == ""
+
+
+# -------------------------------------------------------------------
+# Canonical Hash Tests
+# -------------------------------------------------------------------
+
+class TestCanonicalHash:
+    def test_deterministic(self):
+        payload = {"a": 1, "b": 2}
+        assert canonical_hash(payload) == canonical_hash(payload)
+
+    def test_key_order_independent(self):
+        assert canonical_hash({"a": 1, "b": 2}) == canonical_hash({"b": 2, "a": 1})
 
 
 # -------------------------------------------------------------------
@@ -144,6 +168,12 @@ class TestSanitizeApproval:
         safe = sanitize_approval(decision)
         assert len(safe["decision"]) <= 2000
 
+    def test_request_hash_allowed(self):
+        """request_hash is in ALLOWED_APPROVAL_FIELDS."""
+        decision = {"request_hash": "abc123", "decision": "approve"}
+        safe = sanitize_approval(decision)
+        assert "request_hash" in safe
+
 
 # -------------------------------------------------------------------
 # Approval Node Tests (without real LangGraph interrupt)
@@ -156,34 +186,29 @@ class TestApprovalNode:
         result = approval_node(state)
         assert result["stop_reason"] == "approval_request_missing"
 
+    def test_missing_required_fields(self, tmp_path):
+        """Missing required fields → stop."""
+        request = {"approval_id": "abc123"}  # Missing most required fields
+        state = {"run_dir": str(tmp_path), "pending_approval": request}
+        result = approval_node(state)
+        assert "approval_request_invalid" in result["stop_reason"]
+
     def test_approve_decision(self, tmp_path):
         """Approval with 'approve' decision sets approved fields."""
-        request = {
-            "approval_id": "abc123",
-            "task_id": "test_task",
-            "operation_id": "op123",
-            "requested_action": "cleanup_then_retry",
-            "risk": "high",
-            "reason": "config changed",
-            "allowed_decisions": ["approve", "reject"],
-            "normalized_input_hash": "hash123",
-        }
-        state = {
-            "run_dir": str(tmp_path),
-            "pending_approval": request,
-        }
-        # Mock interrupt to return an approve decision
+        request = make_approval_request()
+        state = {"run_dir": str(tmp_path), "pending_approval": request}
         decision = {
-            "approval_id": "abc123",
-            "operation_id": "op123",
+            "approval_id": request["approval_id"],
+            "operation_id": request["operation_id"],
             "decision": "approve",
             "reviewer": "cli",
             "note": "approved",
             "resolved_at": "2025-01-01",
+            "request_hash": request["request_hash"],
         }
         with patch("langgraph.types.interrupt", return_value=decision):
             result = approval_node(state)
-        assert result["approved_operation_id"] == "op123"
+        assert result["approved_operation_id"] == request["operation_id"]
         assert result["approved_action"] == "cleanup_then_retry"
         assert result["stop_reason"] == ""
         assert result["pending_approval"] is None
@@ -191,50 +216,45 @@ class TestApprovalNode:
 
     def test_reject_decision(self, tmp_path):
         """Approval with 'reject' decision sets stop_reason."""
-        request = {
-            "approval_id": "abc123",
-            "task_id": "test_task",
-            "operation_id": "op123",
-            "requested_action": "cleanup_then_retry",
-            "risk": "high",
-            "reason": "config changed",
-            "allowed_decisions": ["approve", "reject"],
-            "normalized_input_hash": "hash123",
-        }
-        state = {
-            "run_dir": str(tmp_path),
-            "pending_approval": request,
-        }
+        request = make_approval_request()
+        state = {"run_dir": str(tmp_path), "pending_approval": request}
         decision = {
-            "approval_id": "abc123",
-            "operation_id": "op123",
+            "approval_id": request["approval_id"],
+            "operation_id": request["operation_id"],
             "decision": "reject",
             "reviewer": "cli",
             "note": "rejected",
             "resolved_at": "2025-01-01",
+            "request_hash": request["request_hash"],
         }
         with patch("langgraph.types.interrupt", return_value=decision):
             result = approval_node(state)
         assert result["approved_operation_id"] == ""
         assert result["stop_reason"] == "operator_rejected"
 
-    def test_operation_mismatch(self, tmp_path):
-        """Decision with wrong operation_id → stop."""
-        request = {
-            "approval_id": "abc123",
-            "task_id": "test_task",
-            "operation_id": "op123",
-            "requested_action": "retry",
-            "risk": "high",
-            "reason": "test",
-            "allowed_decisions": ["approve", "reject"],
-            "normalized_input_hash": "",
-        }
+    def test_request_hash_mismatch(self, tmp_path):
+        """Decision with wrong request_hash → stop."""
+        request = make_approval_request()
         state = {"run_dir": str(tmp_path), "pending_approval": request}
         decision = {
-            "approval_id": "abc123",
+            "approval_id": request["approval_id"],
+            "operation_id": request["operation_id"],
+            "decision": "approve",
+            "request_hash": "wrong_hash",
+        }
+        with patch("langgraph.types.interrupt", return_value=decision):
+            result = approval_node(state)
+        assert "request_hash_mismatch" in result["stop_reason"]
+
+    def test_operation_mismatch(self, tmp_path):
+        """Decision with wrong operation_id → stop."""
+        request = make_approval_request()
+        state = {"run_dir": str(tmp_path), "pending_approval": request}
+        decision = {
+            "approval_id": request["approval_id"],
             "operation_id": "WRONG_OP",
             "decision": "approve",
+            "request_hash": request["request_hash"],
         }
         with patch("langgraph.types.interrupt", return_value=decision):
             result = approval_node(state)
@@ -242,21 +262,13 @@ class TestApprovalNode:
 
     def test_approval_id_mismatch(self, tmp_path):
         """Decision with wrong approval_id → stop."""
-        request = {
-            "approval_id": "abc123",
-            "task_id": "test_task",
-            "operation_id": "op123",
-            "requested_action": "retry",
-            "risk": "high",
-            "reason": "test",
-            "allowed_decisions": ["approve", "reject"],
-            "normalized_input_hash": "",
-        }
+        request = make_approval_request()
         state = {"run_dir": str(tmp_path), "pending_approval": request}
         decision = {
             "approval_id": "WRONG_ID",
-            "operation_id": "op123",
+            "operation_id": request["operation_id"],
             "decision": "approve",
+            "request_hash": request["request_hash"],
         }
         with patch("langgraph.types.interrupt", return_value=decision):
             result = approval_node(state)
@@ -264,21 +276,13 @@ class TestApprovalNode:
 
     def test_disallowed_decision(self, tmp_path):
         """Decision not in allowed_decisions → stop."""
-        request = {
-            "approval_id": "abc123",
-            "task_id": "test_task",
-            "operation_id": "op123",
-            "requested_action": "retry",
-            "risk": "high",
-            "reason": "test",
-            "allowed_decisions": ["approve", "reject"],
-            "normalized_input_hash": "",
-        }
+        request = make_approval_request()
         state = {"run_dir": str(tmp_path), "pending_approval": request}
         decision = {
-            "approval_id": "abc123",
-            "operation_id": "op123",
+            "approval_id": request["approval_id"],
+            "operation_id": request["operation_id"],
             "decision": "maybe",  # Not in allowed_decisions
+            "request_hash": request["request_hash"],
         }
         with patch("langgraph.types.interrupt", return_value=decision):
             result = approval_node(state)
@@ -286,16 +290,7 @@ class TestApprovalNode:
 
     def test_non_dict_response(self, tmp_path):
         """Non-dict interrupt response → stop."""
-        request = {
-            "approval_id": "abc123",
-            "task_id": "test_task",
-            "operation_id": "op123",
-            "requested_action": "retry",
-            "risk": "high",
-            "reason": "test",
-            "allowed_decisions": ["approve", "reject"],
-            "normalized_input_hash": "",
-        }
+        request = make_approval_request()
         state = {"run_dir": str(tmp_path), "pending_approval": request}
         with patch("langgraph.types.interrupt", return_value="not a dict"):
             result = approval_node(state)
@@ -303,30 +298,41 @@ class TestApprovalNode:
 
     def test_approval_saved_to_store(self, tmp_path):
         """Approval record is saved to ApprovalStore."""
-        request = {
-            "approval_id": "abc123",
-            "task_id": "test_task",
-            "operation_id": "op123",
-            "requested_action": "retry",
-            "risk": "high",
-            "reason": "test",
-            "allowed_decisions": ["approve", "reject"],
-            "normalized_input_hash": "",
-        }
+        request = make_approval_request()
         state = {"run_dir": str(tmp_path), "pending_approval": request}
         decision = {
-            "approval_id": "abc123",
-            "operation_id": "op123",
+            "approval_id": request["approval_id"],
+            "operation_id": request["operation_id"],
             "decision": "approve",
             "reviewer": "cli",
+            "request_hash": request["request_hash"],
         }
         with patch("langgraph.types.interrupt", return_value=decision):
             approval_node(state)
-        # Check the store
         store = ApprovalStore(tmp_path)
-        record = store.load("abc123")
+        record = store.load(request["approval_id"])
         assert record is not None
         assert record["status"] == "resolved"
+
+    def test_same_checkpoint_rerun_same_hash(self, tmp_path):
+        """Same checkpoint rerun produces same request_hash."""
+        request1 = make_approval_request()
+        request2 = make_approval_request()
+        assert request1["request_hash"] == request2["request_hash"]
+
+    def test_decision_must_bind_request_hash(self, tmp_path):
+        """Decision without request_hash is rejected."""
+        request = make_approval_request()
+        state = {"run_dir": str(tmp_path), "pending_approval": request}
+        decision = {
+            "approval_id": request["approval_id"],
+            "operation_id": request["operation_id"],
+            "decision": "approve",
+            # No request_hash
+        }
+        with patch("langgraph.types.interrupt", return_value=decision):
+            result = approval_node(state)
+        assert "request_hash_mismatch" in result["stop_reason"]
 
 
 # -------------------------------------------------------------------

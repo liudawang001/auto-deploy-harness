@@ -47,7 +47,7 @@ class XunfeiSparkProvider:
         except json.JSONDecodeError:
             return LLMResult(text=raw_text, raw={"raw_text": raw_text}, latency_ms=latency_ms)
         text = self._extract_text(raw)
-        return LLMResult(text=text, raw=raw, usage=raw.get("usage") if isinstance(raw, dict) else None, latency_ms=latency_ms)
+        return LLMResult(text=text, raw=raw, usage=raw.get("usage") if isinstance(raw, dict) else None, latency_ms=latency_ms, protocol="json_action")
 
     def _resolve_url(self) -> str:
         if self.api_url:

@@ -1,8 +1,12 @@
 import json
 import os
+import shutil
+import signal
+import socket
 import tarfile
 import tempfile
 import threading
+import time
 import urllib.request
 from pathlib import Path
 from typing import Dict, List
@@ -30,7 +34,7 @@ from auto_harness.modules.runner import RunnerModule
 from auto_harness.modules.verify import VerifyModule
 from auto_harness.models.result import StageResult
 from auto_harness.models.task import ProjectSpec, RuntimePolicy, TaskSpec
-from auto_harness.providers import LLMResult
+from auto_harness.providers import LLMResult, MockLLMProvider
 from auto_harness.repair import RepairApplier, RepairLoopController, RepairPlanner, RepairPolicy
 from auto_harness.orchestrator import TaskRunner
 from auto_harness.queue import DeploymentQueue
@@ -103,7 +107,65 @@ class _FakeLLMProvider:
         return LLMResult(text=self.text, raw={}, usage={}, latency_ms=1)
 
 
+class _ControllerE2EProvider(MockLLMProvider):
+    """Deterministic LLM boundary for the real LangGraph controller E2E."""
+
+    def complete(self, messages, temperature: float = 0.2):
+        prompt = "\n".join(str(getattr(message, "content", "")) for message in messages)
+        if "deployment failure diagnoser" in prompt:
+            content = {
+                "stage": "runner",
+                "status": "ok",
+                "summary": "requests import is missing",
+                "confidence": 0.99,
+                "diagnosis": {
+                    "category": "dependency_missing",
+                    "root_cause": "ModuleNotFoundError: requests",
+                    "confidence": 0.99,
+                    "evidence": ["runner log contains ModuleNotFoundError"],
+                },
+                "actions": [{
+                    "type": "install_package",
+                    "reason": "install the missing package",
+                    "confidence": 0.99,
+                    "payload": {"package": "requests"},
+                    "requires": {
+                        "dependency_install": True,
+                        "network": False,
+                        "source_edit": False,
+                    },
+                }],
+                "plan_delta": {
+                    "rerun_from": "env_deploy",
+                    "rerun_reason": "the environment changed",
+                },
+            }
+            return LLMResult(text=json.dumps(content), raw=content, usage={}, latency_ms=1)
+        if "verify request planner" in prompt:
+            content = {
+                "status": "ok",
+                "summary": "probe the trace-aware root endpoint",
+                "confidence": 0.99,
+                "verify_hint": {
+                    "request": {
+                        "method": "GET",
+                        "path": "/?_auto_harness_trace={{trace_id}}",
+                    },
+                    "expected_output": "response_contains_trace",
+                },
+            }
+            return LLMResult(text=json.dumps(content), raw=content, usage={}, latency_ms=1)
+        return super().complete(messages, temperature=temperature)
+
+
 class BenchmarkRunner:
+    TEST_LEVELS = {
+        "unit_simulation",
+        "module_integration",
+        "controller_e2e",
+        "external_e2e",
+    }
+
     def run(self, manifest_path: Path, output_path: Path = None, case_ids: List[str] = None) -> Dict:
         manifest_path = Path(manifest_path)
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -127,15 +189,30 @@ class BenchmarkRunner:
             cases_to_run = manifest_cases
         cases: List[Dict] = []
         for case in cases_to_run:
+            started = time.monotonic()
             if case.get("_missing"):
                 result = self._result(case, "failed", "benchmark case is not present in manifest")
+            elif case.get("test_level") not in self.TEST_LEVELS:
+                result = self._result(case, "failed", "invalid or missing test_level")
             else:
                 result = self._run_case(case, manifest_path.parent)
+            result["duration_ms"] = max(0, int((time.monotonic() - started) * 1000))
             cases.append(result)
+        statuses = [case["status"] for case in cases]
+        if any(status == "failed" for status in statuses):
+            overall_status = "failed"
+        elif any(status in ("not_run", "skipped") for status in statuses):
+            overall_status = "partial"
+        else:
+            overall_status = "passed"
         report = {
-            "status": "passed" if all(case["status"] == "passed" for case in cases) else "failed",
+            "status": overall_status,
             "selected_case_ids": selected_ids,
             "selected": bool(selected_ids),
+            "level_counts": {
+                level: sum(1 for case in cases if case.get("test_level") == level)
+                for level in sorted(self.TEST_LEVELS)
+            },
             "cases": cases,
         }
         if output_path:
@@ -263,7 +340,7 @@ class BenchmarkRunner:
                 return self._case_conda_backend_pytorch_cuda_plan(case)
             if case_id in ("conda_runner_command_rewrite",):
                 return self._case_conda_runner_command_rewrite(case)
-            if case_id in ("agent_full_self_healing_pipeline", "conda_self_healing_missing_package_resume"):
+            if case_id in ("agent_self_healing_control_flow_simulation", "conda_self_healing_missing_package_resume"):
                 return self._case_agent_full_self_healing_pipeline(case)
             if case_id in ("verified_memory_after_self_healing",):
                 return self._case_verified_memory_after_self_healing(case)
@@ -275,7 +352,15 @@ class BenchmarkRunner:
                 return self._case_tool_registry_policy_gate(case)
             if case_id == "agent_comparison_report":
                 return self._case_agent_comparison_report(case)
+            if case_id == "langgraph_self_repair_controller_e2e":
+                return self._case_langgraph_self_repair_controller_e2e(case)
             return self._result(case, "skipped", "unknown benchmark case")
+        except PermissionError as exc:
+            return self._environment_blocked(case, "permission_denied", str(exc))
+        except OSError as exc:
+            if getattr(exc, "errno", None) in (1, 13):
+                return self._environment_blocked(case, "permission_denied", str(exc))
+            return self._result(case, "failed", str(exc))
         except Exception as exc:  # noqa: BLE001 - benchmark report should continue
             return self._result(case, "failed", str(exc))
 
@@ -1129,6 +1214,7 @@ class BenchmarkRunner:
                 memory_dir=str(root / "memory"),
                 model_cache_dir=str(root / "model_cache"),
                 skills_dir=str(Path("skills").resolve()),
+                default_controller="legacy",
             ))
             for spec in fixture_specs:
                 repo = fixture_root / spec["name"]
@@ -1316,6 +1402,7 @@ class BenchmarkRunner:
                 runs_dir=str(root / "runs"),
                 memory_dir=str(root / "memory"),
                 model_cache_dir=str(root / "model_cache"),
+                default_controller="legacy",
             ))
             task_id = runner.deploy(str(repo), "demo", dry_run=True)
             run_dir = root / "runs" / task_id
@@ -1348,6 +1435,7 @@ class BenchmarkRunner:
                 runs_dir=str(root / "runs"),
                 memory_dir=str(root / "memory"),
                 model_cache_dir=str(root / "model_cache"),
+                default_controller="legacy",
             ))
             task_id = runner.deploy(str(repo), "demo", dry_run=True)
             run_dir = root / "runs" / task_id
@@ -1494,6 +1582,7 @@ class BenchmarkRunner:
                 memory_dir=str(root / "memory"),
                 model_cache_dir=str(root / "model_cache"),
                 task_queue_dir=str(root / "queue"),
+                default_controller="legacy",
             )
             queue = DeploymentQueue(config.task_queue_path, TaskRunner(config))
             submitted = queue.submit(str(repo), name="queue-demo", dry_run=True)
@@ -1898,17 +1987,28 @@ class BenchmarkRunner:
             pipeline = read_json(run_dir / "reports" / "pipeline_results.json")
             trace_files = list((run_dir / "logs" / "agent_calls").glob("runner_*.json"))
             trace_has_policy = bool(trace_files) and bool(read_json(trace_files[0]).get("policy_result"))
-            ok = (
-                stage_result.status == "failed"
-                and summary.get("policy", {}).get("allowed") is True
-                and summary.get("apply_result", {}).get("executed") is True
-                and summary.get("should_auto_resume") is True
-                and verify_result.status == "passed"
-                and pipeline.get("runner", {}).get("data", {}).get("agent_loop", {}).get("should_auto_resume") is True
-                and trace_has_policy
-                and bool(list((run_dir / "logs" / "agent_loop").glob("runner_*.json")))
-            )
-        return self._result(case, "passed" if ok else "failed", "Agent loop dependency self-repair verified")
+            checks = {
+                "initial_stage_failed": stage_result.status == "failed",
+                "repair_policy_allowed": summary.get("policy", {}).get("allowed") is True,
+                "repair_action_executed": summary.get("apply_result", {}).get("executed") is True,
+                "auto_resume_requested": summary.get("should_auto_resume") is True,
+                "fresh_verify_passed": verify_result.status == "passed",
+                "pipeline_records_resume": pipeline.get("runner", {}).get("data", {}).get("agent_loop", {}).get("should_auto_resume") is True,
+                "agent_trace_has_policy": trace_has_policy,
+                "agent_loop_trace_exists": bool(list((run_dir / "logs" / "agent_loop").glob("runner_*.json"))),
+            }
+            ok = all(checks.values())
+        result = self._result(
+            case,
+            "passed" if ok else "failed",
+            "Agent loop dependency self-repair verified"
+            if ok else "failed assertions: %s; stop_reason=%s" % (
+                ", ".join(name for name, passed in checks.items() if not passed),
+                summary.get("stop_reason", ""),
+            ),
+        )
+        result["assertions"] = [{"name": name, "passed": passed} for name, passed in checks.items()]
+        return result
 
     def _case_agent_prompt_injection_defense(self, case: Dict) -> Dict:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2018,7 +2118,14 @@ class BenchmarkRunner:
     def _case_agent_full_self_healing_pipeline(self, case: Dict) -> Dict:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            config = HarnessConfig(runs_dir=str(root / "runs"), memory_dir=str(root / "memory"), model_cache_dir=str(root / "model_cache"), agent_auto_resume_after_repair=True, agent_max_loop_iterations=2)
+            config = HarnessConfig(
+                runs_dir=str(root / "runs"),
+                memory_dir=str(root / "memory"),
+                model_cache_dir=str(root / "model_cache"),
+                agent_auto_resume_after_repair=True,
+                agent_max_loop_iterations=2,
+                default_controller="legacy",
+            )
             runner = TaskRunner(config)
             spec = runner.create_spec(str(root / "repo"), "demo", dry_run=True)
             runner.store.create_task(spec)
@@ -2115,6 +2222,96 @@ class BenchmarkRunner:
             ok = report["baseline_failed_agent_passed_count"] == 1 and (output / "comparison_report.json").exists() and (output / "comparison_report.md").exists()
         return self._result(case, "passed" if ok else "failed", "agent comparison report verified")
 
+    def _case_langgraph_self_repair_controller_e2e(self, case: Dict) -> Dict:
+        """Run the real controller; only LLM and package installation are deterministic."""
+        fixture = Path("tests/fixtures/e2e/missing_dependency_repair")
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = int(probe.getsockname()[1])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            shutil.copytree(fixture, repo)
+            app_path = repo / "app.py"
+            app_path.write_text(
+                app_path.read_text(encoding="utf-8").replace("PORT = 8921", "PORT = %s" % port),
+                encoding="utf-8",
+            )
+            config = HarnessConfig(
+                runs_dir=str(root / "runs"),
+                memory_dir=str(root / "memory"),
+                model_cache_dir=str(root / "model_cache"),
+                skills_dir="skills",
+                default_controller="langgraph",
+                allowed_commands=["python", "python3"],
+                langgraph_require_llm=True,
+                langgraph_enable_diagnose=True,
+                langgraph_enable_repair=True,
+                langgraph_enable_agent_verify=True,
+                agent_plan_first_provider="mock",
+            )
+            runner = TaskRunner(config)
+            provider = _ControllerE2EProvider()
+            runner._create_plan_first_provider = lambda: provider
+
+            class _DeterministicPackageInstaller(RepairApplier):
+                def _execute_command(self, run_dir, action_type, cmd, command_runner, timeout_seconds):
+                    repo_dir = run_dir / "workspace" / "repo"
+                    (repo_dir / "requests.py").write_text(
+                        '"""Deterministic benchmark package stub."""\n',
+                        encoding="utf-8",
+                    )
+                    return {
+                        "action_type": action_type,
+                        "executed": True,
+                        "cmd": cmd,
+                        "exit_code": 0,
+                        "stdout_tail": "installed deterministic requests stub",
+                        "stderr_tail": "",
+                        "timed_out": False,
+                    }
+
+            runner.repair_applier = _DeterministicPackageInstaller()
+            task_id = runner.deploy(
+                str(repo),
+                "langgraph-self-repair-e2e",
+                dry_run=False,
+                allow_install=True,
+                allow_start=True,
+                controller="langgraph",
+            )
+            run_dir = root / "runs" / task_id
+            controller_result = read_json(run_dir / "reports" / "controller_result.json")
+            pipeline = read_json(run_dir / "reports" / "pipeline_results.json")
+            attempts = sorted((run_dir / "repairs").glob("attempt_*.json"))
+            attempt = read_json(attempts[-1]) if attempts else {}
+            verify = pipeline.get("verify") if isinstance(pipeline.get("verify"), dict) else {}
+            verify_data = verify.get("data") if isinstance(verify.get("data"), dict) else {}
+            trace_id = str(verify_data.get("trace_id") or "")
+            fresh_trace = any(
+                check.get("status") in ("pass", "passed")
+                and trace_id
+                and trace_id in json.dumps(check, ensure_ascii=False)
+                for check in verify_data.get("checks") or []
+            )
+            ok = (
+                controller_result.get("controller") == "langgraph"
+                and controller_result.get("status") == "completed"
+                and controller_result.get("verify_status") in ("pass", "passed")
+                and attempt.get("repair_verified") is True
+                and attempt.get("resume_executed") is True
+                and fresh_trace
+            )
+            runner_data = pipeline.get("runner", {}).get("data") or {}
+            pid = int(runner_data.get("pid") or 0)
+            if pid > 0:
+                try:
+                    os.kill(pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+        return self._result(case, "passed" if ok else "failed", "real LangGraph self-repair controller E2E verified")
+
     def _stage_update_count(self, run_dir: Path) -> Dict[str, int]:
         counts: Dict[str, int] = {}
         for line in (run_dir / "events.jsonl").read_text(encoding="utf-8").splitlines():
@@ -2126,8 +2323,21 @@ class BenchmarkRunner:
     def _result(self, case: Dict, status: str, reason: str) -> Dict:
         return {
             "id": case.get("id"),
+            "case_id": case.get("case_id") or case.get("id"),
+            "test_level": case.get("test_level", ""),
+            "requires": list(case.get("requires") or []),
             "status": status,
+            "environment_status": "available",
             "purpose": case.get("purpose", ""),
             "expected_signal": case.get("expected_signal", ""),
             "reason": reason,
+            "assertions": [],
+            "artifact_paths": [],
+            "duration_ms": 0,
         }
+
+    def _environment_blocked(self, case: Dict, reason: str, detail: str = "") -> Dict:
+        result = self._result(case, "not_run", reason)
+        result["environment_status"] = "blocked"
+        result["environment_detail"] = detail[:500]
+        return result

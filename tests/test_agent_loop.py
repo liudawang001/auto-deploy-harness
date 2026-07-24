@@ -16,6 +16,7 @@ from auto_harness.agent_runtime.state import AgentState
 from auto_harness.agent_runtime.stop import StopCondition
 from auto_harness.agent_runtime.artifacts import AgentArtifactWriter
 from auto_harness.agent_runtime.loop import DeploymentAgentLoop
+from auto_harness.agent.loop import AgentLoopController
 
 
 class TestAgentState(unittest.TestCase):
@@ -66,6 +67,32 @@ class TestAgentState(unittest.TestCase):
         self.assertTrue(path.exists())
         data = json.loads(path.read_text())
         self.assertEqual(data["task_id"], "test")
+
+
+class TestRepairSafetyDetection(unittest.TestCase):
+    def setUp(self):
+        self.controller = AgentLoopController.__new__(AgentLoopController)
+
+    def test_benign_safety_metadata_does_not_block_resume(self):
+        plan = {
+            "actions": [{
+                "type": "install_package",
+                "payload": {"package": "requests"},
+                "requires": {"source_edit": False, "operator_secret": False},
+            }],
+            "rerun_from_adjustment_reason": "proposed stage was not safe; fallback selected",
+        }
+        policy = {"allowed": True, "decisions": [{"allowed": True, "reasons": []}]}
+        self.assertFalse(self.controller._has_unsafe_request(plan, policy))
+
+    def test_explicit_source_edit_is_unsafe(self):
+        plan = {
+            "actions": [{
+                "type": "propose_source_patch",
+                "requires": {"source_edit": True},
+            }],
+        }
+        self.assertTrue(self.controller._has_unsafe_request(plan, {"allowed": False}))
 
 
 class TestStopCondition(unittest.TestCase):

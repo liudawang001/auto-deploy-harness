@@ -1,7 +1,7 @@
 """Tests for ToolExecutor (Phase 4).
 
 Covers:
-- Tool categorization (read_only, state_delta, execution)
+- Tool categorization (read_only, state_delta, side_effect)
 - ToolResult schema with policy_allowed, executed, applied, metadata_only
 - Tool dispatch for verify tools
 """
@@ -36,20 +36,24 @@ class TestToolRegistry(unittest.TestCase):
             self.assertEqual(tool.get("category"), "state_delta",
                              "tool %s should be state_delta" % name)
 
-    def test_execution_tools(self):
-        """execution tools should have category='execution'."""
-        execution_tools = ["install_environment", "start_service", "probe_http",
-                           "discover_gradio_api", "apply_repair", "resume_from_stage"]
+    def test_side_effect_tools(self):
+        """Executable tools should have category='side_effect'."""
+        execution_tools = ["install_environment", "start_service",
+                           "apply_repair", "resume_from_stage"]
         for name in execution_tools:
             tool = self.registry.get(name)
-            self.assertEqual(tool.get("category"), "execution",
-                             "tool %s should be execution" % name)
+            self.assertEqual(tool.get("category"), "side_effect",
+                             "tool %s should be side_effect" % name)
 
     def test_all_tools_have_category(self):
         """All tools should have a category field."""
         for name, tool in self.registry.tools.items():
-            self.assertIn(tool.category, ["read_only", "state_delta", "execution"],
+            self.assertIn(tool.category, ["read_only", "state_delta", "side_effect", "evidence"],
                           "tool %s has invalid category: %s" % (name, tool.category))
+
+    def test_evidence_tools(self):
+        for name in ("probe_http", "discover_gradio_api"):
+            self.assertEqual(self.registry.get(name).get("category"), "evidence")
 
     def test_execution_tools_require_policy(self):
         """Most execution tools should require policy."""
@@ -86,7 +90,7 @@ class TestToolResultSchema(unittest.TestCase):
         result = ToolResult(
             status="passed",
             tool_name="probe_http",
-            category="execution",
+            category="side_effect",
             policy_allowed=True,
             executed=True,
             applied=False,

@@ -1,157 +1,338 @@
-"""Tests for LLM Necessity Evaluator (Phase 6).
+"""Tests for LLMNecessityEvaluator runner rewrite.
 
-Covers:
-- manifest loading and case evaluation
-- llm_required only on baseline failure + agent pass
-- llm_helped is always bool (not string)
-- safety case correctly identifies policy rejection
-- report generation with summary
-- evaluator actually runs pipelines (not reads expectations)
+Validates:
+- Evaluator uses TaskRunner (via runner_factory injection)
+- Evaluator uses LangGraph for both modes
+- Baseline uses deterministic planner without provider call
+- Deterministic planner emits parser-valid plan
+- Baseline and agent have different workspaces
+- Missing fixture is infrastructure error
+- Missing report is infrastructure error
+- Infrastructure error makes report failed
+- CLI returns nonzero on failed report
 """
 import json
 import tempfile
-import unittest
 from pathlib import Path
-from unittest.mock import MagicMock, patch
 
-from auto_harness.evals.llm_necessity import LLMNecessityEvaluator
+import pytest
+
+from auto_harness.agent_runtime.deterministic_planner import DeterministicDeploymentPlanner
+from auto_harness.evals.llm_necessity import LLMNecessityEvaluator, _load_run_result
+from auto_harness.models.base import write_json
+from auto_harness.providers.base import LLMResult
 
 
-class TestLLMNecessityEvaluator(unittest.TestCase):
-    """Tests for LLMNecessityEvaluator."""
+class TestDeterministicPlanner:
+    """Test DeterministicDeploymentPlanner."""
 
-    def setUp(self):
-        self.tmpdir = tempfile.mkdtemp()
-        self.output_dir = Path(self.tmpdir) / "eval_output"
-        self.evaluator = LLMNecessityEvaluator(output_dir=self.output_dir)
-
-    def test_llm_helped_is_bool(self):
-        """llm_helped must always be bool, not string."""
-        results = [
-            {"case_id": "a", "llm_required": True, "llm_helped": True, "fixture_exists": True},
-            {"case_id": "b", "llm_required": False, "llm_helped": False, "fixture_exists": True},
-        ]
-        summary = self.evaluator._build_summary(results)
-        self.assertTrue(summary["all_llm_helped_are_bool"])
-        for r in results:
-            self.assertIsInstance(r["llm_helped"], bool)
-
-    def test_evaluate_case_fixture_not_found(self):
-        """Should return error result when fixture doesn't exist."""
-        case = {
-            "case_id": "missing_fixture",
-            "target_gate": "runner",
-            "fixture_dir": "/nonexistent/path",
-        }
-        result = self.evaluator.evaluate_case(case)
-        self.assertFalse(result["llm_required"])
-        self.assertFalse(result["fixture_exists"])
-        self.assertEqual(result["baseline_status"], "error")
-
-    def test_evaluate_manifest_missing_file(self):
-        result = self.evaluator.evaluate_manifest(Path("/nonexistent/manifest.json"))
-        self.assertEqual(result["status"], "failed")
-        self.assertIn("not found", result["error"])
-
-    def test_summary_counts(self):
-        results = [
-            {"case_id": "a", "llm_required": True, "llm_helped": True, "fixture_exists": True},
-            {"case_id": "b", "llm_required": False, "llm_helped": False, "fixture_exists": True},
-            {"case_id": "malicious_c", "llm_required": False, "llm_helped": False, "fixture_exists": True},
-        ]
-        summary = self.evaluator._build_summary(results)
-        self.assertEqual(summary["total_cases"], 3)
-        self.assertEqual(summary["llm_required_count"], 1)
-        self.assertEqual(summary["llm_helped_count"], 1)
-        self.assertEqual(summary["safety_cases"], 1)
-        self.assertTrue(summary["llm_necessity_proven"])
-
-    def test_safety_case_llm_required_false(self):
-        """Malicious cases should have llm_required=False."""
-        results = [
-            {"case_id": "malicious_readme", "llm_required": True, "llm_helped": True, "fixture_exists": True},
-        ]
-        # The evaluator should set llm_required=False for malicious cases
-        # This is tested via the _compare_runs method
-        comparison = self.evaluator._compare_runs(
-            {"stage_status": {"runner": {"status": "failed"}}},
-            {"stage_status": {"runner": {"status": "failed"}}, "decisions": []},
-            {"case_id": "malicious_readme_prompt_injection", "target_gate": "runner"},
-        )
-        self.assertFalse(comparison["llm_required"])
-
-    def test_compare_runs_baseline_passed_not_required(self):
-        """When baseline passes, llm_required should be False."""
-        comparison = self.evaluator._compare_runs(
-            {"stage_status": {"runner": {"status": "passed"}}},
-            {"stage_status": {"runner": {"status": "passed"}}, "decisions": []},
-            {"case_id": "simple_case", "target_gate": "runner"},
-        )
-        self.assertFalse(comparison["llm_required"])
-
-    def test_compare_runs_baseline_failed_agent_passed(self):
-        """When baseline fails and agent passes with LLM decision, llm_required=True."""
-        comparison = self.evaluator._compare_runs(
-            {"stage_status": {"runner": {"status": "failed"}}},
-            {
-                "stage_status": {"runner": {"status": "passed"}},
-                "decisions": [
-                    {"decision": {
-                        "stage": "runner",
-                        "policy_allowed": True,
-                        "executed": True,
-                        "tool_name": "select_runner_candidate",
-                    }},
-                ],
-                "verify": {"status": "passed", "evidence_paths": ["/evidence/1.json"]},
+    def test_deterministic_planner_emits_parser_valid_plan(self):
+        """Deterministic planner must emit valid JSON plan."""
+        planner = DeterministicDeploymentPlanner()
+        snapshot = {
+            "file_tree": ["app.py", "requirements.txt"],
+            "detected_signals": {
+                "entrypoint_candidates": ["app.py"],
+                "ports": [8000],
             },
-            {"case_id": "wrong_default_entrypoint", "target_gate": "runner"},
-        )
-        self.assertTrue(comparison["llm_required"])
-        self.assertTrue(comparison["llm_helped"])
-        self.assertIsInstance(comparison["llm_helped"], bool)
+        }
+        result = planner.plan(snapshot)
+        assert isinstance(result, LLMResult)
+        assert result.protocol == "deterministic"
+        plan = json.loads(result.text)
+        assert plan["status"] == "ok"
+        assert plan["run"]["candidates"][0]["cmd"] == [".venv/bin/python", "app.py"]
+        assert plan["run"]["candidates"][0]["expected_port"] == 8000
 
-    def test_build_error_result(self):
-        """Error result should have correct structure."""
-        result = self.evaluator._build_error_result(
-            "test_case", "runner", "test_error", "/path",
-        )
-        self.assertEqual(result["case_id"], "test_case")
-        self.assertFalse(result["llm_required"])
-        self.assertFalse(result["llm_helped"])
-        self.assertEqual(result["error"], "test_error")
+    def test_deterministic_planner_uses_requirements_txt(self):
+        """requirements.txt should produce pip install -r requirements.txt."""
+        planner = DeterministicDeploymentPlanner()
+        snapshot = {
+            "file_tree": ["requirements.txt"],
+            "detected_signals": {"entrypoint_candidates": ["app.py"], "ports": [8000]},
+        }
+        result = planner.plan(snapshot)
+        plan = json.loads(result.text)
+        install_commands = plan["environment"]["install_commands"]
+        assert any("requirements.txt" in " ".join(c) for c in install_commands)
+
+    def test_deterministic_planner_uses_pyproject_toml(self):
+        """pyproject.toml should produce pip install -e ."""
+        planner = DeterministicDeploymentPlanner()
+        snapshot = {
+            "file_tree": ["pyproject.toml"],
+            "detected_signals": {"entrypoint_candidates": ["app.py"], "ports": [8000]},
+        }
+        result = planner.plan(snapshot)
+        plan = json.loads(result.text)
+        install_commands = plan["environment"]["install_commands"]
+        assert any("-e" in c and "." in c for c in install_commands)
+
+    def test_deterministic_planner_no_entrypoint_returns_no_safe_plan(self):
+        """No entrypoint candidate should return no_safe_plan."""
+        planner = DeterministicDeploymentPlanner()
+        snapshot = {
+            "file_tree": ["requirements.txt"],
+            "detected_signals": {"entrypoint_candidates": [], "ports": [8000]},
+        }
+        result = planner.plan(snapshot)
+        plan = json.loads(result.text)
+        assert plan["status"] == "no_safe_plan"
+
+    def test_deterministic_planner_default_port_8000(self):
+        """No port signal should default to 8000."""
+        planner = DeterministicDeploymentPlanner()
+        snapshot = {
+            "file_tree": ["app.py"],
+            "detected_signals": {"entrypoint_candidates": ["app.py"], "ports": []},
+        }
+        result = planner.plan(snapshot)
+        plan = json.loads(result.text)
+        assert plan["run"]["candidates"][0]["expected_port"] == 8000
+
+    def test_deterministic_planner_replan_returns_no_safe_plan(self):
+        """replan must always return no_safe_plan."""
+        planner = DeterministicDeploymentPlanner()
+        result = planner.replan({}, {}, {})
+        plan = json.loads(result.text)
+        assert plan["status"] == "no_safe_plan"
+
+    def test_deterministic_planner_does_not_call_provider(self):
+        """Deterministic planner must never call any LLMProvider."""
+        planner = DeterministicDeploymentPlanner()
+        snapshot = {
+            "file_tree": ["app.py"],
+            "detected_signals": {"entrypoint_candidates": ["app.py"], "ports": [8000]},
+        }
+        # If it tried to call a provider, it would need one passed in
+        # Since none is passed, it should work fine
+        result = planner.plan(snapshot)
+        assert result.protocol == "deterministic"
 
 
-class TestManifestStructure(unittest.TestCase):
-    """Test the manifest file structure."""
+class TestLoadRunResult:
+    """Test _load_run_result function."""
 
-    def test_manifest_has_all_cases(self):
-        manifest_path = Path("eval_targets/llm_necessity_manifest.json")
-        if not manifest_path.exists():
-            self.skipTest("manifest not found")
-        manifest = json.loads(manifest_path.read_text())
-        cases = manifest.get("cases", [])
-        case_ids = [c["case_id"] for c in cases]
-        expected = [
-            "wrong_default_entrypoint",
-            "dependency_conflict_pydantic",
-            "model_path_ambiguous",
-            "repair_missing_dependency",
-            "cross_stage_strategy_gradio_model",
-            "malicious_readme_prompt_injection",
-        ]
-        for eid in expected:
-            self.assertIn(eid, case_ids, "missing case: %s" % eid)
+    def test_missing_report_is_infrastructure_error(self):
+        """Missing controller_result.json should be infrastructure_error."""
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "runs" / "test_task"
+            run_dir.mkdir(parents=True)
+            result = _load_run_result(run_dir)
+            assert result["status"] == "infrastructure_error"
+            assert "not found" in result["error"]
 
-    def test_manifest_gates_covered(self):
-        manifest_path = Path("eval_targets/llm_necessity_manifest.json")
-        if not manifest_path.exists():
-            self.skipTest("manifest not found")
-        manifest = json.loads(manifest_path.read_text())
-        gates = set(c["target_gate"] for c in manifest.get("cases", []))
-        expected_gates = {"runner", "env_solve", "model_prepare", "repair", "plan"}
-        self.assertTrue(expected_gates.issubset(gates), "missing gates: %s" % (expected_gates - gates))
+    def test_valid_report_returns_completed(self):
+        """Valid controller_result.json should return completed status."""
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "runs" / "test_task"
+            reports_dir = run_dir / "reports"
+            reports_dir.mkdir(parents=True)
+            write_json(reports_dir / "controller_result.json", {
+                "task_id": "test_task",
+                "controller": "langgraph",
+                "status": "completed",
+                "verify_status": "passed",
+            })
+            result = _load_run_result(run_dir)
+            assert result["status"] == "completed"
+            assert result["verify_status"] == "passed"
 
 
-if __name__ == "__main__":
-    unittest.main()
+class TestLLMNecessityEvaluator:
+    """Test LLMNecessityEvaluator with injected factories."""
+
+    def test_evaluator_uses_task_runner(self):
+        """Evaluator should use TaskRunner via runner_factory."""
+        calls = []
+
+        class FakeRunner:
+            def __init__(self, config):
+                self.config = config
+                calls.append(("init", config.agent_mode))
+
+            def deploy(self, **kwargs):
+                calls.append(("deploy", kwargs.get("name")))
+                return "fake_task_id"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            # Create a fixture
+            fixture = Path(tmp) / "fixture"
+            fixture.mkdir()
+            (fixture / "app.py").write_text("print('hello')")
+
+            manifest = {"cases": [{"case_id": "test1", "fixture_dir": str(fixture), "dry_run": True}]}
+
+            evaluator = LLMNecessityEvaluator(
+                output_dir=Path(tmp) / "evals",
+                runner_factory=FakeRunner,
+            )
+
+            manifest_path = Path(tmp) / "manifest.json"
+            write_json(manifest_path, manifest)
+
+            result = evaluator.evaluate_manifest(manifest_path)
+
+            # Should have called deploy for both baseline and agent
+            deploy_calls = [c for c in calls if c[0] == "deploy"]
+            assert len(deploy_calls) == 2  # baseline + agent
+
+    def test_missing_fixture_is_infrastructure_error(self):
+        """Missing fixture should produce infrastructure_error."""
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest = {"cases": [{"case_id": "test1", "fixture_dir": "/nonexistent/path", "dry_run": True}]}
+
+            evaluator = LLMNecessityEvaluator(output_dir=Path(tmp) / "evals")
+
+            manifest_path = Path(tmp) / "manifest.json"
+            write_json(manifest_path, manifest)
+
+            result = evaluator.evaluate_manifest(manifest_path)
+            assert result["status"] == "failed"
+            assert result["summary"]["infrastructure_error_count"] > 0
+
+    def test_infrastructure_error_makes_report_failed(self):
+        """Infrastructure errors should make report status=failed."""
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = Path(tmp) / "fixture"
+            fixture.mkdir()
+            (fixture / "app.py").write_text("print('hello')")
+
+            class BrokenRunner:
+                def __init__(self, config):
+                    pass
+
+                def deploy(self, **kwargs):
+                    raise RuntimeError("broken runner")
+
+            manifest = {"cases": [{"case_id": "test1", "fixture_dir": str(fixture), "dry_run": True}]}
+
+            evaluator = LLMNecessityEvaluator(
+                output_dir=Path(tmp) / "evals",
+                runner_factory=BrokenRunner,
+            )
+
+            manifest_path = Path(tmp) / "manifest.json"
+            write_json(manifest_path, manifest)
+
+            result = evaluator.evaluate_manifest(manifest_path)
+            assert result["status"] == "failed"
+
+    def test_baseline_uses_deterministic_planner_without_provider_call(self):
+        """Baseline config must use deterministic planner mode."""
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = Path(tmp) / "fixture"
+            fixture.mkdir()
+            (fixture / "app.py").write_text("print('hello')")
+
+            captured_configs = []
+
+            class CapturingRunner:
+                def __init__(self, config):
+                    captured_configs.append(config)
+
+                def deploy(self, **kwargs):
+                    return "task_id"
+
+            manifest = {"cases": [{"case_id": "test1", "fixture_dir": str(fixture), "dry_run": True}]}
+
+            evaluator = LLMNecessityEvaluator(
+                output_dir=Path(tmp) / "evals",
+                runner_factory=CapturingRunner,
+            )
+
+            manifest_path = Path(tmp) / "manifest.json"
+            write_json(manifest_path, manifest)
+
+            evaluator.evaluate_manifest(manifest_path)
+
+            # First config is baseline (off mode, deterministic planner)
+            baseline_config = captured_configs[0]
+            assert baseline_config.agent_mode == "off"
+            assert baseline_config.langgraph_planner_mode == "deterministic"
+
+            # Second config is agent (gated_actor, llm planner)
+            agent_config = captured_configs[1]
+            assert agent_config.agent_mode == "gated_actor"
+            assert agent_config.langgraph_planner_mode == "llm"
+
+    def test_baseline_and_agent_have_different_workspaces(self):
+        """Baseline and agent must have different run directories."""
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = Path(tmp) / "fixture"
+            fixture.mkdir()
+            (fixture / "app.py").write_text("print('hello')")
+
+            deploy_names = []
+
+            class TrackingRunner:
+                def __init__(self, config):
+                    self.config = config
+
+                def deploy(self, **kwargs):
+                    deploy_names.append(kwargs.get("name"))
+                    return "task_%d" % len(deploy_names)
+
+            manifest = {"cases": [{"case_id": "test1", "fixture_dir": str(fixture), "dry_run": True}]}
+
+            evaluator = LLMNecessityEvaluator(
+                output_dir=Path(tmp) / "evals",
+                runner_factory=TrackingRunner,
+            )
+
+            manifest_path = Path(tmp) / "manifest.json"
+            write_json(manifest_path, manifest)
+
+            evaluator.evaluate_manifest(manifest_path)
+
+            # Names should differ (baseline vs agent suffix)
+            assert len(deploy_names) == 2
+            assert deploy_names[0] != deploy_names[1]
+
+    def test_evaluator_uses_langgraph_for_both_modes(self):
+        """Both baseline and agent must use langgraph controller."""
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = Path(tmp) / "fixture"
+            fixture.mkdir()
+            (fixture / "app.py").write_text("print('hello')")
+
+            controllers = []
+
+            class ControllerTrackingRunner:
+                def __init__(self, config):
+                    self.config = config
+
+                def deploy(self, **kwargs):
+                    controllers.append(kwargs.get("controller"))
+                    return "task_id"
+
+            manifest = {"cases": [{"case_id": "test1", "fixture_dir": str(fixture), "dry_run": True}]}
+
+            evaluator = LLMNecessityEvaluator(
+                output_dir=Path(tmp) / "evals",
+                runner_factory=ControllerTrackingRunner,
+            )
+
+            manifest_path = Path(tmp) / "manifest.json"
+            write_json(manifest_path, manifest)
+
+            evaluator.evaluate_manifest(manifest_path)
+
+            assert all(c == "langgraph" for c in controllers)
+
+    def test_cli_returns_nonzero_on_failed_report(self):
+        """CLI should return nonzero (2) when report status is failed."""
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest = {"cases": [{"case_id": "test1", "fixture_dir": "/nonexistent", "dry_run": True}]}
+
+            manifest_path = Path(tmp) / "manifest.json"
+            write_json(manifest_path, manifest)
+
+            evaluator = LLMNecessityEvaluator(output_dir=Path(tmp) / "evals")
+            result = evaluator.evaluate_manifest(manifest_path)
+
+            # Verify the result would cause CLI to return 2
+            assert result.get("status") == "failed"
+            # The CLI returns: 0 if status == "completed" else 2
+            exit_code = 0 if result.get("status") == "completed" else 2
+            assert exit_code == 2

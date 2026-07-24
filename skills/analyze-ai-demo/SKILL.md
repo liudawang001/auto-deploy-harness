@@ -2,7 +2,7 @@
 name: analyze-ai-demo
 version: "1.0.0"
 type: analysis_skill
-stages: [analyze, plan_first]
+stages: [analyze, plan, plan_first]
 frameworks: []
 risk_level: low
 side_effects: false

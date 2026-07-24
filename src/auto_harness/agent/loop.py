@@ -1,4 +1,3 @@
-import json
 from pathlib import Path
 from typing import Callable, Dict
 
@@ -296,9 +295,24 @@ class AgentLoopController:
         return any(action.get("type") in metadata_actions for action in repair_plan.get("actions", []))
 
     def _has_unsafe_request(self, repair_plan: Dict, effective_policy: Dict) -> bool:
-        unsafe_terms = ("source edit", "operator secret", "unsafe", "shell", "external URL")
-        text = json.dumps({"plan": repair_plan, "policy": effective_policy}, ensure_ascii=False).lower()
-        return any(term.lower() in text for term in unsafe_terms)
+        for action in repair_plan.get("actions") or []:
+            requires = action.get("requires") if isinstance(action.get("requires"), dict) else {}
+            if requires.get("source_edit") or requires.get("operator_secret"):
+                return True
+            if action.get("type") in ("shell", "run_shell", "propose_source_patch"):
+                return True
+
+        unsafe_terms = ("source edit", "operator secret", "unsafe package", "unsafe conda", "shell", "external url")
+        for decision in effective_policy.get("decisions") or []:
+            if decision.get("allowed") is not False:
+                continue
+            reasons = decision.get("reasons") or []
+            if isinstance(reasons, str):
+                reasons = [reasons]
+            text = " ".join(str(reason).lower() for reason in reasons)
+            if any(term in text for term in unsafe_terms):
+                return True
+        return False
 
     def _action_failed(self, apply_result: Dict) -> bool:
         for item in apply_result.get("action_results", []):

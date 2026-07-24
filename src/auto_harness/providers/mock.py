@@ -43,7 +43,7 @@ class MockLLMProvider:
                 "message_count": len(messages),
             }
 
-        return LLMResult(text=json.dumps(content, ensure_ascii=False), raw=content, usage={})
+        return LLMResult(text=json.dumps(content, ensure_ascii=False), raw=content, usage={}, protocol="json_action")
 
     def _extract_stage_hint(self, messages: List[Message]) -> str:
         """Extract stage hint from message content."""

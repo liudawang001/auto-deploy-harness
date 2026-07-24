@@ -281,31 +281,37 @@ class TestControllerConsistencyOnResume:
 class TestApprovalResume:
     """Approval interrupt 后的恢复测试。"""
 
+    def _make_request(self, **overrides):
+        """Build a valid approval request for tests."""
+        from auto_harness.graph.approval import build_approval_request
+        defaults = {
+            "approval_id": "app001",
+            "operation_id": "op001",
+            "approval_kind": "recovery",
+            "requested_action": "apply_repair",
+            "risk": "high",
+            "reason": "source_edit",
+        }
+        defaults.update(overrides)
+        return build_approval_request(**defaults)
+
     def test_approval_node_reject_stops_graph(self):
         """reject 后 executor 调用次数为 0。"""
         from auto_harness.graph.approval import approval_node
 
+        request = self._make_request(approval_id="app001", operation_id="op001")
         state = {
             "run_dir": "/tmp/test_reject",
             "task_id": "t1",
-            "pending_approval": {
-                "approval_id": "app001",
-                "operation_id": "op001",
-                "requested_action": "apply_repair",
-                "risk": "high",
-                "reason": "source_edit",
-                "allowed_decisions": ["approve", "reject"],
-            },
+            "pending_approval": request,
         }
 
-        # Simulate reject decision via interrupt resume
-        # The approval_node receives the decision from interrupt()
-        # interrupt() is imported from langgraph.types inside the function
         with patch("langgraph.types.interrupt", return_value={
             "approval_id": "app001",
             "operation_id": "op001",
             "decision": "reject",
             "reviewer": "cli",
+            "request_hash": request["request_hash"],
         }):
             result = approval_node(state)
 
@@ -316,17 +322,11 @@ class TestApprovalResume:
         """approval hash 不匹配时拒绝。"""
         from auto_harness.graph.approval import approval_node
 
+        request = self._make_request(approval_id="app002", operation_id="op002")
         state = {
             "run_dir": "/tmp/test_hash",
             "task_id": "t1",
-            "pending_approval": {
-                "approval_id": "app002",
-                "operation_id": "op002",
-                "requested_action": "apply_repair",
-                "risk": "high",
-                "reason": "source_edit",
-                "allowed_decisions": ["approve", "reject"],
-            },
+            "pending_approval": request,
         }
 
         # Decision with wrong approval_id
@@ -335,6 +335,7 @@ class TestApprovalResume:
             "operation_id": "op002",
             "decision": "approve",
             "reviewer": "cli",
+            "request_hash": request["request_hash"],
         }):
             result = approval_node(state)
 
@@ -344,17 +345,11 @@ class TestApprovalResume:
         """operation_id 不匹配时拒绝。"""
         from auto_harness.graph.approval import approval_node
 
+        request = self._make_request(approval_id="app003", operation_id="op003")
         state = {
             "run_dir": "/tmp/test_op",
             "task_id": "t1",
-            "pending_approval": {
-                "approval_id": "app003",
-                "operation_id": "op003",
-                "requested_action": "apply_repair",
-                "risk": "high",
-                "reason": "source_edit",
-                "allowed_decisions": ["approve", "reject"],
-            },
+            "pending_approval": request,
         }
 
         # Decision with wrong operation_id
@@ -363,6 +358,7 @@ class TestApprovalResume:
             "operation_id": "wrongop",
             "decision": "approve",
             "reviewer": "cli",
+            "request_hash": request["request_hash"],
         }):
             result = approval_node(state)
 
@@ -372,17 +368,11 @@ class TestApprovalResume:
         """approve 后允许继续执行。"""
         from auto_harness.graph.approval import approval_node
 
+        request = self._make_request(approval_id="app004", operation_id="op004")
         state = {
             "run_dir": "/tmp/test_approve",
             "task_id": "t1",
-            "pending_approval": {
-                "approval_id": "app004",
-                "operation_id": "op004",
-                "requested_action": "apply_repair",
-                "risk": "high",
-                "reason": "source_edit",
-                "allowed_decisions": ["approve", "reject"],
-            },
+            "pending_approval": request,
         }
 
         with patch("langgraph.types.interrupt", return_value={
@@ -390,6 +380,7 @@ class TestApprovalResume:
             "operation_id": "op004",
             "decision": "approve",
             "reviewer": "cli",
+            "request_hash": request["request_hash"],
         }):
             result = approval_node(state)
 
@@ -493,3 +484,171 @@ class TestCommittedOperationNoDuplicate:
         assert decision.decision == "reuse"
         assert decision.hydrated_stage_result.get("status") == "passed"
         assert decision.hydrated_stage_result.get("data", {}).get("reused") is True
+
+
+# -------------------------------------------------------------------
+# Task 3: begin() integration and reconcile decision application
+# -------------------------------------------------------------------
+
+
+class TestNewOperationBeginsRunning:
+    """New operations are persisted as running before execute."""
+
+    def test_new_adapter_operation_is_running_before_execute(self, tmp_path):
+        """New side effect is persisted as running before executor is called."""
+        adapter = GraphRecoveryAdapter()
+        state = {
+            "task_id": "t1",
+            "run_dir": str(tmp_path),
+            "repo_dir": str(tmp_path / "workspace" / "repo"),
+            "runtime_policy": {},
+            "compiled_analysis": {"install_plan": ["pip install flask"]},
+        }
+        decision = adapter.prepare_or_reconcile(state, "env_deploy")
+        assert decision.decision == "execute"
+        assert decision.operation["status"] == "running"
+        # Verify persisted on disk
+        op_id = decision.operation["operation_id"]
+        from auto_harness.recovery.journal import OperationJournal
+        journal = OperationJournal(tmp_path)
+        loaded = journal.load(op_id)
+        assert loaded["status"] == "running"
+
+
+class TestReconcileDecisionApplied:
+    """Reconcile decisions are persisted via apply_decision."""
+
+    def _make_running_unknown(self, adapter, state, stage, tmp_path):
+        """Helper: create operation, set to running, then recover to unknown."""
+        from auto_harness.recovery.journal import OperationJournal
+        op = adapter.build_operation(state, stage)
+        journal = OperationJournal(tmp_path)
+        journal.begin(op)
+        # Simulate crash: running -> unknown
+        journal.recover_running(op["operation_id"])
+        return op["operation_id"]
+
+    def test_reconcile_reuse_transitions_to_committed(self, tmp_path):
+        """reconcile reuse persists operation as committed."""
+        adapter = GraphRecoveryAdapter(reconcilers={
+            "dependency_install": MagicMock(),
+        })
+        # Reconciler says reuse
+        adapter.reconcilers["dependency_install"].reconcile.return_value = {
+            "decision": "reuse",
+            "reason": "env_exists",
+            "observed_state": {"exists": True},
+            "evidence_paths": [],
+        }
+        state = {
+            "task_id": "t1",
+            "run_dir": str(tmp_path),
+            "repo_dir": str(tmp_path / "workspace" / "repo"),
+            "runtime_policy": {},
+            "compiled_analysis": {"install_plan": ["pip install flask"]},
+        }
+        op_id = self._make_running_unknown(adapter, state, "env_deploy", tmp_path)
+
+        decision = adapter.prepare_or_reconcile(state, "env_deploy")
+        assert decision.decision == "reuse"
+        # apply_decision should have persisted committed
+        from auto_harness.recovery.journal import OperationJournal
+        journal = OperationJournal(tmp_path)
+        loaded = journal.load(op_id)
+        assert loaded["status"] == "committed"
+
+    def test_cleanup_decision_transitions_to_manual(self, tmp_path):
+        """cleanup_then_retry decision persists operation as manual before approval."""
+        adapter = GraphRecoveryAdapter(reconcilers={
+            "dependency_install": MagicMock(),
+        })
+        adapter.reconcilers["dependency_install"].reconcile.return_value = {
+            "decision": "cleanup_then_retry",
+            "reason": "conflicting_env",
+        }
+        state = {
+            "task_id": "t1",
+            "run_dir": str(tmp_path),
+            "repo_dir": str(tmp_path / "workspace" / "repo"),
+            "runtime_policy": {},
+            "compiled_analysis": {"install_plan": ["pip install flask"]},
+        }
+        op_id = self._make_running_unknown(adapter, state, "env_deploy", tmp_path)
+
+        decision = adapter.prepare_or_reconcile(state, "env_deploy")
+        assert decision.decision == "approval"
+        assert decision.stop_reason == "cleanup_required"
+        from auto_harness.recovery.journal import OperationJournal
+        journal = OperationJournal(tmp_path)
+        loaded = journal.load(op_id)
+        assert loaded["status"] == "manual"
+
+    def test_conflict_decision_transitions_to_conflict(self, tmp_path):
+        """conflict decision persists operation as conflict before stop."""
+        adapter = GraphRecoveryAdapter(reconcilers={
+            "local_process": MagicMock(),
+        })
+        adapter.reconcilers["local_process"].reconcile.return_value = {
+            "decision": "conflict",
+            "reason": "pid_reuse",
+        }
+        state = {
+            "task_id": "t1",
+            "run_dir": str(tmp_path),
+            "repo_dir": str(tmp_path / "workspace" / "repo"),
+            "runtime_policy": {"execution_backend": "local"},
+            "compiled_analysis": {},
+        }
+        op_id = self._make_running_unknown(adapter, state, "runner", tmp_path)
+
+        decision = adapter.prepare_or_reconcile(state, "runner")
+        assert decision.decision == "stop"
+        assert decision.stop_reason == "recovery_conflict"
+        from auto_harness.recovery.journal import OperationJournal
+        journal = OperationJournal(tmp_path)
+        loaded = journal.load(op_id)
+        assert loaded["status"] == "conflict"
+
+    def test_unknown_is_reconciled_not_blindly_retried(self, tmp_path):
+        """Unknown status must reconcile, not directly retry."""
+        adapter = GraphRecoveryAdapter(reconcilers={
+            "dependency_install": MagicMock(),
+        })
+        # No reconciler match -> manual
+        adapter.reconcilers["dependency_install"].reconcile.return_value = {
+            "decision": "manual",
+            "reason": "cannot_verify",
+        }
+        state = {
+            "task_id": "t1",
+            "run_dir": str(tmp_path),
+            "repo_dir": str(tmp_path / "workspace" / "repo"),
+            "runtime_policy": {},
+            "compiled_analysis": {"install_plan": ["pip install flask"]},
+        }
+        op_id = self._make_running_unknown(adapter, state, "env_deploy", tmp_path)
+
+        decision = adapter.prepare_or_reconcile(state, "env_deploy")
+        # manual -> approval, never a direct retry
+        assert decision.decision == "approval"
+        assert decision.decision != "retry"
+
+    def test_failed_is_fail_closed_approval(self, tmp_path):
+        """Failed operations require operator decision, not auto-retry."""
+        from auto_harness.recovery.journal import OperationJournal
+        adapter = GraphRecoveryAdapter()
+        state = {
+            "task_id": "t1",
+            "run_dir": str(tmp_path),
+            "repo_dir": str(tmp_path / "workspace" / "repo"),
+            "runtime_policy": {},
+            "compiled_analysis": {"install_plan": ["pip install flask"]},
+        }
+        op = adapter.build_operation(state, "env_deploy")
+        journal = OperationJournal(tmp_path)
+        journal.begin(op)
+        journal.transition(op["operation_id"], "failed", error="install_error")
+
+        decision = adapter.prepare_or_reconcile(state, "env_deploy")
+        assert decision.decision == "approval"
+        assert decision.stop_reason == "failed_operation_requires_operator_decision"

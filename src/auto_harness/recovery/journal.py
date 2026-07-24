@@ -18,6 +18,10 @@ from auto_harness.utils.time import utc_now_iso
 
 
 # Allowed state transitions for operation records
+# Note: planned -> committed/failed is kept for legacy migration of old
+# artifacts created before begin() existed. New side-effect operations
+# go through begin() (planned/none -> running atomically) and should
+# never transition planned -> committed/failed directly.
 ALLOWED_TRANSITIONS = {
     "planned": {"running", "committed", "failed", "conflict", "manual"},
     "running": {"committed", "failed", "unknown"},
@@ -98,6 +102,67 @@ class OperationJournal:
             self._write_snapshot(path, new_record)
             self._append_event("created", new_record)
             return new_record
+
+    def begin(self, record):
+        """Atomically persist an operation as running before side effect.
+
+        Unlike create()+transition(), this is a single write that sets
+        status=running, preventing the crash window where an operation
+        is planned but never entered running.
+
+        If the record already exists:
+        - running/committed/manual/conflict: return existing (no-op)
+        - planned/retryable: transition to running, increment attempt
+        - hash collision: raise ValueError
+
+        If no record exists: create as running with attempt=1.
+        """
+        operation_id = record["operation_id"]
+        path = self.record_path(operation_id)
+
+        with FileLock(path):
+            existing = self.load(operation_id)
+
+            if existing:
+                if existing.get("normalized_input_hash") != record.get(
+                    "normalized_input_hash"
+                ):
+                    raise ValueError("operation identity collision")
+
+                status = existing.get("status")
+
+                if status in ("running", "committed", "manual", "conflict"):
+                    return existing
+
+                if status not in ("planned", "retryable"):
+                    return existing
+
+                updated = dict(existing)
+                updated["status"] = "running"
+                updated["attempt"] = int(existing.get("attempt", 0)) + 1
+                updated["started_at"] = utc_now_iso()
+                updated["updated_at"] = updated["started_at"]
+                self._write_snapshot(path, updated)
+                self._append_event("started", {
+                    "operation_id": operation_id,
+                    "attempt": updated["attempt"],
+                    "at": updated["started_at"],
+                })
+                return updated
+
+            started = dict(record)
+            started["status"] = "running"
+            started["attempt"] = 1
+            started["created_at"] = utc_now_iso()
+            started["started_at"] = started["created_at"]
+            started.setdefault("observed_resource", {})
+            started.setdefault("committed_at", "")
+            started.setdefault("last_checked_at", "")
+            started.setdefault("result_artifacts", [])
+            started.setdefault("error", "")
+            self._write_snapshot(path, started)
+            self._append_event("started", started)
+            return started
 
     def transition(self, operation_id: str, new_status: str, **updates):
         """Transition an operation to a new status.

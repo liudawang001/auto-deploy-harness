@@ -28,6 +28,7 @@ class RunnerModule:
         docker_network: str = "bridge",
         docker_gpus: str = "none",
         docker_model_cache_dir: str = "",
+        docker_security_options: Dict = None,
         stage_hints: Dict = None,
     ) -> StageResult:
         candidates: List[Dict] = analysis.get("run_candidates", [])
@@ -48,6 +49,7 @@ class RunnerModule:
             docker_network,
             docker_gpus,
             docker_model_cache_dir,
+            docker_security_options,
         )
         if not execute:
             return StageResult(
@@ -149,6 +151,7 @@ class RunnerModule:
         docker_network: str,
         docker_gpus: str,
         docker_model_cache_dir: str,
+        docker_security_options: Dict = None,
     ):
         if execution_backend != "docker":
             effective = dict(candidate)
@@ -165,6 +168,7 @@ class RunnerModule:
             network=docker_network,
             gpus=docker_gpus,
             model_cache_dir=Path(docker_model_cache_dir) if docker_model_cache_dir else None,
+            **(docker_security_options or {}),
         ).wrap(
             repo_dir,
             candidate.get("cmd", []),

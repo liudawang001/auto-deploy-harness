@@ -4,6 +4,7 @@ version: 1.0.0
 type: security_skill
 stages:
   - analyze
+  - plan
   - plan_first
   - replan
   - repair

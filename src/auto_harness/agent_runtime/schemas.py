@@ -78,7 +78,7 @@ class ToolResult:
     """
     status: str = "error"  # passed|failed|uncertain|error|rejected
     tool_name: str = ""
-    category: str = "read_only"  # read_only|state_delta|execution
+    category: str = "read_only"  # read_only|state_delta|side_effect|evidence
     policy_allowed: bool = False
     executed: bool = False
     applied: bool = False

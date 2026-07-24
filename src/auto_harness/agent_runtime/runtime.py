@@ -120,7 +120,8 @@ class AgentRuntime:
             registry=self.registry,
             allowed_hosts=allowed_hosts or ["127.0.0.1", "localhost"],
         )
-        executor = ToolExecutor()
+        executor = ToolExecutor(registry=self.registry)
+        executor.validate_contract()
 
         # Store skill_context for use in observations
         self._skill_context = skill_context or {}

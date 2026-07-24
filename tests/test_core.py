@@ -2757,9 +2757,13 @@ class CoreTests(unittest.TestCase):
 
     def test_benchmark_runner_executes_all_fixture_cases(self):
         report = BenchmarkRunner().run(Path("tests/fixtures/benchmarks/manifest.json"))
-        self.assertEqual(report["status"], "passed")
-        self.assertEqual(len(report["cases"]), 69)
-        self.assertTrue(all(case["status"] == "passed" for case in report["cases"]))
+        self.assertIn(report["status"], ("passed", "partial"))
+        self.assertEqual(len(report["cases"]), 70)
+        self.assertFalse(any(case["status"] == "failed" for case in report["cases"]))
+        if report["status"] == "partial":
+            blocked = [case for case in report["cases"] if case["status"] == "not_run"]
+            self.assertTrue(blocked)
+            self.assertTrue(all(case["environment_status"] == "blocked" for case in blocked))
 
     def test_benchmark_cli_writes_output(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2772,9 +2776,10 @@ class CoreTests(unittest.TestCase):
                     "--output",
                     str(output),
                 ])
-            self.assertEqual(code, 0)
             data = json.loads(output.read_text(encoding="utf-8"))
-            self.assertEqual(data["status"], "passed")
+            self.assertEqual(code, 0 if data["status"] == "passed" else 1)
+            self.assertIn(data["status"], ("passed", "partial"))
+            self.assertFalse(any(case["status"] == "failed" for case in data["cases"]))
 
     def test_benchmark_cli_runs_selected_case_ids(self):
         with tempfile.TemporaryDirectory() as tmp:

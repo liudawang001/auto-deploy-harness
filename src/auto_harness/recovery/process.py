@@ -179,3 +179,31 @@ class ProcessReconciler:
         return reconcile_result(
             "reuse", "same process is still running", observed=observed,
         )
+
+    def verify_cleanup_target(self, operation):
+        """Re-probe and strongly bind a cleanup target to the journal identity."""
+        identity = operation.get("resource_identity", {})
+        recorded = operation.get("observed_resource", {})
+        pid = int(recorded.get("pid") or 0)
+        expected_start = recorded.get("process_start_time", "")
+        expected_hash = identity.get("command_hash", "")
+        if pid <= 0 or not expected_start or not expected_hash:
+            return {"owned": False, "reason": "recorded_process_identity_incomplete"}
+
+        observed = self.probe.observe(pid)
+        if not observed.get("exists") or not observed.get("identity_complete"):
+            return {"owned": False, "reason": "process_identity_cannot_be_verified"}
+        actual_hash = sha256_text(normalize_command(observed.get("command", "")))
+        if observed.get("start_time") != expected_start:
+            return {"owned": False, "reason": "process_start_time_mismatch"}
+        if actual_hash != expected_hash:
+            return {"owned": False, "reason": "process_command_hash_mismatch"}
+        expected_cwd = identity.get("repo_path", "")
+        if expected_cwd and observed.get("cwd") != str(Path(expected_cwd).resolve()):
+            return {"owned": False, "reason": "process_cwd_mismatch"}
+        return {
+            "owned": True,
+            "pid": pid,
+            "start_time": observed["start_time"],
+            "command_hash": actual_hash,
+        }

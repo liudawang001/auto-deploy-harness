@@ -1,17 +1,23 @@
 """Tool policy boundary tests.
 
 Validates that:
-1. planner mode requests side-effect tool are recorded as would_execute, not executed
+1. planner mode requests side-effect tool are rejected with planner reason
 2. gated_actor mode requests unknown tool are rejected
 3. Requests with external URL are rejected
 4. LLM tool input with shell command fields are rejected
 5. Verify tool returning HTTP 200 without trace cannot pass
+6. read_only tools allowed in planner mode
+7. Unimplemented tools rejected before risk check
+8. Stage mismatch has stage reason
+9. Path traversal has path reason
+10. Side-effect tools require runtime permission
 """
 import unittest
 
 from auto_harness.agent_runtime.policy import ToolPolicy
 from auto_harness.agent_runtime.schemas import ToolCall
 from auto_harness.tools.registry import ToolRegistry
+from auto_harness.tools.schemas import ToolSchema
 
 
 class TestToolPolicyBoundaries(unittest.TestCase):
@@ -21,8 +27,20 @@ class TestToolPolicyBoundaries(unittest.TestCase):
         self.registry = ToolRegistry()
         self.policy = ToolPolicy(registry=self.registry, allowed_hosts=["127.0.0.1", "localhost", "::1"])
 
+    def _make_implemented(self, name):
+        """Helper: mark a tool as implemented for testing."""
+        tool = self.registry.tools.get(name)
+        if tool:
+            tool.implemented = True
+            tool.executor = "test"
+            if not tool.stages:
+                tool.stages = ["verify"]
+
     def test_planner_mode_side_effect_tool_rejected(self):
         """planner mode requesting side-effect tool should be rejected."""
+        # Make install_environment implemented so we get past the implemented check
+        self._make_implemented("install_environment")
+        self.registry.tools["install_environment"].stages = ["env_deploy"]
         tool_call = ToolCall(
             name="install_environment",
             input={"package": "numpy"},
@@ -32,7 +50,7 @@ class TestToolPolicyBoundaries(unittest.TestCase):
             stage="env_deploy",
             agent_mode="planner",
         )
-        # planner mode does not execute tools
+        # planner mode does not execute non-read-only tools
         self.assertFalse(decision.allowed)
         self.assertIn("planner", decision.reason.lower())
 
@@ -87,14 +105,15 @@ class TestToolPolicyBoundaries(unittest.TestCase):
     def test_shell_in_cmd_field_rejected(self):
         """LLM tool input with cmd field containing shell metacharacters should be rejected."""
         tool_call = ToolCall(
-            name="install_environment",
+            name="probe_http",
             input={
-                "package": "numpy; rm -rf /",
+                "cmd": "rm -rf / ; cat /etc/passwd",
+                "trace_template": "test_{{trace_id}}",
             },
         )
         decision = self.policy.validate(
             tool_call=tool_call,
-            stage="env_deploy",
+            stage="verify",
             agent_mode="gated_actor",
         )
         self.assertFalse(decision.allowed)
@@ -131,8 +150,11 @@ class TestToolPolicyBoundaries(unittest.TestCase):
         )
         self.assertTrue(decision.allowed)
 
-    def test_read_only_tool_any_mode(self):
-        """read_only tools should be allowed in any mode."""
+    def test_read_only_tool_allowed_in_planner(self):
+        """read_only tools should be allowed in planner mode."""
+        # Make inspect_repo_tree implemented for this test
+        self._make_implemented("inspect_repo_tree")
+        self.registry.tools["inspect_repo_tree"].stages = ["analyze"]
         tool_call = ToolCall(
             name="inspect_repo_tree",
             input={"path": "."},
@@ -171,8 +193,11 @@ class TestToolPolicyBoundaries(unittest.TestCase):
         self.assertFalse(decision.allowed)
         self.assertIn("secret", decision.reason.lower())
 
-    def test_path_traversal_rejected(self):
-        """Tool input with path traversal should be rejected."""
+    def test_path_traversal_has_path_reason(self):
+        """Tool input with path traversal should be rejected with path reason."""
+        # Make read_selected_files implemented for this test
+        self._make_implemented("read_selected_files")
+        self.registry.tools["read_selected_files"].stages = ["analyze"]
         tool_call = ToolCall(
             name="read_selected_files",
             input={"path": "../../../etc/passwd"},
@@ -184,6 +209,98 @@ class TestToolPolicyBoundaries(unittest.TestCase):
         )
         self.assertFalse(decision.allowed)
         self.assertIn("traversal", decision.reason.lower())
+
+    def test_unimplemented_tool_rejected_before_risk(self):
+        """Unimplemented tools should be rejected before risk/category checks."""
+        tool_call = ToolCall(
+            name="inspect_repo_tree",  # not implemented
+            input={"path": "."},
+        )
+        decision = self.policy.validate(
+            tool_call=tool_call,
+            stage="analyze",
+            agent_mode="gated_actor",
+        )
+        self.assertFalse(decision.allowed)
+        self.assertIn("not implemented", decision.reason.lower())
+
+    def test_stage_mismatch_has_stage_reason(self):
+        """Tool not allowed for a stage should have stage-specific reason."""
+        tool_call = ToolCall(
+            name="probe_http",
+            input={"url": "http://127.0.0.1/", "trace_template": "t_{{trace_id}}"},
+        )
+        decision = self.policy.validate(
+            tool_call=tool_call,
+            stage="analyze",  # probe_http is verify-stage only
+            agent_mode="gated_actor",
+        )
+        self.assertFalse(decision.allowed)
+        self.assertIn("stage", decision.reason.lower())
+
+    def test_windows_path_traversal_rejected(self):
+        """Windows-style path traversal should be rejected."""
+        self._make_implemented("read_selected_files")
+        self.registry.tools["read_selected_files"].stages = ["analyze"]
+        tool_call = ToolCall(
+            name="read_selected_files",
+            input={"path": "..\\..\\windows\\system32"},
+        )
+        decision = self.policy.validate(
+            tool_call=tool_call,
+            stage="analyze",
+            agent_mode="gated_actor",
+        )
+        self.assertFalse(decision.allowed)
+        self.assertIn("traversal", decision.reason.lower())
+
+    def test_side_effect_requires_runtime_permission(self):
+        """Side-effect tools require runtime permission even if policy allows."""
+        self._make_implemented("install_environment")
+        self.registry.tools["install_environment"].stages = ["env_deploy"]
+        tool_call = ToolCall(
+            name="install_environment",
+            input={"package": "numpy"},
+        )
+        # Without runtime permission
+        decision = self.policy.validate(
+            tool_call=tool_call,
+            stage="env_deploy",
+            agent_mode="gated_actor",
+        )
+        self.assertFalse(decision.allowed)
+        self.assertIn("runtime permission", decision.reason.lower())
+
+        # With runtime permission
+        policy_with_perm = ToolPolicy(
+            registry=self.registry,
+            runtime_policy={"allow_dependency_install": True},
+        )
+        decision = policy_with_perm.validate(
+            tool_call=tool_call,
+            stage="env_deploy",
+            agent_mode="gated_actor",
+        )
+        # Should pass the runtime permission check (may fail on other checks)
+        if not decision.allowed:
+            self.assertNotIn("runtime permission", decision.reason.lower())
+
+    def test_external_host_rejected(self):
+        """External host in URL should be rejected."""
+        tool_call = ToolCall(
+            name="probe_http",
+            input={
+                "url": "http://evil.example.com:8080/",
+                "trace_template": "test_{{trace_id}}",
+            },
+        )
+        decision = self.policy.validate(
+            tool_call=tool_call,
+            stage="verify",
+            agent_mode="gated_actor",
+        )
+        self.assertFalse(decision.allowed)
+        self.assertIn("external", decision.reason.lower())
 
     def test_tool_registry_categories(self):
         """Tool registry should have correct categories."""
@@ -218,6 +335,8 @@ class TestToolPolicyBoundaries(unittest.TestCase):
 
     def test_side_effect_tool_requires_gated_actor(self):
         """Side-effect tools should only work in gated_actor mode."""
+        self._make_implemented("install_environment")
+        self.registry.tools["install_environment"].stages = ["env_deploy"]
         tool_call = ToolCall(
             name="install_environment",
             input={"package": "numpy"},
@@ -247,7 +366,7 @@ class TestToolPolicyBoundaries(unittest.TestCase):
 
         The verify tool returns evidence; final success is determined by Python evidence gate.
         """
-        # This is a design invariant test - verify_evidence returns evidence, not pass/fail
+        # This is a design invariant test - verify_evidence test - verify_evidence returns evidence, not pass/fail
         registry = ToolRegistry()
         verify_tool = registry.get("verify_evidence")
         self.assertIn("trace", verify_tool.get("success_signal", "").lower())

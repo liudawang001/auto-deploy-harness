@@ -140,7 +140,7 @@ class AgentVerifyState:
         if tool_result_dict.get("evidence_path"):
             self.evidence_paths.append(tool_result_dict["evidence_path"])
 
-    def to_result(self, final_status: str = None, stop_reason: str = "", mode: str = "", llm_helped: bool = False) -> Dict:
+    def to_result(self, final_status: str = None, stop_reason: str = "", mode: str = "", llm_helped: bool = False, provider_protocol: str = "json_action") -> Dict:
         return {
             "triggered": True,
             "final_status": final_status or self.verify_status,
@@ -152,6 +152,7 @@ class AgentVerifyState:
             "evidence_paths": self.evidence_paths,
             "stop_reason": stop_reason or self.stop_reason,
             "mode": mode,
+            "provider_protocol": provider_protocol,
         }
 
 

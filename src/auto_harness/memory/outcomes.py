@@ -100,15 +100,27 @@ class SkillOutcomeRecorder:
                 influenced_plan = skill.get("influenced_plan", agent_metadata.get("influenced_plan", False))
                 policy_accepted = not agent_metadata.get("policy_rejected", False)
 
-                # Determine harmful: skill influenced plan, policy accepted, but verify failed/uncertain
+                # Determine harmful: skill introduced an unsafe decision that
+                # policy rejected, or regression explicitly failed.
+                # Final verify failure alone is NOT enough for harmful (Task 11).
                 harmful = False
-                if influenced_plan and policy_accepted:
-                    if final_verify_status and final_verify_status not in ("passed", "pass"):
-                        harmful = True
-                    if agent_metadata.get("policy_rejected_due_to_unsafe_guidance"):
-                        harmful = True
-                    if agent_metadata.get("regression_failed"):
-                        harmful = True
+                if agent_metadata.get("policy_rejected_due_to_unsafe_guidance"):
+                    harmful = True
+                if agent_metadata.get("regression_failed"):
+                    harmful = True
+
+                # Determine outcome (4-state): helped/neutral/harmful/unknown (Task 11)
+                outcome = self._classify_outcome(
+                    influenced_plan=influenced_plan,
+                    policy_accepted=policy_accepted,
+                    harmful=harmful,
+                    final_verify_status=final_verify_status,
+                    trace_verified=trace_verified,
+                    has_causal_evidence=bool(
+                        agent_metadata.get("baseline_ablation")
+                        or agent_metadata.get("accepted_decision_effective")
+                    ),
+                )
 
                 record = {
                     "created_at": utc_now_iso(),
@@ -130,6 +142,7 @@ class SkillOutcomeRecorder:
                     "tool_selected": agent_metadata.get("tool_selected", ""),
                     "policy_rejected": agent_metadata.get("policy_rejected", False),
                     "harmful": harmful,
+                    "outcome": outcome,
                 }
                 self._append(record)
                 records.append(record)
@@ -194,6 +207,36 @@ class SkillOutcomeRecorder:
         """Append a record to the outcomes JSONL file."""
         with self.outcomes_path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    def _classify_outcome(
+        self,
+        *,
+        influenced_plan: bool,
+        policy_accepted: bool,
+        harmful: bool,
+        final_verify_status: str,
+        trace_verified: bool,
+        has_causal_evidence: bool,
+    ) -> str:
+        """Classify skill outcome into one of 4 states (Task 11).
+
+        - helped: causal evidence (baseline/ablation) + effective action + pass
+        - harmful: skill decision rejected as unsafe, or regression failed
+        - neutral: skill selected but did not change decision
+        - unknown: changed decision but no causal evidence
+
+        Final verify failure alone is NOT enough for harmful.
+        """
+        if harmful:
+            return "harmful"
+        if influenced_plan and policy_accepted:
+            # Changed decision and accepted
+            if has_causal_evidence and final_verify_status in ("passed", "pass"):
+                return "helped"
+            # No causal evidence -> unknown (not harmful)
+            return "unknown"
+        # Selected but did not change decision
+        return "neutral"
 
     def _read_entries(self) -> List[Dict]:
         """Read all entries from the outcomes JSONL file."""

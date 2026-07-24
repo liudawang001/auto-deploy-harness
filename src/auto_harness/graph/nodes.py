@@ -7,6 +7,7 @@ that LangGraph merges according to the state's reducer annotations.
 GraphNodeDependencies holds all injectable callables so that nodes
 can be tested with mocks.
 """
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -40,6 +41,7 @@ class GraphNodeDependencies:
     repair_overlay: Any = None
     recovery_adapter: Any = None
     runtime_policy_factory: Any = None
+    route_skills: Any = None
 
 
 def stage_data(state, stage):
@@ -104,13 +106,24 @@ def make_recovery_gate_node(stage, deps):
         elif decision.decision == "approval":
             update["approval_kind"] = "recovery"
             update["approval_resume_target"] = stage
-            update["pending_approval"] = {
-                "approval_id": "recovery-%s-%s" % (stage, utc_now_iso().replace(":", "-").replace(".", "-")),
-                "approval_kind": "recovery",
-                "requested_action": "cleanup_then_retry",
-                "risk": "high",
-                "reason": decision.stop_reason or "manual_recovery_required",
-            }
+            operation_id = decision.operation.get("operation_id", "")
+            if operation_id:
+                existing = state.get("pending_approval")
+                if existing and existing.get("operation_id") == operation_id:
+                    # Reuse existing request on checkpoint replay
+                    update["pending_approval"] = existing
+                else:
+                    from auto_harness.graph.approval import build_approval_request
+                    update["pending_approval"] = build_approval_request(
+                        approval_id="recovery-%s-%s" % (stage, operation_id[:8]),
+                        operation_id=operation_id,
+                        approval_kind="recovery",
+                        requested_action="cleanup_then_retry",
+                        risk="high",
+                        reason=decision.stop_reason or "manual_recovery_required",
+                    )
+            else:
+                update["stop_reason"] = "approval_operation_id_missing"
         return update
     return recovery_gate
 
@@ -146,6 +159,7 @@ def make_stage_node(stage, deps):
             dry_run=state["dry_run"], stage_hints=hints,
             repair_overlay=current_overlay,
             runtime_policy=state.get("runtime_policy", {}),
+            skill_context=state.get("skill_contexts", {}).get(stage, {}),
         )
 
         results = dict(state.get("stage_results", {}))
@@ -197,7 +211,87 @@ class DeploymentGraphNodes:
     def build_snapshot(self, state):
         snapshot = self.deps.build_snapshot(state)
         path = self._artifacts(state).write_project_snapshot(snapshot)
-        return {"snapshot_path": str(path), "current_stage": "snapshot"}
+        # Update state with skill/memory fields from snapshot (Task 9)
+        route_path = Path(state["run_dir"]) / "skills" / "routes" / "plan.json"
+        update = {
+            "snapshot_path": str(path),
+            "current_stage": "snapshot",
+            "memory_hits": snapshot.get("memory_hits", []),
+            "selected_skills": {
+                **state.get("selected_skills", {}),
+                "plan": snapshot.get("selected_skills", []),
+            },
+            "skill_contexts": {
+                **state.get("skill_contexts", {}),
+                "plan": snapshot.get("skill_context", {}),
+            },
+            "skill_route_paths": {
+                **state.get("skill_route_paths", {}),
+                "plan": str(route_path) if route_path.exists() else "",
+            },
+        }
+        return update
+
+    def route_skills(self, state, stage):
+        """Route skills for a pipeline stage (Task 10).
+
+        Routes skills for verify or repair stages, writes a route artifact,
+        and updates state with selected skills, skill contexts, and route paths.
+        Returns a stop_reason dict if route_skills dependency is unavailable.
+        """
+        if not self.deps.route_skills:
+            return {"stop_reason": "skill_router_unavailable"}
+
+        analysis = state.get("compiled_analysis", {})
+        failure_category = (
+            state.get("diagnosis", {}).get("category", "")
+            if isinstance(state.get("diagnosis"), dict)
+            else ""
+        )
+        allowed_tools = {
+            "verify": [
+                "probe_http",
+                "discover_gradio_api",
+                "discover_openapi_schema",
+                "probe_browser_dom",
+            ],
+            "repair": [
+                "install_package",
+                "install_conda_package",
+                "update_verify_hint",
+                "rerun_from_stage",
+                "select_run_candidate",
+            ],
+        }.get(stage, [])
+
+        routed = self.deps.route_skills(
+            stage=stage,
+            analysis=analysis,
+            failure_category=failure_category,
+            allowed_tools=allowed_tools,
+        )
+
+        route_dir = Path(state["run_dir"]) / "skills" / "routes"
+        route_dir.mkdir(parents=True, exist_ok=True)
+        suffix = ""
+        if stage == "repair":
+            suffix = "_%s" % (int(state.get("repair_count", 0)) + 1)
+        path = route_dir / ("%s%s.json" % (stage, suffix))
+        write_json(path, routed["artifact"])
+
+        selected = dict(state.get("selected_skills", {}))
+        selected[stage] = routed["selected_skills"]
+        contexts = dict(state.get("skill_contexts", {}))
+        contexts[stage] = routed["skill_context"]
+        paths = dict(state.get("skill_route_paths", {}))
+        paths[stage] = str(path)
+
+        return {
+            "selected_skills": selected,
+            "skill_contexts": contexts,
+            "skill_route_paths": paths,
+            "current_stage": "route_%s_skills" % stage,
+        }
 
     def plan(self, state):
         snapshot = read_json(Path(state["snapshot_path"]))
@@ -254,8 +348,37 @@ class DeploymentGraphNodes:
 
     def replan(self, state):
         snapshot, previous_plan, failure = self.deps.build_replan_input(state)
+        # Route replan skills (Task 10)
+        skill_context = {}
+        if self.deps.route_skills:
+            try:
+                routed = self.deps.route_skills(
+                    stage="replan",
+                    analysis=snapshot.get("detected_signals", {})
+                    if isinstance(snapshot, dict) else {},
+                    failure_category=(
+                        state.get("diagnosis", {}).get("category", "")
+                        if isinstance(state.get("diagnosis"), dict) else ""
+                    ),
+                    allowed_tools=[],
+                )
+                skill_context = routed.get("skill_context", {})
+                # Write replan route artifact
+                route_dir = Path(state["run_dir"]) / "skills" / "routes"
+                route_dir.mkdir(parents=True, exist_ok=True)
+                write_json(route_dir / "replan.json", routed.get("artifact", {}))
+                selected = dict(state.get("selected_skills", {}))
+                selected["replan"] = routed.get("selected_skills", [])
+                contexts = dict(state.get("skill_contexts", {}))
+                contexts["replan"] = skill_context
+            except Exception:
+                pass
+            failure["skill_context"] = skill_context
         try:
-            raw = self.deps.planner.replan(snapshot, previous_plan, failure)
+            raw = self.deps.planner.replan(
+                snapshot, previous_plan, failure,
+                skill_context=skill_context,
+            )
         except Exception as exc:
             return {"llm_error": _sanitize_error(exc), "stop_reason": "llm_replan_failed", "raw_plan_path": "", "previous_plan_path": "", "replan_count": int(state.get("replan_count", 0)) + 1}
         revision = int(state.get("replan_count", 0)) + 1
@@ -265,7 +388,22 @@ class DeploymentGraphNodes:
         previous_path = replans_dir / ("replan_%s.previous.json" % revision)
         write_json(previous_path, previous_plan)
         write_json(path, {"raw_text": raw.text[:10000], "revision": revision})
-        return {"raw_plan_path": str(path), "previous_plan_path": str(previous_path), "replan_count": revision, "stop_reason": ""}
+        update = {
+            "raw_plan_path": str(path),
+            "previous_plan_path": str(previous_path),
+            "replan_count": revision,
+            "stop_reason": "",
+        }
+        if skill_context:
+            update["skill_contexts"] = {
+                **state.get("skill_contexts", {}),
+                "replan": skill_context,
+            }
+            update["selected_skills"] = {
+                **state.get("selected_skills", {}),
+                "replan": selected.get("replan", []) if 'selected' in dir() else [],
+            }
+        return update
 
     def observe_failure(self, state):
         observer = self.deps.failure_observer or FailureObserver()
@@ -385,6 +523,173 @@ class DeploymentGraphNodes:
         reports_dir = run_dir / "reports"
         reports_dir.mkdir(parents=True, exist_ok=True)
         write_json(reports_dir / "recovery_summary.json", summary)
+
+    def finalize_learning(self, state):
+        """finalize_learning node: record verified memory and skill outcomes.
+
+        Only runs when verify passes (or after verify failed for neutral/harmful
+        outcome recording). Does NOT write verified success memory for
+        verify failures.
+
+        Writes:
+        - reports/verified_memory.json
+        - reports/skill_outcomes.json
+        """
+        from auto_harness.memory.success import VerifiedMemoryRecorder
+        from auto_harness.memory.outcomes import SkillOutcomeRecorder
+
+        run_dir = Path(state["run_dir"])
+        reports_dir = run_dir / "reports"
+        reports_dir.mkdir(parents=True, exist_ok=True)
+
+        # Assemble pipeline_results from state
+        pipeline_results = dict(state.get("stage_results", {}))
+        repair_apply_result = dict(state.get("repair_apply_result", {}) or {})
+        repair_plan = dict(state.get("repair_plan", {}) or {})
+
+        # Finalize the latest repair attempt only after the post-repair verify.
+        repair_count = int(state.get("repair_count", 0))
+        if repair_count > 0 and repair_apply_result.get("status") == "applied":
+            from auto_harness.repair.evidence import (
+                build_repair_attempt,
+                compute_fresh_trace,
+                compute_repair_verified,
+                is_effective_repair_action,
+            )
+
+            verify = pipeline_results.get("verify", {})
+            verify_data = verify.get("data", {}) if isinstance(verify, dict) else {}
+            after_trace = str(verify_data.get("trace_id") or "")
+            before_trace = str(
+                repair_apply_result.get("verification_trace_before") or ""
+            )
+            checks = verify_data.get("checks", [])
+            evidence_contains_after_trace = any(
+                isinstance(check, dict)
+                and check.get("status") in ("pass", "passed")
+                and after_trace
+                and after_trace in json.dumps(check, ensure_ascii=False)
+                for check in checks
+            )
+            action_results = list(
+                repair_apply_result.get("action_results") or []
+            )
+            effective_action_count = sum(
+                1
+                for item in action_results
+                if is_effective_repair_action(item)
+            )
+            metadata_only_count = sum(
+                1
+                for item in action_results
+                if item.get("metadata_only")
+                or item.get("status") == "metadata_only"
+            )
+            fresh_trace = compute_fresh_trace(before_trace, after_trace)
+            resume_executed = bool(state.get("repair_resume_executed"))
+            repair_verified = compute_repair_verified(
+                effective_action_count=effective_action_count,
+                resume_executed=resume_executed,
+                verify_status_after=verify.get("status", ""),
+                evidence_contains_after_trace=evidence_contains_after_trace,
+                fresh_trace=fresh_trace,
+            )
+            repair_apply_result.update({
+                "effective_action_count": effective_action_count,
+                "metadata_only_count": metadata_only_count,
+                "repair_effective": effective_action_count > 0,
+                "repair_verified": repair_verified,
+                "resume_executed": resume_executed,
+                "verification_trace_id": after_trace,
+                "fresh_trace": fresh_trace,
+                "evidence_contains_after_trace": evidence_contains_after_trace,
+            })
+            repairs_dir = run_dir / "repairs"
+            apply_path = state.get("repair_apply_path", "")
+            if apply_path:
+                write_json(Path(apply_path), repair_apply_result)
+            write_json(
+                repairs_dir / "repair_apply_result.json",
+                repair_apply_result,
+            )
+            attempt = build_repair_attempt(
+                attempt=repair_count,
+                failure_signature_before=state.get(
+                    "failure_signature", ""
+                ),
+                diagnosis_path=state.get("diagnosis_path", ""),
+                plan_path=state.get("repair_plan_path", ""),
+                policy_path=state.get("repair_policy_path", ""),
+                apply_path=apply_path,
+                resume_from_stage=state.get("repair_resume_stage", ""),
+                effective_action_count=effective_action_count,
+                metadata_only_count=metadata_only_count,
+                verify_status_after=verify.get("status", ""),
+                verification_trace_id=after_trace,
+                fresh_trace=fresh_trace,
+                repair_verified=repair_verified,
+            )
+            write_json(
+                repairs_dir / ("attempt_%s.json" % repair_count),
+                attempt,
+            )
+
+        # Record verified memory if conditions met
+        verified_memory_path = ""
+        try:
+            config = self.deps.runtime_config
+            if config:
+                recorder = VerifiedMemoryRecorder(Path(config.memory_dir))
+                result = recorder.record_if_verified(
+                    run_dir,
+                    pipeline_results,
+                    {},  # agent_metrics from state if available
+                    repair_apply_result=repair_apply_result,
+                    repair_plan=repair_plan,
+                )
+                if result:
+                    verified_memory_path = str(reports_dir / "verified_memory.json")
+        except Exception:
+            pass  # Learning recording must not block the pipeline
+
+        # Record skill outcomes
+        skill_outcome_paths = []
+        try:
+            config = self.deps.runtime_config
+            if config:
+                outcome_recorder = SkillOutcomeRecorder(Path(config.memory_dir))
+                outcome_records = []
+                for stage, skills in state.get("selected_skills", {}).items():
+                    if not skills:
+                        continue
+                    outcome = outcome_recorder.record_run(
+                        run_id=state.get("task_id", ""),
+                        stage=stage,
+                        selected_skills=skills,
+                        result=pipeline_results.get(stage, {}),
+                        agent_metadata={
+                            "final_verify_status": state.get("verify_status", ""),
+                            "trace_verified": bool(
+                                repair_apply_result.get("repair_verified")
+                            ),
+                        },
+                    )
+                    outcome_records.extend(outcome.get("records", []))
+                outcome_path = str(reports_dir / "skill_outcomes.json")
+                write_json(Path(outcome_path), {
+                    "task_id": state.get("task_id", ""),
+                    "recorded_count": len(outcome_records),
+                    "records": outcome_records,
+                })
+                skill_outcome_paths.append(outcome_path)
+        except Exception:
+            pass  # Outcome recording must not block the pipeline
+
+        return {
+            "current_stage": "finalize_learning",
+            "verified_memory_path": verified_memory_path,
+            "skill_outcome_paths": skill_outcome_paths,
+        }
 
     def report(self, state):
         self._artifacts(state).write_pipeline_results(state.get("stage_results", {}))

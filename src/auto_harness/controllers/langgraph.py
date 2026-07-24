@@ -104,6 +104,7 @@ def build_initial_state(context: DeploymentContext, max_replans: int, config=Non
         "repair_count": 0,
         "max_repairs": getattr(config, "langgraph_max_repairs", 2) if config else 2,
         "repair_resume_stage": "",
+        "repair_resume_executed": False,
         # Recovery
         "pending_operation": None,
         "pending_operation_id": "",
@@ -120,6 +121,13 @@ def build_initial_state(context: DeploymentContext, max_replans: int, config=Non
         "llm_required": True,
         "llm_provider": "",
         "llm_error": "",
+        # Memory/Skill fields (Task 8)
+        "memory_hits": [],
+        "selected_skills": {},
+        "skill_contexts": {},
+        "skill_route_paths": {},
+        "verified_memory_path": "",
+        "skill_outcome_paths": [],
     }
 
 
@@ -179,7 +187,7 @@ def build_graph(deps, checkpointer):
         """Cleanup node: execute approved cleanup of external resources.
 
         Only runs when approved_action is "cleanup_then_retry".
-        Re-verifies ownership before cleanup.
+        Re-verifies ownership before cleanup via OwnedResourceCleanupExecutor.
         """
         from auto_harness.graph.approval import cleanup_node
         recovery_adapter = deps.recovery_adapter
@@ -193,13 +201,25 @@ def build_graph(deps, checkpointer):
             "journal": journal,
             "reconcilers": getattr(recovery_adapter, "reconcilers", {}),
         })()
-        # Use a safe cleanup executor that marks the operation as retryable
-        class SafeCleanupExecutor:
-            def remove_owned_resource(self, operation, check):
-                return {"success": True, "operation_id": operation.get("operation_id", "")}
-        return cleanup_node(state, recovery, SafeCleanupExecutor())
+        # Use the real OwnedResourceCleanupExecutor from dependencies,
+        # or construct one if dependencies don't provide it.
+        cleanup_executor = getattr(deps, "cleanup_executor", None)
+        if cleanup_executor is None:
+            from auto_harness.recovery.cleanup import OwnedResourceCleanupExecutor
+            cleanup_executor = OwnedResourceCleanupExecutor()
+        return cleanup_node(state, recovery, cleanup_executor)
 
     builder.add_node("cleanup", _cleanup)
+
+    # Skill routing nodes (Task 10)
+    builder.add_node(
+        "route_verify_skills",
+        lambda state: nodes.route_skills(state, "verify"),
+    )
+    builder.add_node(
+        "route_repair_skills",
+        lambda state: nodes.route_skills(state, "repair"),
+    )
 
     builder.add_node("report", nodes.report)
     builder.add_node("stop", nodes.stop)
@@ -245,7 +265,7 @@ def build_graph(deps, checkpointer):
             "env_deploy": "recover_env_deploy",
             "model_prepare": "recover_model_prepare",
             "runner": "recover_runner",
-            "verify": "verify",
+            "verify": "route_verify_skills",
         },
     )
 
@@ -282,18 +302,24 @@ def build_graph(deps, checkpointer):
     # model_prepare -> recover_runner -> runner
     builder.add_conditional_edges(
         "recover_runner", _route_after_recovery,
-        {"execute": "runner", "reuse": "verify", "approval": "approval", "stop": "stop"},
+        {"execute": "runner", "reuse": "route_verify_skills", "approval": "approval", "stop": "stop"},
     )
     builder.add_conditional_edges(
         "runner", route_after_stage,
-        {"continue": "verify", "observe_failure": "observe_failure"},
+        {"continue": "route_verify_skills", "observe_failure": "observe_failure"},
     )
+
+    # Skill routing before verify (Task 10)
+    builder.add_edge("route_verify_skills", "verify")
 
     # Verify has special routing
     builder.add_conditional_edges(
         "verify", route_after_verify,
-        {"report": "report", "observe_failure": "observe_failure"},
+        {"report": "finalize_learning", "observe_failure": "observe_failure"},
     )
+    # finalize_learning -> report (Task 11)
+    builder.add_node("finalize_learning", nodes.finalize_learning)
+    builder.add_edge("finalize_learning", "report")
     # Replan routes back to parse
     builder.add_conditional_edges(
         "replan", route_after_replan,
@@ -303,8 +329,10 @@ def build_graph(deps, checkpointer):
     builder.add_edge("observe_failure", "diagnose")
     builder.add_conditional_edges(
         "diagnose", route_after_diagnose,
-        {"repair_plan": "repair_plan", "replan": "replan", "stop": "stop"},
+        {"repair_plan": "route_repair_skills", "replan": "replan", "stop": "stop"},
     )
+    # Skill routing before repair (Task 10)
+    builder.add_edge("route_repair_skills", "repair_plan")
     # Repair pipeline
     builder.add_edge("repair_plan", "repair_policy")
     builder.add_conditional_edges(
@@ -322,7 +350,7 @@ def build_graph(deps, checkpointer):
             "env_deploy": "recover_env_deploy",
             "model_prepare": "recover_model_prepare",
             "runner": "recover_runner",
-            "verify": "verify",
+            "verify": "route_verify_skills",
         },
     )
     # Approval routing (includes cleanup path)

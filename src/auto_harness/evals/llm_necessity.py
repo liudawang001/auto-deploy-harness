@@ -8,27 +8,212 @@ Per design doc:
 - llm_helped=true only when state actually improved
 - Evidence artifacts must exist
 - Must actually run baseline and agent pipelines (not read expectations)
+- No HarnessOrchestrator references - uses TaskRunner only
+- baseline and agent use isolated workspaces
+- Exceptions produce infrastructure_error, never completed
 """
 import json
 import shutil
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from auto_harness.models.base import read_json, write_json
 from auto_harness.utils.time import utc_now_iso
+
+
+def _load_run_result(run_dir: Path) -> Dict[str, Any]:
+    """Load and normalize run result from a TaskRunner run directory.
+
+    Returns a fixed schema dict regardless of internal artifact format.
+    Missing controller_result.json means infrastructure_error.
+
+    Args:
+        run_dir: Path to the run directory (e.g., runs/<task_id>).
+
+    Returns:
+        Normalized result dict with status, verify_status, trace_id, etc.
+    """
+    controller_result_path = run_dir / "reports" / "controller_result.json"
+    if not controller_result_path.exists():
+        return {
+            "status": "infrastructure_error",
+            "task_id": run_dir.name,
+            "controller": "",
+            "final_status": "",
+            "verify_status": "",
+            "trace_id": "",
+            "evidence_paths": [],
+            "accepted_decisions": [],
+            "effective_actions": [],
+            "duration_ms": 0,
+            "token_usage": {},
+            "error": "controller_result.json not found",
+        }
+
+    try:
+        cr = read_json(controller_result_path)
+    except (OSError, ValueError) as exc:
+        return {
+            "status": "infrastructure_error",
+            "task_id": run_dir.name,
+            "controller": "",
+            "final_status": "",
+            "verify_status": "",
+            "trace_id": "",
+            "evidence_paths": [],
+            "accepted_decisions": [],
+            "effective_actions": [],
+            "duration_ms": 0,
+            "token_usage": {},
+            "error": "failed to read controller_result: %s" % str(exc)[:500],
+        }
+
+    final_status = str(cr.get("status") or cr.get("final_status") or "")
+    verify_status = str(cr.get("verify_status") or "")
+    verify = cr.get("verify", {})
+    if not verify_status and isinstance(verify, dict):
+        verify_status = str(verify.get("status") or "")
+
+    # Extract trace_id from the actual verify stage artifact.
+    trace_id = ""
+    pipeline_path = run_dir / "reports" / "pipeline_results.json"
+    if pipeline_path.exists():
+        try:
+            pipeline = read_json(pipeline_path)
+            verify_result = pipeline.get("verify", {})
+            verify_data = (
+                verify_result.get("data", {})
+                if isinstance(verify_result, dict)
+                else {}
+            )
+            trace_id = str(verify_data.get("trace_id") or "")
+            if not verify_status and isinstance(verify_result, dict):
+                verify_status = str(verify_result.get("status") or "")
+        except (OSError, ValueError):
+            pass
+
+    # Collect evidence paths
+    evidence_paths = []
+    evidence_dir = run_dir / "evidence"
+    if evidence_dir.exists():
+        evidence_paths = [str(p) for p in evidence_dir.glob("*.json")]
+
+    trace_verified = _trace_is_strongly_verified(run_dir, trace_id)
+
+    # Load contribution evidence from either controller implementation.
+    contribution_paths = [
+        run_dir / "reports" / "llm_contribution_evidence.json",
+        run_dir / "reports" / "agent_contribution.json",
+    ]
+    accepted_decisions = []
+    effective_actions = []
+    contribution_path = next(
+        (path for path in contribution_paths if path.exists()),
+        None,
+    )
+    if contribution_path:
+        try:
+            contrib = read_json(contribution_path)
+            # Extract gate results as accepted decisions
+            if isinstance(contrib, dict):
+                gate_summary = contrib.get("gate_summary", [])
+                for gate in gate_summary:
+                    if isinstance(gate, dict) and gate.get("policy_allowed"):
+                        accepted_decisions.append(gate)
+                        if gate.get("executed") or gate.get("applied"):
+                            effective_actions.append(gate)
+        except (OSError, ValueError, NameError):
+            pass
+    repair_apply_path = run_dir / "repairs" / "repair_apply_result.json"
+    if repair_apply_path.exists():
+        try:
+            repair_apply = read_json(repair_apply_path)
+            if repair_apply.get("repair_verified"):
+                effective_actions.append({
+                    "source": "repair_apply",
+                    "executed": True,
+                    "repair_verified": True,
+                })
+        except (OSError, ValueError):
+            pass
+
+    if not final_status:
+        return {
+            "status": "infrastructure_error",
+            "task_id": cr.get("task_id", run_dir.name),
+            "controller": cr.get("controller", ""),
+            "final_status": "",
+            "verify_status": verify_status,
+            "trace_id": trace_id,
+            "trace_verified": trace_verified,
+            "evidence_paths": evidence_paths,
+            "accepted_decisions": accepted_decisions,
+            "effective_actions": effective_actions,
+            "duration_ms": 0,
+            "token_usage": {},
+            "error": "controller_result status is missing",
+        }
+
+    return {
+        "status": "completed",
+        "task_id": cr.get("task_id", run_dir.name),
+        "controller": cr.get("controller", "langgraph"),
+        "final_status": final_status,
+        "verify_status": verify_status,
+        "trace_id": trace_id,
+        "trace_verified": trace_verified,
+        "evidence_paths": evidence_paths,
+        "accepted_decisions": accepted_decisions,
+        "effective_actions": effective_actions,
+        "duration_ms": cr.get("duration_ms", 0),
+        "token_usage": cr.get("token_usage", {}),
+        "error": "",
+    }
+
+
+def _trace_is_strongly_verified(run_dir: Path, trace_id: str) -> bool:
+    """Return true only when a passed evidence check contains the current trace."""
+    if not trace_id:
+        return False
+    for path in (run_dir / "evidence").glob("*.json"):
+        try:
+            payload = read_json(path)
+        except (OSError, ValueError):
+            continue
+        checks = payload.get("checks", []) if isinstance(payload, dict) else []
+        if not checks and isinstance(payload, dict) and isinstance(payload.get("check"), dict):
+            checks = [payload["check"]]
+        for check in checks:
+            if (
+                isinstance(check, dict)
+                and check.get("status") in ("pass", "passed")
+                and trace_id in json.dumps(check, ensure_ascii=False)
+            ):
+                return True
+    return False
 
 
 class LLMNecessityEvaluator:
     """Evaluates LLM necessity by actually running baseline vs agent pipelines.
 
     For each case in the manifest:
-    1. Run baseline pipeline (agent_mode=off, no decision gates)
-    2. Run agent pipeline (agent_mode=gated_actor, all gates, runtime loop)
+    1. Run baseline pipeline (agent_mode=off, deterministic planner, no LLM nodes)
+    2. Run agent pipeline (agent_mode=gated_actor, LLM planner, all nodes)
     3. Compare results to determine llm_required and llm_helped
+
+    Both baseline and agent use LangGraph controller to avoid controller
+    differences polluting the comparison.
     """
 
-    def __init__(self, output_dir: Path = None) -> None:
-        self.output_dir = output_dir or Path("runs/evals/llm_necessity")
+    def __init__(
+        self,
+        output_dir: Path = None,
+        config_factory=None,
+        runner_factory=None,
+    ) -> None:
+        self.output_dir = Path(output_dir or "runs/evals/llm_necessity")
+        self.config_factory = config_factory
+        self.runner_factory = runner_factory
 
     def evaluate_manifest(self, manifest_path: Path, output_path: Path = None) -> Dict:
         """Evaluate all cases in the manifest and generate a report.
@@ -62,6 +247,12 @@ class LLMNecessityEvaluator:
             "summary": summary,
         }
 
+        # If any infrastructure errors, report status should reflect it
+        infra_errors = [r for r in results if r.get("status") == "infrastructure_error"]
+        if infra_errors:
+            report["status"] = "failed"
+            report["summary"]["infrastructure_error_count"] = len(infra_errors)
+
         if output_path:
             output_path = Path(output_path)
             output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -72,14 +263,17 @@ class LLMNecessityEvaluator:
     def evaluate_case(self, case: Dict) -> Dict:
         """Evaluate a single case by running baseline and agent pipelines.
 
+        Both baseline and agent use LangGraph controller.
+        Baseline: deterministic planner, no LLM nodes.
+        Agent: LLM planner, all LLM nodes enabled.
+
         Args:
-            case: Case dict from manifest
+            case: Case dict from manifest with case_id, fixture_dir, etc.
 
         Returns:
             Result dict with llm_required, llm_helped, evidence
         """
         case_id = case.get("case_id", "")
-        target_gate = case.get("target_gate", "")
         fixture_dir = case.get("fixture_dir", "")
 
         # Create output directory for this case
@@ -98,27 +292,32 @@ class LLMNecessityEvaluator:
         fixture_exists = fixture_path.exists() and any(fixture_path.iterdir())
 
         if not fixture_exists:
-            return self._build_error_result(case_id, target_gate, "fixture_not_found", fixture_dir)
+            return self._build_error_result(
+                case_id, "infrastructure_error",
+                "fixture not found: %s" % fixture_dir,
+            )
+
+        # Isolate fixture: copy to separate baseline/agent source dirs
+        baseline_source = case_output_dir / "baseline" / "source"
+        agent_source = case_output_dir / "agent" / "source"
+        shutil.copytree(str(fixture_path), str(baseline_source))
+        shutil.copytree(str(fixture_path), str(agent_source))
 
         # Run baseline pipeline
         baseline_result = self._run_pipeline(
-            fixture_dir=fixture_path,
+            fixture_dir=baseline_source,
             output_dir=baseline_dir,
             mode="off",
-            gates=False,
-            runtime_loop=False,
-            dry_run=True,
+            case=case,
         )
 
         # Run agent pipeline
         agent_result = self._run_pipeline(
-            fixture_dir=fixture_path,
+            fixture_dir=agent_source,
             output_dir=agent_dir,
             mode="gated_actor",
-            gates=True,
-            runtime_loop=True,
+            case=case,
             provider="mock",
-            dry_run=True,
         )
 
         # Compare results
@@ -135,162 +334,216 @@ class LLMNecessityEvaluator:
         fixture_dir: Path,
         output_dir: Path,
         mode: str,
-        gates: bool,
-        runtime_loop: bool,
+        case: Dict,
         provider: str = None,
-        dry_run: bool = True,
     ) -> Dict:
-        """Run a pipeline with the given configuration.
+        """Run a pipeline with the given configuration using TaskRunner.
 
-        This actually invokes the harness modules, not just reads expectations.
+        Both baseline and agent use LangGraph controller to avoid
+        controller differences polluting the comparison.
         """
         try:
-            # Import here to avoid circular imports
             from auto_harness.config import HarnessConfig
-            from auto_harness.orchestrator import HarnessOrchestrator
-            from auto_harness.state import StateStore
+            from auto_harness.orchestrator import TaskRunner
 
-            # Create config
-            config = HarnessConfig(
-                agent_mode=mode,
-                agent_enable_decision_gates=gates,
-                agent_enable_runtime_loop=runtime_loop,
-                dry_run=dry_run,
+            # Build config with only real fields
+            config_factory = self.config_factory or HarnessConfig
+            config = config_factory()
+
+            # Set common fields
+            run_root = Path(output_dir)
+            config.runs_dir = str(run_root / "runs")
+            config.memory_dir = str(run_root / "memory")
+            config.model_cache_dir = str(run_root / "model_cache")
+            config.default_controller = "langgraph"
+
+            if mode == "off":
+                # Baseline: deterministic planner, no LLM nodes
+                config.agent_mode = "off"
+                config.langgraph_planner_mode = "deterministic"
+                config.langgraph_require_llm = False
+                config.langgraph_enable_diagnose = False
+                config.langgraph_enable_repair = False
+                config.langgraph_enable_agent_verify = False
+            else:
+                # Agent: LLM planner, all LLM nodes enabled
+                config.agent_mode = "gated_actor"
+                config.langgraph_planner_mode = "llm"
+                config.langgraph_require_llm = True
+                config.langgraph_enable_diagnose = True
+                config.langgraph_enable_repair = True
+                config.langgraph_enable_agent_verify = True
+                if provider:
+                    config.agent_plan_first_provider = provider
+                    config.agent_provider = provider
+
+            # Run permissions from case
+            config.allow_dependency_install = case.get("allow_install", False)
+            config.allow_service_start = case.get("allow_start", False)
+
+            # Create and run
+            runner_factory = self.runner_factory or TaskRunner
+            runner = runner_factory(config)
+
+            task_id = runner.deploy(
+                repo_url=str(fixture_dir),
+                name="%s-%s" % (case.get("case_id", "eval"), mode),
+                dry_run=case.get("dry_run", True),
+                skip_clone=False,
+                allow_install=case.get("allow_install", False),
+                allow_start=case.get("allow_start", False),
+                controller="langgraph",
             )
 
-            # Create orchestrator
-            store = StateStore(output_dir)
-            orchestrator = HarnessOrchestrator(config=config, store=store)
+            # Load results from the run directory
+            run_dir = Path(config.runs_dir) / task_id
+            return _load_run_result(run_dir)
 
-            # Run the pipeline
-            task_id = "eval_%s" % output_dir.name
-            orchestrator.run_from_dir(task_id, fixture_dir, dry_run=dry_run)
-
-            # Load results
-            results_path = output_dir / task_id / "reports" / "pipeline_results.json"
-            if results_path.exists():
-                return read_json(results_path)
-
-            return {"status": "no_results", "task_id": task_id}
-
-        except Exception as e:
-            return {"status": "error", "error": str(e)}
+        except Exception as exc:
+            return {
+                "status": "infrastructure_error",
+                "task_id": "",
+                "controller": "langgraph",
+                "final_status": "",
+                "verify_status": "",
+                "trace_id": "",
+                "evidence_paths": [],
+                "accepted_decisions": [],
+                "effective_actions": [],
+                "duration_ms": 0,
+                "token_usage": {},
+                "error_type": type(exc).__name__,
+                "error": str(exc)[:2000],
+            }
 
     def _compare_runs(self, baseline: Dict, agent: Dict, case: Dict) -> Dict:
         """Compare baseline and agent runs to determine llm_required and llm_helped."""
         case_id = case.get("case_id", "")
-        target_gate = case.get("target_gate", "")
 
-        # Get status for the target stage
-        baseline_status = self._get_stage_status(baseline, target_gate)
-        agent_status = self._get_stage_status(agent, target_gate)
+        baseline_status = baseline.get("final_status", baseline.get("status", "unknown"))
+        agent_status = agent.get("final_status", agent.get("status", "unknown"))
+        baseline_verify = baseline.get("verify_status", "")
+        agent_verify = agent.get("verify_status", "")
 
-        # Check for LLM decisions in agent run
-        agent_decisions = agent.get("decisions", [])
-        accepted_decision = self._find_accepted_decision(agent_decisions, target_gate)
+        # Check for infrastructure errors
+        if baseline.get("status") == "infrastructure_error":
+            return {
+                "case_id": case_id,
+                "status": "infrastructure_error",
+                "baseline_status": "infrastructure_error",
+                "agent_status": agent_status,
+                "llm_required": False,
+                "llm_helped": False,
+                "llm_required_status": "unknown_infrastructure_error",
+                "error": baseline.get("error", ""),
+            }
 
-        # Check for verify evidence
-        verify_evidence = agent.get("verify", {})
-        final_verify_passed = verify_evidence.get("status") in ("passed", "pass")
-        evidence_path_exists = bool(verify_evidence.get("evidence_paths"))
+        if agent.get("status") == "infrastructure_error":
+            return {
+                "case_id": case_id,
+                "status": "infrastructure_error",
+                "baseline_status": baseline_status,
+                "agent_status": "infrastructure_error",
+                "llm_required": False,
+                "llm_helped": False,
+                "llm_required_status": "unknown_infrastructure_error",
+                "error": agent.get("error", ""),
+            }
 
-        # Determine llm_required
-        baseline_failed = baseline_status in ("failed", "uncertain")
-        agent_passed = agent_status in ("passed", "pass")
-        has_accepted_decision = accepted_decision is not None
-        policy_allowed = accepted_decision.get("policy_allowed", False) if accepted_decision else False
-        tool_executed = accepted_decision.get("executed", False) if accepted_decision else False
-
-        llm_required = (
-            baseline_failed
-            and agent_passed
-            and has_accepted_decision
-            and policy_allowed
-            and (tool_executed or accepted_decision.get("applied", False))
+        # Determine baseline failure
+        baseline_failed = (
+            baseline.get("status") == "completed"
+            and (
+                baseline_status in ("failed", "stopped")
+                or baseline_verify in ("failed", "fail", "uncertain")
+            )
         )
 
-        # For safety cases, llm_required is False
-        if "malicious" in case_id:
+        # Determine agent pass with strong verify
+        agent_passed = (
+            agent.get("status") == "completed"
+            and agent_verify in ("pass", "passed")
+            and bool(agent.get("trace_id"))
+            and agent.get("trace_verified") is True
+        )
+
+        # Effective decisions from agent
+        effective = agent.get("effective_actions", [])
+
+        # Determine llm_helped and llm_required
+        llm_helped = bool(agent_passed and effective)
+
+        if baseline.get("status") == "infrastructure_error":
             llm_required = False
+            llm_required_status = "unknown_infrastructure_error"
+        elif baseline_failed and llm_helped:
+            llm_required = True
+            llm_required_status = "proven_by_baseline_agent_delta"
+        else:
+            llm_required = False
+            llm_required_status = "baseline_did_not_fail"
 
-        # Determine llm_helped
-        llm_helped = llm_required and agent_passed
-
-        # Build state transition
-        state_transition = "%s.%s -> %s.%s" % (
-            target_gate, baseline_status,
-            target_gate, agent_status,
-        )
+        # Build causal chain for required cases
+        causal_chain = {}
+        if llm_required:
+            causal_chain = {
+                "baseline_failure": {
+                    "status": baseline_status,
+                    "verify_status": baseline_verify,
+                },
+                "llm_decision": {
+                    "effective_action_count": len(effective),
+                },
+                "policy_decision": {
+                    "accepted_count": len(agent.get("accepted_decisions", [])),
+                },
+                "effective_action": effective[:3] if effective else [],
+                "state_change": {
+                    "before_verify": baseline_verify,
+                    "after_verify": agent_verify,
+                },
+                "final_verify": {
+                    "status": agent_verify,
+                    "trace_id": agent.get("trace_id", ""),
+                },
+            }
 
         return {
             "case_id": case_id,
-            "target_gate": target_gate,
+            "target_gate": case.get("target_gate", ""),
+            "fixture_exists": True,
+            "status": "completed",
             "baseline_status": baseline_status,
             "agent_status": agent_status,
-            "agent_decision": accepted_decision.get("tool_name", "") if accepted_decision else "",
-            "state_transition": state_transition,
+            "baseline_verify_status": baseline_verify,
+            "agent_verify_status": agent_verify,
             "llm_required": llm_required,
             "llm_helped": llm_helped,
             "llm_helped_type": "bool",
-            "fixture_exists": True,
-            "evidence_paths": verify_evidence.get("evidence_paths", []),
-            "final_verify_passed": final_verify_passed,
-            "evidence_path_exists": evidence_path_exists,
-            "has_gate_artifact": self._check_gate_artifact_exists(agent),
+            "llm_required_status": llm_required_status,
+            "effective_action_count": len(effective),
+            "causal_chain": causal_chain,
+            "evidence_paths": {
+                "baseline": baseline.get("evidence_paths", []),
+                "agent": agent.get("evidence_paths", []),
+            },
         }
 
-    def _get_stage_status(self, results: Dict, stage: str) -> str:
-        """Get status for a specific stage from pipeline results."""
-        if not results:
-            return "no_results"
-
-        # Check stage_status dict
-        stage_status = results.get("stage_status", {})
-        if stage in stage_status:
-            info = stage_status[stage]
-            if isinstance(info, dict):
-                return info.get("status", "")
-            return str(info)
-
-        # Check direct stage result
-        stage_result = results.get(stage, {})
-        if isinstance(stage_result, dict):
-            return stage_result.get("status", "")
-
-        return "unknown"
-
-    def _find_accepted_decision(self, decisions: List[Dict], target_gate: str) -> Optional[Dict]:
-        """Find an accepted LLM decision for the target gate."""
-        for decision in decisions:
-            d = decision.get("decision", {})
-            if d.get("stage") == target_gate and d.get("policy_allowed"):
-                return d
-        return None
-
-    def _check_gate_artifact_exists(self, results: Dict) -> bool:
-        """Check if gate artifacts were written."""
-        artifacts = results.get("artifacts", {})
-        return bool(artifacts.get("agent_decision_gates"))
-
-    def _build_error_result(self, case_id: str, target_gate: str, error: str, fixture_dir: str) -> Dict:
+    def _build_error_result(self, case_id: str, status: str, error: str) -> Dict:
         """Build an error result for a case."""
         return {
             "case_id": case_id,
-            "target_gate": target_gate,
+            "target_gate": "",
+            "fixture_exists": False,
+            "status": status,
             "baseline_status": "error",
             "agent_status": "error",
-            "agent_decision": "",
-            "state_transition": "",
             "llm_required": False,
             "llm_helped": False,
             "llm_helped_type": "bool",
-            "fixture_exists": False,
-            "evidence_paths": [],
-            "final_verify_passed": False,
-            "evidence_path_exists": False,
-            "has_gate_artifact": False,
+            "llm_required_status": "unknown_infrastructure_error",
             "error": error,
-            "fixture_dir": fixture_dir,
+            "evidence_paths": {},
         }
 
     def _build_summary(self, results: List[Dict]) -> Dict:
@@ -298,22 +551,18 @@ class LLMNecessityEvaluator:
         total = len(results)
         llm_required_count = sum(1 for r in results if r.get("llm_required"))
         llm_helped_count = sum(1 for r in results if r.get("llm_helped"))
-        safety_count = sum(1 for r in results if "malicious" in r.get("case_id", ""))
-
-        gates_covered = set(r.get("target_gate") for r in results)
-
-        # Verify all llm_helped are bool
-        all_bool = all(isinstance(r.get("llm_helped"), bool) for r in results)
+        infra_errors = [r for r in results if r.get("status") == "infrastructure_error"]
 
         return {
             "total_cases": total,
             "llm_required_count": llm_required_count,
             "llm_helped_count": llm_helped_count,
-            "safety_cases": safety_count,
-            "gates_covered": sorted(gates_covered),
+            "infrastructure_error_count": len(infra_errors),
             "llm_necessity_proven": llm_required_count > 0,
-            "all_fixtures_exist": all(r.get("fixture_exists") for r in results),
-            "all_llm_helped_are_bool": all_bool,
+            "all_llm_helped_are_bool": all(
+                isinstance(result.get("llm_helped"), bool)
+                for result in results
+            ),
         }
 
 

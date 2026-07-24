@@ -24,6 +24,7 @@ class EnvDeployModule:
         docker_network: str = "bridge",
         docker_gpus: str = "none",
         docker_model_cache_dir: str = "",
+        docker_security_options: Dict = None,
     ) -> StageResult:
         plan: List[List[str]] = analysis.get("install_plan", [])
         env_solution = analysis.get("env_solution") if isinstance(analysis.get("env_solution"), dict) else {}
@@ -32,7 +33,16 @@ class EnvDeployModule:
             plan = [list(cmd) for cmd in conda_plan.get("commands") or []]
         if not plan:
             return StageResult("env_deploy", "uncertain", "no install plan detected", {"commands": []})
-        effective_plan, sandbox = self._effective_plan(repo_dir, plan, execution_backend, docker_image, docker_network, docker_gpus, docker_model_cache_dir)
+        effective_plan, sandbox = self._effective_plan(
+            repo_dir,
+            plan,
+            execution_backend,
+            docker_image,
+            docker_network,
+            docker_gpus,
+            docker_model_cache_dir,
+            docker_security_options,
+        )
         if not execute:
             return StageResult(
                 "env_deploy",
@@ -113,6 +123,7 @@ class EnvDeployModule:
         docker_network: str,
         docker_gpus: str,
         docker_model_cache_dir: str,
+        docker_security_options: Dict = None,
     ):
         if execution_backend != "docker":
             return [list(cmd) for cmd in plan], {"backend": "local"}
@@ -121,6 +132,7 @@ class EnvDeployModule:
             network=docker_network,
             gpus=docker_gpus,
             model_cache_dir=Path(docker_model_cache_dir) if docker_model_cache_dir else None,
+            **(docker_security_options or {}),
         )
         sandbox_commands = [backend.wrap(repo_dir, cmd).to_dict() for cmd in plan]
         return [item["effective_cmd"] for item in sandbox_commands], {

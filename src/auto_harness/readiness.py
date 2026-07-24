@@ -1,9 +1,32 @@
+"""Readiness audit and Capability Matrix.
+
+Two components:
+1. ReadinessAuditor: local completion audit without external smoke tests.
+2. CapabilityMatrix: derive project capabilities from test/eval artifacts.
+
+Capability Matrix never marks capabilities as validated just because a
+class exists. Status must come from actual test reports and evaluation artifacts.
+
+Allowed capability statuses:
+- implemented: code exists
+- integrated: passes integration tests
+- validated: passes full evaluation including evidence
+- not_run: external/environment-dependent, not yet tested
+- failed: test/eval exists and failed
+
+Prohibited: production_ready (never allowed)
+"""
 import json
 import re
+import subprocess
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from auto_harness.models.base import write_json
+from auto_harness.utils.time import utc_now_iso
+
+
+ALLOWED_STATUSES = ("implemented", "integrated", "validated", "not_run", "failed")
 
 
 class ReadinessAuditor:
@@ -190,3 +213,191 @@ class ReadinessAuditor:
             return 0
         passed = sum(1 for gate in gates if gate.get("status") == "passed")
         return int(round(passed * 100 / len(gates)))
+
+
+# ------------------------------------------------------------------
+# Capability Matrix
+# ------------------------------------------------------------------
+
+def _get_commit_sha(project_root: Path) -> str:
+    """Get current git commit SHA."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(project_root),
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    return "unknown"
+
+
+def _check_test_artifact(artifact_path: Path) -> str:
+    """Check if a test artifact exists and what status it reports.
+
+    Returns:
+        "validated" if artifact exists and reports success,
+        "failed" if artifact exists and reports failure,
+        "implemented" if artifact doesn't exist.
+    """
+    if not artifact_path.exists():
+        return "implemented"
+    try:
+        data = json.loads(artifact_path.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            status = data.get("status", "")
+            if status in ("completed", "passed", "pass"):
+                return "validated"
+            if status in ("failed", "error"):
+                return "failed"
+    except (OSError, ValueError):
+        return "failed"
+    return "implemented"
+
+
+class CapabilityMatrix:
+    """Derive capability matrix from test artifacts."""
+
+    def __init__(self, project_root: Path = None) -> None:
+        self.project_root = Path(project_root or Path.cwd())
+
+    def generate(self, reports_dir: Path = None) -> Dict[str, Any]:
+        """Generate capability matrix from available evidence.
+
+        Args:
+            reports_dir: Directory containing test/eval reports.
+
+        Returns:
+            Capability matrix dict.
+        """
+        reports_dir = Path(reports_dir or self.project_root / "reports")
+        commit_sha = _get_commit_sha(self.project_root)
+
+        capabilities = {}
+
+        # 1. default_langgraph: CLI integration test
+        capabilities["default_langgraph"] = {
+            "status": _check_test_artifact(
+                reports_dir / "controller_result.json"
+            ),
+            "evidence": ["tests/test_default_agent_controller.py"],
+        }
+
+        # 2. crash_safe_reconcile: fault injection test
+        capabilities["crash_safe_reconcile"] = {
+            "status": _check_test_artifact(
+                reports_dir / "fault_injection_result.json"
+            ),
+            "evidence": ["tests/test_recovery_fault_injection.py"],
+        }
+
+        # 3. approval_resume: CLI approval E2E
+        capabilities["approval_resume"] = {
+            "status": _check_test_artifact(
+                reports_dir / "approval_e2e_result.json"
+            ),
+            "evidence": ["tests/test_cli_approval_e2e.py"],
+        }
+
+        # 4. memory_skill_mainline: route artifacts + verified memory test
+        capabilities["memory_skill_mainline"] = {
+            "status": _check_test_artifact(
+                reports_dir / "skill_memory_result.json"
+            ),
+            "evidence": ["tests/test_langgraph_skill_memory_integration.py"],
+        }
+
+        # 5. llm_necessity: comparison report
+        llm_status = "not_run"
+        llm_report = reports_dir / "llm-necessity" / "report.json"
+        if llm_report.exists():
+            try:
+                data = json.loads(llm_report.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    if data.get("status") == "completed" and data.get("summary", {}).get("infrastructure_error_count", 0) == 0:
+                        llm_status = "validated"
+                    elif data.get("status") == "failed":
+                        llm_status = "failed"
+            except (OSError, ValueError):
+                llm_status = "failed"
+        capabilities["llm_necessity"] = {
+            "status": llm_status,
+            "evidence": ["eval_targets/llm_necessity_manifest.json"],
+        }
+
+        # 6. docker_gpu: requires real external manifest
+        capabilities["docker_gpu"] = {
+            "status": "not_run",
+            "evidence": [],
+        }
+
+        # 7. tool_registry_contract
+        capabilities["tool_registry_contract"] = {
+            "status": _check_test_artifact(
+                reports_dir / "tool_registry_result.json"
+            ),
+            "evidence": ["tests/test_tool_registry_contract.py"],
+        }
+
+        # 8. provider_protocol
+        capabilities["provider_protocol"] = {
+            "status": _check_test_artifact(
+                reports_dir / "provider_protocol_result.json"
+            ),
+            "evidence": ["tests/test_provider_protocol.py"],
+        }
+
+        # 9. self_repair_closure
+        capabilities["self_repair_closure"] = {
+            "status": _check_test_artifact(
+                reports_dir / "self_repair_result.json"
+            ),
+            "evidence": ["tests/test_self_repair_evidence.py"],
+        }
+
+        # 10. docker_sandbox_policy
+        capabilities["docker_sandbox_policy"] = {
+            "status": _check_test_artifact(
+                reports_dir / "docker_sandbox_result.json"
+            ),
+            "evidence": ["tests/test_docker_sandbox_policy.py"],
+        }
+
+        # 11. evidence_provenance
+        capabilities["evidence_provenance"] = {
+            "status": _check_test_artifact(
+                reports_dir / "evidence_package_result.json"
+            ),
+            "evidence": ["tests/test_evidence_package.py"],
+        }
+
+        return {
+            "schema_version": 1,
+            "commit_sha": commit_sha,
+            "generated_at": utc_now_iso(),
+            "capabilities": capabilities,
+        }
+
+    def check_readiness(self, matrix: Dict) -> int:
+        """Check if all required capabilities are validated.
+
+        Returns:
+            0 if all required capabilities are validated,
+            1 if some are not validated.
+        """
+        required = [
+            "default_langgraph",
+            "crash_safe_reconcile",
+            "approval_resume",
+            "memory_skill_mainline",
+        ]
+        caps = matrix.get("capabilities", {})
+        for cap in required:
+            status = caps.get(cap, {}).get("status", "")
+            if status not in ("validated", "integrated"):
+                return 1
+        return 0

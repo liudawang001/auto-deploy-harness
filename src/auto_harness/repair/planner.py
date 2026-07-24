@@ -12,7 +12,7 @@ class RepairPlanner:
     def __init__(self) -> None:
         self.normalizer = RepairActionNormalizer()
 
-    def propose(self, stage: str, result: StageResult, analysis: Dict = None) -> Dict:
+    def propose(self, stage: str, result: StageResult, analysis: Dict = None, skill_context: Dict = None) -> Dict:
         analysis = analysis or {}
         plain = to_plain(result)
         data = plain.get("data") if isinstance(plain.get("data"), dict) else {}

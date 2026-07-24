@@ -2,7 +2,7 @@
 name: prepare-model-assets
 version: "1.0.0"
 type: execution_skill
-stages: [resource_plan, model_prepare, plan_first]
+stages: [resource_plan, model_prepare, plan, plan_first]
 frameworks: []
 risk_level: low
 side_effects: false

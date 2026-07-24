@@ -46,6 +46,23 @@ class TaskRunner:
         self.skills = SkillRegistry(config.skills_path, max_chars=config.max_skill_chars)
         self.memory = MemoryStore(config.memory_path)
         self.model_cache = ModelCache(config.model_cache_path)
+        # Skill routing and memory wiring (Task 8)
+        from auto_harness.skills.router import SkillRouter
+        from auto_harness.skills.context import SkillContextBuilder
+        self.skill_router = SkillRouter(
+            skills_dir=Path(config.skills_path),
+            max_chars=config.max_skill_chars,
+        )
+        self.skill_context_builder = SkillContextBuilder()
+        self.verified_memory_recorder = VerifiedMemoryRecorder(config.memory_path)
+        self.skill_outcome_recorder = SkillOutcomeRecorder(config.memory_path)
+        # Skill routing service (Task 9)
+        from auto_harness.skills.routing_service import SkillRoutingService
+        self.skill_routing_service = SkillRoutingService(
+            router=self.skill_router,
+            context_builder=self.skill_context_builder,
+            memory_store=self.memory,
+        )
         self.model_prepare = ModelPrepareModule(
             self.model_cache,
             huggingface_downloader=HuggingFaceDownloader(
@@ -72,8 +89,14 @@ class TaskRunner:
         dry_run: bool = True,
         allow_install: bool = False,
         allow_start: bool = False,
-        controller: str = "legacy",
+        controller: Optional[str] = None,
     ) -> TaskSpec:
+        from auto_harness.controllers.factory import resolve_controller
+        resolved_controller = resolve_controller(
+            explicit=controller,
+            configured_default=self.config.default_controller,
+            is_resume=False,
+        )
         base_name = safe_name(name or repo_url.rsplit("/", 1)[-1].replace(".git", ""))
         task_id = "%s_%s_%s" % (base_name, compact_timestamp(), short_hash(repo_url, 6))
         workspace_root = str(self.config.runs_path / task_id / "workspace")
@@ -87,7 +110,7 @@ class TaskRunner:
                 allow_source_edit=self.config.allow_source_edit,
             ),
             created_at=utc_now_iso(),
-            controller=controller,
+            controller=resolved_controller,
         )
 
     def deploy(
@@ -98,7 +121,7 @@ class TaskRunner:
         skip_clone: bool = False,
         allow_install: bool = False,
         allow_start: bool = False,
-        controller: str = "legacy",
+        controller: Optional[str] = None,
     ) -> str:
         spec = self.create_spec(
             repo_url,
@@ -506,6 +529,7 @@ class TaskRunner:
                 docker_network=self.config.docker_network,
                 docker_gpus=self.config.docker_gpus,
                 docker_model_cache_dir=self._docker_model_cache_dir(),
+                docker_security_options=self._docker_security_options(),
             )
             self._attach_context(env_result, env_context)
             self._attach_repair_overlay(env_result, repair_overlay)
@@ -553,6 +577,7 @@ class TaskRunner:
                 docker_network=self.config.docker_network,
                 docker_gpus=self.config.docker_gpus,
                 docker_model_cache_dir=self._docker_model_cache_dir(),
+                docker_security_options=self._docker_security_options(),
                 stage_hints=runner_hints,
             )
             self._attach_context(runner_result, runner_context)
@@ -673,15 +698,18 @@ class TaskRunner:
         return {"should_auto_resume": False}
 
     def resume(self, task_id: str, dry_run: bool = True, controller: Optional[str] = None, resume_input: Optional[Dict[str, Any]] = None) -> str:
+        from auto_harness.controllers.factory import resolve_controller
         task = self.store.load_task(task_id)
         stored_controller = task.controller
 
-        # Controller consistency: cannot switch controller on resume
-        if controller is not None and controller != stored_controller:
-            raise ValueError(
-                "controller_switch_on_resume_is_not_allowed: "
-                "requested=%s stored=%s" % (controller, stored_controller)
-            )
+        # Controller consistency: resolve via the unified function.
+        # resume cannot switch controller; raises ValueError if explicit != stored.
+        resolved_controller = resolve_controller(
+            explicit=controller,
+            configured_default=self.config.default_controller,
+            stored=stored_controller,
+            is_resume=True,
+        )
 
         run_dir = self.store.run_dir(task_id)
         repo_dir = run_dir / "workspace" / "repo"
@@ -699,9 +727,9 @@ class TaskRunner:
             resume_input=resume_input,
         )
 
-        self.store.events(task_id).append("task", "resume_requested", {"dry_run": dry_run, "controller": stored_controller})
+        self.store.events(task_id).append("task", "resume_requested", {"dry_run": dry_run, "controller": resolved_controller})
 
-        ctrl = self._build_controller(stored_controller)
+        ctrl = self._build_controller(resolved_controller)
         result = ctrl.resume(context, resume_input=resume_input)
 
         write_json(run_dir / "reports" / "controller_result.json", {
@@ -785,6 +813,19 @@ class TaskRunner:
 
     def _docker_model_cache_dir(self) -> str:
         return self.config.docker_model_cache_dir or str(self.config.model_cache_path)
+
+    def _docker_security_options(self) -> Dict:
+        return {
+            "read_only_rootfs": self.config.docker_read_only_rootfs,
+            "user": self.config.docker_user,
+            "memory": self.config.docker_memory,
+            "cpus": self.config.docker_cpus,
+            "pids_limit": self.config.docker_pids_limit,
+            "tmpfs_size": self.config.docker_tmpfs_size,
+            "cap_drop_all": self.config.docker_cap_drop_all,
+            "no_new_privileges": self.config.docker_no_new_privileges,
+            "repo_mount_mode": self.config.docker_repo_mount_mode,
+        }
 
     def _normalize_start_stage(self, task_id: str, start_stage: str) -> str:
         requested = start_stage if start_stage in self.RERUN_STAGES else "analyze"

@@ -14,7 +14,14 @@ class VerifiedMemoryRecorder:
         self.memory_dir = ensure_dir(memory_dir)
         self.issue_path = self.memory_dir / "deployment_issues.jsonl"
 
-    def record_if_verified(self, run_dir: Path, pipeline_results: Dict, agent_metrics: Dict) -> Optional[Dict]:
+    def record_if_verified(
+        self,
+        run_dir: Path,
+        pipeline_results: Dict,
+        agent_metrics: Dict,
+        repair_apply_result: Optional[Dict] = None,
+        repair_plan: Optional[Dict] = None,
+    ) -> Optional[Dict]:
         run_dir = Path(run_dir)
         verify = pipeline_results.get("verify", {}) if isinstance(pipeline_results.get("verify"), dict) else {}
         verify_data = verify.get("data") if isinstance(verify.get("data"), dict) else {}
@@ -23,9 +30,16 @@ class VerifiedMemoryRecorder:
         trace_id = str(verify_data.get("trace_id") or "")
         if not trace_id:
             return self._write_status(run_dir, "skipped", "verification trace id missing")
-        apply_result = self._read_optional(run_dir / "repairs" / "repair_apply_result.json") or {}
+        # Use provided repair_apply_result or read from file (Task 11)
+        apply_result = repair_apply_result or self._read_optional(run_dir / "repairs" / "repair_apply_result.json") or {}
         if apply_result.get("status") != "applied":
             return self._write_status(run_dir, "skipped", "repair was not applied")
+        if "repair_verified" in apply_result and not apply_result.get("repair_verified"):
+            return self._write_status(
+                run_dir,
+                "skipped",
+                "repair did not complete fresh strong verification",
+            )
         if not self._effective_repair(apply_result):
             return self._write_status(run_dir, "skipped", "repair action was not effective")
         if self._has_high_risk_rejection(run_dir, apply_result):
@@ -37,7 +51,8 @@ class VerifiedMemoryRecorder:
         if not isinstance(env_solution, dict):
             env_solution = {}
         source = self._latest_memory_event(run_dir)
-        repair_plan = source.get("repair_plan") or self._read_optional(run_dir / "repairs" / "repair_plan.json") or {}
+        # Use provided repair_plan or read from file (Task 11)
+        repair_plan = repair_plan or source.get("repair_plan") or self._read_optional(run_dir / "repairs" / "repair_plan.json") or {}
         repair_hash = self._repair_action_hash(repair_plan, env_solution)
         task = self._read_optional(run_dir / "task.json") or {}
         analysis = pipeline_results.get("analyze", {}).get("data", {}) if isinstance(pipeline_results.get("analyze"), dict) else {}
@@ -61,7 +76,7 @@ class VerifiedMemoryRecorder:
             "torch_variant": env_solution.get("torch_variant") or "",
             "verification_trace_id": trace_id,
             "verify_status": verify.get("status"),
-            "regression_case_ids": ["agent_full_self_healing_pipeline"],
+            "regression_case_ids": ["agent_self_healing_control_flow_simulation"],
             "regression_status": "passed",
             "verified_success": True,
             "policy_rejected_high_risk": False,

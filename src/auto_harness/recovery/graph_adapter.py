@@ -100,15 +100,18 @@ class GraphRecoveryAdapter:
         """Prepare a new operation or reconcile an existing one.
 
         Decision rules:
-        - New operation/planned -> transition to running, execute stage
+        - New operation -> begin (atomically set running), execute stage
+        - planned (no observed resource) -> begin -> execute
+        - planned (with observed resource) -> approval/manual
         - committed -> hydrate result, skip execution (reuse)
         - running after process restart -> transition to unknown, reconcile
-        - reconcile reuse -> commit/reuse, hydrate result, skip execution
-        - reconcile continue -> continue resumable action
-        - reconcile retry -> safe retry
-        - cleanup_then_retry -> approval, interrupt
-        - conflict -> stop
-        - manual/unknown/no reconciler -> approval or stop
+        - reconcile reuse -> apply_decision -> commit/reuse, hydrate result
+        - reconcile continue/retry -> apply_decision -> continue/retry
+        - cleanup_then_retry -> apply_decision -> manual -> approval
+        - conflict -> apply_decision -> conflict -> stop
+        - failed -> approval (fail-closed, no auto-retry)
+        - unknown -> reconcile (must not blindly retry)
+        - manual/unknown with no reconciler -> approval or stop
         """
         run_dir = Path(state["run_dir"])
         journal = OperationJournal(run_dir)
@@ -121,8 +124,8 @@ class GraphRecoveryAdapter:
         existing = journal.load(operation_id)
 
         if existing is None:
-            # New operation -- prepare and transition to running
-            record = journal.create(operation)
+            # New operation -- atomically begin as running before side effect
+            record = journal.begin(operation)
             return RecoveryDecision(
                 decision="execute",
                 operation=record,
@@ -142,73 +145,124 @@ class GraphRecoveryAdapter:
                 hydrated_stage_result=hydrated,
             )
 
+        if status == "planned":
+            # Planned but not yet executing.
+            # If observed resource already exists, require manual review.
+            if existing.get("observed_resource"):
+                existing = journal.transition(
+                    operation_id,
+                    "manual",
+                    reconcile_result={
+                        "decision": "manual",
+                        "reason": "planned_with_observed_resource",
+                    },
+                )
+                return RecoveryDecision(
+                    decision="approval",
+                    operation=existing,
+                    reconcile_result={"decision": "manual", "reason": "planned_with_observed_resource"},
+                    hydrated_stage_result={},
+                    stop_reason="manual_recovery_required",
+                )
+            # No observed resource -> safe to begin and execute
+            started = journal.begin(operation)
+            return RecoveryDecision(
+                decision="execute",
+                operation=started,
+                reconcile_result={},
+                hydrated_stage_result={},
+            )
+
         if status == "running":
-            # Running after potential crash -- reconcile
-            journal.transition(operation_id, "unknown")
+            # Running after potential crash -- recover and reconcile
+            existing = journal.recover_running(operation_id)
+            status = existing["status"]
+
+        if status == "unknown":
+            # Unknown status requires reconciliation -- never blindly retry
             reconciler = self._get_reconciler(operation.get("resource_type", ""))
             if reconciler:
                 try:
                     reconcile_result = service.reconcile(existing)
-                    decision = reconcile_result.get("decision", "manual")
                 except Exception:
                     reconcile_result = {"decision": "manual", "reason": "reconcile_failed"}
-                    decision = "manual"
             else:
                 reconcile_result = {"decision": "manual", "reason": "no_reconciler"}
-                decision = "manual"
+
+            decision = reconcile_result.get("decision", "manual")
+
+            # Apply the decision to persist state transition
+            updated = service.apply_decision(existing, reconcile_result)
 
             if decision == "reuse":
-                # Reconciler says it's done -- commit and hydrate
-                hydrated = self._hydrate_committed_result(existing)
+                hydrated = self._hydrate_committed_result(updated)
                 return RecoveryDecision(
                     decision="reuse",
-                    operation=existing,
+                    operation=updated,
                     reconcile_result=reconcile_result,
                     hydrated_stage_result=hydrated,
                 )
-            elif decision in ("continue", "retry"):
+
+            if decision in ("continue", "retry"):
                 return RecoveryDecision(
                     decision=decision,
-                    operation=existing,
+                    operation=updated,
                     reconcile_result=reconcile_result,
                     hydrated_stage_result={},
                 )
-            elif decision == "cleanup_then_retry":
+
+            if decision == "cleanup_then_retry":
                 return RecoveryDecision(
                     decision="approval",
-                    operation=existing,
+                    operation=updated,
                     reconcile_result=reconcile_result,
                     hydrated_stage_result={},
                     stop_reason="cleanup_required",
                 )
-            elif decision == "conflict":
+
+            if decision == "conflict":
                 return RecoveryDecision(
                     decision="stop",
-                    operation=existing,
+                    operation=updated,
                     reconcile_result=reconcile_result,
                     hydrated_stage_result={},
                     stop_reason="recovery_conflict",
                 )
-            else:
-                # manual, unknown
-                return RecoveryDecision(
-                    decision="approval",
-                    operation=existing,
-                    reconcile_result=reconcile_result,
-                    hydrated_stage_result={},
-                    stop_reason="manual_recovery_required",
-                )
 
-        if status in ("failed", "unknown"):
-            # Failed or unknown -- attempt retry if reconciler says safe
+            # manual or any other decision
             return RecoveryDecision(
-                decision="retry",
+                decision="approval",
+                operation=updated,
+                reconcile_result=reconcile_result,
+                hydrated_stage_result={},
+                stop_reason="manual_recovery_required",
+            )
+
+        if status == "failed":
+            # Fail-closed: failed operations require operator decision.
+            # Auto-retry is not allowed without explicit retry policy.
+            return RecoveryDecision(
+                decision="approval",
                 operation=existing,
-                reconcile_result={"decision": "retry"},
+                reconcile_result={
+                    "decision": "manual",
+                    "reason": "failed_operation_requires_operator_decision",
+                },
+                hydrated_stage_result={},
+                stop_reason="failed_operation_requires_operator_decision",
+            )
+
+        if status == "retryable":
+            # Safe to re-enter running via begin, then execute
+            started = journal.begin(operation)
+            return RecoveryDecision(
+                decision="execute",
+                operation=started,
+                reconcile_result={},
                 hydrated_stage_result={},
             )
 
-        # Default: stop for unknown states
+        # Default: stop for unexpected states
         return RecoveryDecision(
             decision="stop",
             operation=existing or operation,

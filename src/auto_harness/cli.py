@@ -138,6 +138,8 @@ def build_parser() -> argparse.ArgumentParser:
     evidence_package = sub.add_parser("evidence-package", help="export project evidence as tar.gz archive")
     evidence_package.add_argument("--output", default="dist/evidence/agent-project-evidence.tar.gz", help="output tar.gz path")
     evidence_package.add_argument("--project-root", default=".", help="project root directory")
+    evidence_package.add_argument("--task-id", default="", help="export one run with a manifest instead of project-level evidence")
+    evidence_package.add_argument("--run-dir", default="", help="explicit run directory for --task-id")
 
     llm = sub.add_parser("llm-test", help="test LLM provider")
     llm.add_argument("--provider", choices=["mock", "xunfei"], default="mock")
@@ -225,6 +227,9 @@ def build_parser() -> argparse.ArgumentParser:
     approval_resolve.add_argument("--task-id", required=True)
     approval_resolve.add_argument("--decision", choices=["approve", "reject"], required=True)
     approval_resolve.add_argument("--note", default="")
+    approval_resolve.add_argument("--reviewer", default="operator")
+    approval_resolve.add_argument("--execute", action="store_true", default=False)
+    approval_resolve.add_argument("--approval-id", default="")
 
     return parser
 
@@ -318,7 +323,7 @@ def main(argv=None) -> int:
 
     if args.command == "deploy":
         dry_run = args.dry_run or not args.execute
-        controller = getattr(args, "controller", None) or "legacy"
+        controller = getattr(args, "controller", None)
         task_id = runner.deploy(
             args.repo,
             args.name,
@@ -398,7 +403,7 @@ def main(argv=None) -> int:
         output = Path(args.output) if args.output else None
         report = BenchmarkRunner().run(Path(args.manifest), output, case_ids=args.case_id)
         print(json.dumps(report, ensure_ascii=False, indent=2))
-        return 0 if report.get("status") == "passed" else 2
+        return {"passed": 0, "partial": 1}.get(report.get("status"), 2)
 
     if args.command == "dashboard":
         if args.serve:
@@ -596,13 +601,25 @@ def main(argv=None) -> int:
         return 0 if report.get("gain", {}).get("improved") else 1
 
     if args.command == "evidence-package":
-        from auto_harness.evidence import create_evidence_package
-        result = create_evidence_package(
-            project_root=Path(args.project_root),
-            output_path=Path(args.output),
-        )
+        if args.task_id:
+            from auto_harness.evidence import EvidenceExporter
+            project_root = Path(args.project_root).resolve()
+            configured_runs = config.runs_path
+            default_run_dir = configured_runs if configured_runs.is_absolute() else project_root / configured_runs
+            run_dir = Path(args.run_dir) if args.run_dir else default_run_dir / args.task_id
+            result = EvidenceExporter(project_root=project_root).export(
+                run_dir=run_dir,
+                task_id=args.task_id,
+                output_path=Path(args.output),
+            )
+        else:
+            from auto_harness.evidence import create_evidence_package
+            result = create_evidence_package(
+                project_root=Path(args.project_root),
+                output_path=Path(args.output),
+            )
         print(json.dumps(result, ensure_ascii=False, indent=2))
-        return 0 if result.get("status") == "ok" else 2
+        return 0 if result.get("status") in ("ok", "complete") else 2
 
     if args.command == "cache":
         if args.cleanup:
@@ -658,42 +675,75 @@ def main(argv=None) -> int:
         from auto_harness.utils.time import utc_now_iso
         store = StateStore(config.runs_path)
         run_dir = store.run_dir(args.task_id)
-        approval_store = ApprovalStore(run_dir)
-        # Find the pending approval
+        # Find the pending approval(s)
         approvals_dir = Path(run_dir) / "approvals"
-        resolved = None
+        pending_approvals = []
         if approvals_dir.exists():
             for f in sorted(approvals_dir.glob("*.json")):
                 try:
                     record = json.loads(f.read_text(encoding="utf-8"))
                     if record.get("status") == "pending":
-                        approval_id = record.get("request", {}).get("approval_id", "")
-                        if approval_id:
-                            decision = {
-                                "approval_id": approval_id,
-                                "operation_id": record.get("request", {}).get("operation_id", ""),
-                                "decision": args.decision,
-                                "reviewer": "cli",
-                                "note": args.note,
-                                "resolved_at": utc_now_iso(),
-                            }
-                            record["status"] = "resolved"
-                            record["decision"] = {
-                                "approval_id": approval_id,
-                                "operation_id": record.get("request", {}).get("operation_id", ""),
-                                "decision": args.decision,
-                                "reviewer": "cli",
-                            }
-                            approval_store.save(approval_id, record)
-                            resolved = record
-                            break
+                        pending_approvals.append(record)
                 except (OSError, ValueError):
                     pass
-        if resolved:
-            print(json.dumps({"status": "resolved", "decision": args.decision}, ensure_ascii=False, indent=2))
-        else:
+
+        if not pending_approvals:
             print(json.dumps({"status": "no_pending_approval"}, ensure_ascii=False, indent=2))
             return 2
+
+        if len(pending_approvals) > 1 and not args.approval_id:
+            print(json.dumps({
+                "status": "error",
+                "reason": "multiple_pending_approvals",
+                "pending_count": len(pending_approvals),
+                "message": "specify --approval-id to disambiguate",
+            }, ensure_ascii=False, indent=2))
+            return 2
+
+        # Select the right approval record
+        if args.approval_id:
+            target = None
+            for record in pending_approvals:
+                if record.get("request", {}).get("approval_id") == args.approval_id:
+                    target = record
+                    break
+            if not target:
+                print(json.dumps({"status": "error", "reason": "approval_id_not_found"}, ensure_ascii=False, indent=2))
+                return 2
+        else:
+            target = pending_approvals[0]
+
+        request = target.get("request", {})
+        approval_id = request.get("approval_id", "")
+        if not approval_id:
+            print(json.dumps({"status": "error", "reason": "approval_id_missing"}, ensure_ascii=False, indent=2))
+            return 2
+
+        # Build the decision to pass to runner.resume
+        decision = {
+            "schema_version": 1,
+            "approval_id": approval_id,
+            "operation_id": request.get("operation_id", ""),
+            "decision": args.decision,
+            "reviewer": args.reviewer,
+            "note": args.note,
+            "request_hash": request.get("request_hash", ""),
+            "resolved_at": utc_now_iso(),
+        }
+
+        # Resume the graph with the approval decision
+        task_id = runner.resume(
+            args.task_id,
+            dry_run=not args.execute,
+            controller=None,
+            resume_input=decision,
+        )
+
+        print(json.dumps({
+            "status": "resume_requested",
+            "task_id": task_id,
+            "decision": args.decision,
+        }, ensure_ascii=False, indent=2))
         return 0
 
     return 1

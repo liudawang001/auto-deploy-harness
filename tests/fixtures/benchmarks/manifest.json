@@ -3,347 +3,566 @@
     {
       "id": "model_download_resume",
       "purpose": "验证模型下载中断后可通过 .part 和 Range 续传",
-      "expected_signal": "Range header is emitted when partial file exists"
+      "expected_signal": "Range header is emitted when partial file exists",
+      "case_id": "model_download_resume",
+      "test_level": "unit_simulation",
+      "requires": []
     },
     {
       "id": "cache_hit",
       "purpose": "验证已完整下载的模型文件不会重复下载",
-      "expected_signal": "file status becomes cached"
+      "expected_signal": "file status becomes cached",
+      "case_id": "cache_hit",
+      "test_level": "unit_simulation",
+      "requires": []
     },
     {
       "id": "streamlit_error_page",
       "purpose": "验证 Streamlit 页面虽然 HTTP 200 但包含错误标记时不能通过",
-      "expected_signal": "streamlit_dom_probe status is fail"
+      "expected_signal": "streamlit_dom_probe status is fail",
+      "case_id": "streamlit_error_page",
+      "test_level": "unit_simulation",
+      "requires": []
     },
     {
       "id": "verify_false_positive_http_200",
       "purpose": "验证 HTTP 200 但没有当前 trace 时不能判定成功",
-      "expected_signal": "verify status remains uncertain"
+      "expected_signal": "verify status remains uncertain",
+      "case_id": "verify_false_positive_http_200",
+      "test_level": "unit_simulation",
+      "requires": []
     },
     {
       "id": "gradio_config_discovery",
       "purpose": "验证 Gradio /config discovery 能构造正确 POST trace 请求",
-      "expected_signal": "request is sent to /api/predict with fn_index"
+      "expected_signal": "request is sent to /api/predict with fn_index",
+      "case_id": "gradio_config_discovery",
+      "test_level": "unit_simulation",
+      "requires": []
     },
     {
       "id": "repair_policy_reject",
       "purpose": "验证权限不足时 repair action 会被 policy 拒绝",
-      "expected_signal": "policy allowed is false"
+      "expected_signal": "policy allowed is false",
+      "case_id": "repair_policy_reject",
+      "test_level": "unit_simulation",
+      "requires": []
     },
     {
       "id": "checksum_failure",
       "purpose": "验证模型文件 checksum 不一致时不会进入缓存成功态",
-      "expected_signal": "download status becomes failed with sha256 mismatch"
+      "expected_signal": "download status becomes failed with sha256 mismatch",
+      "case_id": "checksum_failure",
+      "test_level": "unit_simulation",
+      "requires": []
     },
     {
       "id": "browser_dom_trace",
       "purpose": "验证浏览器 DOM 中出现当前 trace 时可以作为强证据",
-      "expected_signal": "browser_dom_probe status is pass"
+      "expected_signal": "browser_dom_probe status is pass",
+      "case_id": "browser_dom_trace",
+      "test_level": "unit_simulation",
+      "requires": []
     },
     {
       "id": "parallel_model_download",
       "purpose": "验证模型下载器可以并发下载多个必要文件且保持 manifest 顺序",
-      "expected_signal": "two files are downloaded with max_workers > 1"
+      "expected_signal": "two files are downloaded with max_workers > 1",
+      "case_id": "parallel_model_download",
+      "test_level": "unit_simulation",
+      "requires": []
     },
     {
       "id": "etag_cache_invalidation",
       "purpose": "验证远端 etag 变化时本地缓存不会被误当成有效",
-      "expected_signal": "cached file is redownloaded when etag metadata mismatches"
+      "expected_signal": "cached file is redownloaded when etag metadata mismatches",
+      "case_id": "etag_cache_invalidation",
+      "test_level": "unit_simulation",
+      "requires": []
     },
     {
       "id": "cache_cleanup_plan",
       "purpose": "验证模型缓存清理可以先 dry-run 生成候选，再受控删除",
-      "expected_signal": "old cache entry is selected and deleted only when dry_run is false"
+      "expected_signal": "old cache entry is selected and deleted only when dry_run is false",
+      "case_id": "cache_cleanup_plan",
+      "test_level": "unit_simulation",
+      "requires": []
     },
     {
       "id": "cache_cleanup_scoped_keep",
       "purpose": "验证模型缓存清理可以按来源过滤，并通过 keep-list 保护关键模型",
-      "expected_signal": "only matching non-kept cache entry is selected and deleted"
+      "expected_signal": "only matching non-kept cache entry is selected and deleted",
+      "case_id": "cache_cleanup_scoped_keep",
+      "test_level": "unit_simulation",
+      "requires": []
     },
     {
       "id": "repair_loop_attempt_limit",
       "purpose": "验证 repair loop 会限制同一问题的自动修复尝试次数，并对不安全 rerun_from 做回退",
-      "expected_signal": "second repair gate is rejected and rerun_from falls back to safe stage"
+      "expected_signal": "second repair gate is rejected and rerun_from falls back to safe stage",
+      "case_id": "repair_loop_attempt_limit",
+      "test_level": "unit_simulation",
+      "requires": []
     },
     {
       "id": "operator_repair_approval",
       "purpose": "验证需要人工批准的 repair action 只有在 operator approval 存在时才能通过",
-      "expected_signal": "policy is rejected before approval and allowed after approval"
+      "expected_signal": "policy is rejected before approval and allowed after approval",
+      "case_id": "operator_repair_approval",
+      "test_level": "unit_simulation",
+      "requires": []
     },
     {
       "id": "service_exits_after_start",
       "purpose": "验证服务进程启动后很快退出时 runner 不能判定启动成功",
-      "expected_signal": "runner status is failed and summary is service process exited"
+      "expected_signal": "runner status is failed and summary is service process exited",
+      "case_id": "service_exits_after_start",
+      "test_level": "unit_simulation",
+      "requires": []
     },
     {
       "id": "stale_artifact_ignored",
       "purpose": "验证历史输出文件不能作为本次 verify 的新鲜证据",
-      "expected_signal": "artifact_freshness remains uncertain"
+      "expected_signal": "artifact_freshness remains uncertain",
+      "case_id": "stale_artifact_ignored",
+      "test_level": "unit_simulation",
+      "requires": []
     },
     {
       "id": "artifact_download_validation",
       "purpose": "验证本次 trace 后产生的新文件产物必须可读、非空并记录 hash 后才作为强证据",
-      "expected_signal": "artifact_download_validation passes with size and sha256 evidence"
+      "expected_signal": "artifact_download_validation passes with size and sha256 evidence",
+      "case_id": "artifact_download_validation",
+      "test_level": "unit_simulation",
+      "requires": []
     },
     {
       "id": "git_lfs_detection",
       "purpose": "验证 Git LFS pointer 和 .gitattributes 会被资源规划识别，缺 git-lfs 时进入诊断态",
-      "expected_signal": "resource_plan is uncertain with git_lfs_missing diagnosis and lfs pull preparation"
+      "expected_signal": "resource_plan is uncertain with git_lfs_missing diagnosis and lfs pull preparation",
+      "case_id": "git_lfs_detection",
+      "test_level": "unit_simulation",
+      "requires": []
     },
     {
       "id": "git_lfs_prepare_execute",
       "purpose": "验证执行模式下 Git LFS 准备命令必须通过命令白名单并写入 model_prepare 结果",
-      "expected_signal": "git lfs install and pull are executed only when git is allowed"
+      "expected_signal": "git lfs install and pull are executed only when git is allowed",
+      "case_id": "git_lfs_prepare_execute",
+      "test_level": "unit_simulation",
+      "requires": []
     },
     {
       "id": "git_lfs_progress_parse",
       "purpose": "验证 Git LFS 拉取输出中的文件数、百分比和字节进度会写入 model_prepare 结果",
-      "expected_signal": "git_lfs progress includes percent, files_done, files_total and bytes"
+      "expected_signal": "git_lfs progress includes percent, files_done, files_total and bytes",
+      "case_id": "git_lfs_progress_parse",
+      "test_level": "unit_simulation",
+      "requires": []
     },
     {
       "id": "git_submodule_prepare_execute",
       "purpose": "验证 .gitmodules 会被资源规划识别，执行模式下子模块初始化必须通过 git 白名单并写入 model_prepare 证据",
-      "expected_signal": "git submodule sync/update are executed only when git is allowed"
+      "expected_signal": "git submodule sync/update are executed only when git is allowed",
+      "case_id": "git_submodule_prepare_execute",
+      "test_level": "unit_simulation",
+      "requires": []
     },
     {
       "id": "docker_backend_plan",
       "purpose": "验证 Docker backend 会为 env_deploy 和 runner 生成受控 docker run 命令，且执行仍受白名单保护",
-      "expected_signal": "effective commands start with docker and execution is rejected when docker is not allowed"
+      "expected_signal": "effective commands start with docker and execution is rejected when docker is not allowed",
+      "case_id": "docker_backend_plan",
+      "test_level": "unit_simulation",
+      "requires": []
     },
     {
       "id": "env_solve_legacy_gradio_constraints",
       "purpose": "验证 env_solve 会为老 Gradio/未 pin 依赖项目生成 numpy/pydantic/opencv 兼容约束",
-      "expected_signal": "install_plan includes numpy<2, pydantic<2 and opencv-python-headless"
+      "expected_signal": "install_plan includes numpy<2, pydantic<2 and opencv-python-headless",
+      "case_id": "env_solve_legacy_gradio_constraints",
+      "test_level": "unit_simulation",
+      "requires": []
     },
     {
       "id": "env_solve_torch_cuda_wheel",
       "purpose": "验证 env_solve 会根据本机 CUDA 版本生成 PyTorch CUDA wheel index，并保留 CPU fallback",
-      "expected_signal": "torch_solution selects cu121 index URL and includes cpu fallback"
+      "expected_signal": "torch_solution selects cu121 index URL and includes cpu fallback",
+      "case_id": "env_solve_torch_cuda_wheel",
+      "test_level": "unit_simulation",
+      "requires": []
     },
     {
       "id": "gpu_package_matrix_rules",
       "purpose": "验证 xformers、flash-attn、bitsandbytes、triton 会按 Python/CUDA/Torch/平台生成兼容矩阵",
-      "expected_signal": "incompatible GPU packages are marked blocked with actionable reasons"
+      "expected_signal": "incompatible GPU packages are marked blocked with actionable reasons",
+      "case_id": "gpu_package_matrix_rules",
+      "test_level": "unit_simulation",
+      "requires": []
     },
     {
       "id": "docker_gpu_cache_backend",
       "purpose": "验证 Docker backend 支持 GPU 参数、模型缓存挂载、容器日志命令和清理命令元数据",
-      "expected_signal": "docker effective command includes --gpus and model_cache mount"
+      "expected_signal": "docker effective command includes --gpus and model_cache mount",
+      "case_id": "docker_gpu_cache_backend",
+      "test_level": "unit_simulation",
+      "requires": []
     },
     {
       "id": "memory_promotion_approval_regression",
       "purpose": "验证 verified success memory promotion 必须先审批，并绑定 apply 后应运行的 fixture 回归用例",
-      "expected_signal": "only verified success memories generate proposal; apply is rejected before approval and succeeds after approval with regression binding"
+      "expected_signal": "only verified success memories generate proposal; apply is rejected before approval and succeeds after approval with regression binding",
+      "case_id": "memory_promotion_approval_regression",
+      "test_level": "unit_simulation",
+      "requires": []
     },
     {
       "id": "memory_promotion_apply_regression_run",
       "purpose": "验证 verified success memory promotion apply 后会自动执行 regression_binding 中的 benchmark case 并写出回归报告",
-      "expected_signal": "apply result contains passed regression report for selected case ids"
+      "expected_signal": "apply result contains passed regression report for selected case ids",
+      "case_id": "memory_promotion_apply_regression_run",
+      "test_level": "module_integration",
+      "requires": []
     },
     {
       "id": "verify_progress_refresh",
       "purpose": "验证长耗时 verify 会持续刷新 service discovery、首次推理探针和完成状态",
-      "expected_signal": "progress callback receives first_inference and verify_completed updates"
+      "expected_signal": "progress callback receives first_inference and verify_completed updates",
+      "case_id": "verify_progress_refresh",
+      "test_level": "unit_simulation",
+      "requires": []
     },
     {
       "id": "openai_compatible_verify",
       "purpose": "验证 vLLM/OpenAI-compatible server 可通过 /v1/chat/completions 进行 trace 证据验证",
-      "expected_signal": "POST /v1/chat/completions includes trace prompt and response trace passes verify"
+      "expected_signal": "POST /v1/chat/completions includes trace prompt and response trace passes verify",
+      "case_id": "openai_compatible_verify",
+      "test_level": "unit_simulation",
+      "requires": []
     },
     {
       "id": "openai_model_discovery_stream_verify",
       "purpose": "验证 OpenAI-compatible 服务可通过 /v1/models 发现模型，并用 stream 响应中的 trace 作为强证据",
-      "expected_signal": "GET /v1/models selects model id and SSE response body contains current trace"
+      "expected_signal": "GET /v1/models selects model id and SSE response body contains current trace",
+      "case_id": "openai_model_discovery_stream_verify",
+      "test_level": "unit_simulation",
+      "requires": []
     },
     {
       "id": "openapi_schema_verify",
       "purpose": "验证 FastAPI/Flask OpenAPI schema 可自动选择 POST endpoint 并构造 trace JSON 请求",
-      "expected_signal": "POST endpoint from /openapi.json echoes current trace and verify passes"
+      "expected_signal": "POST endpoint from /openapi.json echoes current trace and verify passes",
+      "case_id": "openapi_schema_verify",
+      "test_level": "unit_simulation",
+      "requires": []
     },
     {
       "id": "local_e2e_fixture_matrix",
       "purpose": "验证本地 Gradio、Streamlit 和 Git LFS 权重 fixture 可以跑完整 dry-run pipeline",
-      "expected_signal": "all local fixtures produce pipeline_results with expected stage evidence"
+      "expected_signal": "all local fixtures produce pipeline_results with expected stage evidence",
+      "case_id": "local_e2e_fixture_matrix",
+      "test_level": "module_integration",
+      "requires": []
     },
     {
       "id": "memory_promotion_proposal",
       "purpose": "验证高频 verified success memory 会生成可审核的 skill 更新 proposal，默认不直接修改 skill",
-      "expected_signal": "memory-promote creates proposal json/md with review_required=true and verified success evidence"
+      "expected_signal": "memory-promote creates proposal json/md with review_required=true and verified success evidence",
+      "case_id": "memory_promotion_proposal",
+      "test_level": "unit_simulation",
+      "requires": []
     },
     {
       "id": "gradio_api_shape_variation",
       "purpose": "验证 Gradio /config 中 api_name 带斜杠且前置 dependency 不可用时仍能选中正确 API",
-      "expected_signal": "request is sent to /api/predict with selected fn_index"
+      "expected_signal": "request is sent to /api/predict with selected fn_index",
+      "case_id": "gradio_api_shape_variation",
+      "test_level": "unit_simulation",
+      "requires": []
     },
     {
       "id": "gradio_queue_call_followup",
       "purpose": "验证 Gradio queue 模式下可以通过 /call/<api_name> 和 event_id follow-up 获取 trace",
-      "expected_signal": "POST /call/predict returns event_id and GET follow-up contains trace"
+      "expected_signal": "POST /call/predict returns event_id and GET follow-up contains trace",
+      "case_id": "gradio_queue_call_followup",
+      "test_level": "unit_simulation",
+      "requires": []
     },
     {
       "id": "token_missing_diagnosis",
       "purpose": "验证 token 缺失或 401 日志会被诊断为 auth_required",
-      "expected_signal": "log classifier category is auth_required"
+      "expected_signal": "log classifier category is auth_required",
+      "case_id": "token_missing_diagnosis",
+      "test_level": "unit_simulation",
+      "requires": []
     },
     {
       "id": "structured_dependency_diagnosis",
       "purpose": "验证依赖冲突诊断会输出 package constraint、recommended action，并被 repair planner 转成受控安装建议",
-      "expected_signal": "numpy ABI conflict produces numpy<2 install action and env_deploy rerun"
+      "expected_signal": "numpy ABI conflict produces numpy<2 install action and env_deploy rerun",
+      "case_id": "structured_dependency_diagnosis",
+      "test_level": "unit_simulation",
+      "requires": []
     },
     {
       "id": "repair_resume_stage_jump",
       "purpose": "验证 resume 会按 repair 的 rerun_from_effective 从安全阶段重跑",
-      "expected_signal": "only verify and report are rerun when rerun_from_effective is verify"
+      "expected_signal": "only verify and report are rerun when rerun_from_effective is verify",
+      "case_id": "repair_resume_stage_jump",
+      "test_level": "unit_simulation",
+      "requires": []
     },
     {
       "id": "repair_resume_audit_report",
       "purpose": "验证 resume 阶段跳转会生成执行审计摘要并写入 report",
-      "expected_signal": "report lists reused stages and rerun stages"
+      "expected_signal": "report lists reused stages and rerun stages",
+      "case_id": "repair_resume_audit_report",
+      "test_level": "module_integration",
+      "requires": []
     },
     {
       "id": "token_report_required_env",
       "purpose": "验证 token 缺失时 report 只展示所需变量名，不记录密钥值",
-      "expected_signal": "report includes HF_TOKEN name and excludes token values"
+      "expected_signal": "report includes HF_TOKEN name and excludes token values",
+      "case_id": "token_report_required_env",
+      "test_level": "unit_simulation",
+      "requires": []
     },
     {
       "id": "static_dashboard_export",
       "purpose": "验证 dashboard 命令可以从 runs 状态和 benchmark report 生成静态 HTML/JSON 摘要",
-      "expected_signal": "dashboard html contains task summary and benchmark status"
+      "expected_signal": "dashboard html contains task summary and benchmark status",
+      "case_id": "static_dashboard_export",
+      "test_level": "unit_simulation",
+      "requires": []
     },
     {
       "id": "dashboard_http_server",
       "purpose": "验证 dashboard 可以作为只读本地 HTTP 服务提供 HTML、JSON 和健康检查",
-      "expected_signal": "HTTP server returns dashboard html, dashboard.json and healthz"
+      "expected_signal": "HTTP server returns dashboard html, dashboard.json and healthz",
+      "case_id": "dashboard_http_server",
+      "test_level": "unit_simulation",
+      "requires": []
     },
     {
       "id": "deployment_queue_dry_run",
       "purpose": "验证本地持久化任务队列可以入队、列出并前台消费 dry-run 部署任务",
-      "expected_signal": "queued job becomes completed and writes pipeline_results"
+      "expected_signal": "queued job becomes completed and writes pipeline_results",
+      "case_id": "deployment_queue_dry_run",
+      "test_level": "module_integration",
+      "requires": []
     },
     {
       "id": "deployment_package_export",
       "purpose": "验证部署任务可以导出不包含 workspace 的审计产物包和 manifest",
-      "expected_signal": "tar.gz contains task/state/reports/evidence manifest and excludes workspace"
+      "expected_signal": "tar.gz contains task/state/reports/evidence manifest and excludes workspace",
+      "case_id": "deployment_package_export",
+      "test_level": "module_integration",
+      "requires": []
     },
     {
       "id": "queue_parallel_worker_pool",
       "purpose": "验证 queue run --max-jobs 可以并发消费多个队列任务，而不是顺序执行",
-      "expected_signal": "two barrier-bound jobs complete only when worker pool runs them concurrently"
+      "expected_signal": "two barrier-bound jobs complete only when worker pool runs them concurrently",
+      "case_id": "queue_parallel_worker_pool",
+      "test_level": "module_integration",
+      "requires": []
     },
     {
       "id": "queue_gpu_probe_scheduling",
       "purpose": "验证队列 worker 未显式传入 gpu-slots 时可以使用 GPU 资源探测结果调度 GPU 任务",
-      "expected_signal": "one GPU slot runs one GPU job and leaves the next GPU job queued"
+      "expected_signal": "one GPU slot runs one GPU job and leaves the next GPU job queued",
+      "case_id": "queue_gpu_probe_scheduling",
+      "test_level": "module_integration",
+      "requires": []
     },
     {
       "id": "queue_claim_lock_prevents_duplicate",
       "purpose": "验证多 worker 场景下队列 claim lock 能阻止同一个 queued job 被重复执行",
-      "expected_signal": "locked queued job is skipped and remains queued without runner calls"
+      "expected_signal": "locked queued job is skipped and remains queued without runner calls",
+      "case_id": "queue_claim_lock_prevents_duplicate",
+      "test_level": "module_integration",
+      "requires": []
     },
     {
       "id": "queue_stale_claim_lock_recovery",
       "purpose": "验证崩溃 worker 遗留的过期 claim lock 可以被回收并继续执行任务",
-      "expected_signal": "expired lock is removed, job completes, and recovered_locks records the recovery"
+      "expected_signal": "expired lock is removed, job completes, and recovered_locks records the recovery",
+      "case_id": "queue_stale_claim_lock_recovery",
+      "test_level": "module_integration",
+      "requires": []
     },
     {
       "id": "readiness_audit_report",
       "purpose": "验证项目完成度审计能区分本地已完成能力和外部真实验收门槛",
-      "expected_signal": "readiness report marks local readiness 100% and lists external smoke gates"
+      "expected_signal": "readiness report marks local readiness 100% and lists external smoke gates",
+      "case_id": "readiness_audit_report",
+      "test_level": "unit_simulation",
+      "requires": []
     },
     {
       "id": "llm_planner_policy_merge",
       "purpose": "验证 LLM planner 可以通过结构化 action 影响 run candidate / verify hint，但不能越权执行命令",
-      "expected_signal": "accepted_actions and rejected_actions are both recorded"
+      "expected_signal": "accepted_actions and rejected_actions are both recorded",
+      "case_id": "llm_planner_policy_merge",
+      "test_level": "unit_simulation",
+      "requires": []
     },
     {
       "id": "llm_repair_dependency_execute_loop",
       "purpose": "验证 LLM 诊断缺失依赖后生成 install_package action，经 policy 执行后从 env_deploy resume，并最终由 verify 判定成功",
-      "expected_signal": "repair_apply_result.executed=true and verify_result.status=pass"
+      "expected_signal": "repair_apply_result.executed=true and verify_result.status=pass",
+      "case_id": "llm_repair_dependency_execute_loop",
+      "test_level": "module_integration",
+      "requires": []
     },
     {
       "id": "llm_verify_hint_recovery",
       "purpose": "验证默认 verify uncertain 后，LLM verify planner 能生成新的 trace request hint，并由 Python verify 重新验证成功",
-      "expected_signal": "first verify uncertain, second verify pass with trace evidence"
+      "expected_signal": "first verify uncertain, second verify pass with trace evidence",
+      "case_id": "llm_verify_hint_recovery",
+      "test_level": "module_integration",
+      "requires": []
     },
     {
       "id": "agent_loop_dependency_self_repair_e2e",
       "purpose": "验证 AgentLoopController 能把失败观察、LLM 诊断、policy、repair apply 和 verify pass 串成可审计闭环",
-      "expected_signal": "agent_loop summary, repair execution, policy trace, and final verify pass are recorded"
+      "expected_signal": "agent_loop summary, repair execution, policy trace, and final verify pass are recorded",
+      "case_id": "agent_loop_dependency_self_repair_e2e",
+      "test_level": "module_integration",
+      "requires": []
     },
     {
       "id": "agent_prompt_injection_defense",
       "purpose": "验证恶意 README 中的 prompt injection 和 secret 不会污染 LLM prompt/trace，且 shell action 被 policy 拒绝",
-      "expected_signal": "secret redacted, prompt injection risk annotated, shell action rejected"
+      "expected_signal": "secret redacted, prompt injection risk annotated, shell action rejected",
+      "case_id": "agent_prompt_injection_defense",
+      "test_level": "unit_simulation",
+      "requires": []
     },
     {
       "id": "agent_metrics_paired_comparison",
       "purpose": "验证 agent off/on paired run 可以生成可比较的 agent metrics",
-      "expected_signal": "metrics compare final status, repair attempts, rejected actions and helped flag"
+      "expected_signal": "metrics compare final status, repair attempts, rejected actions and helped flag",
+      "case_id": "agent_metrics_paired_comparison",
+      "test_level": "module_integration",
+      "requires": []
     },
     {
-      "id": "agent_full_self_healing_pipeline",
+      "id": "agent_self_healing_control_flow_simulation",
       "purpose": "验证普通 run_existing 主流程能在 repair 后自动从安全阶段 resume，而不是只在 live-smoke wrapper 中恢复",
-      "expected_signal": "first run requests auto resume and second run starts from env_deploy"
+      "expected_signal": "first run requests auto resume and second run starts from env_deploy",
+      "case_id": "agent_self_healing_control_flow_simulation",
+      "test_level": "unit_simulation",
+      "requires": []
     },
     {
       "id": "conda_backend_environment_yml_plan",
       "purpose": "验证 environment.yml 会触发 conda backend 并生成 prefix create/install plan",
-      "expected_signal": "env_solve selects conda and creates conda create -p command"
+      "expected_signal": "env_solve selects conda and creates conda create -p command",
+      "case_id": "conda_backend_environment_yml_plan",
+      "test_level": "unit_simulation",
+      "requires": []
     },
     {
       "id": "conda_backend_pytorch_cuda_plan",
       "purpose": "验证 conda PyTorch CUDA 方案会生成 pytorch-cuda 包安装命令",
-      "expected_signal": "conda install plan includes pytorch-cuda=12.1 and torch packages"
+      "expected_signal": "conda install plan includes pytorch-cuda=12.1 and torch packages",
+      "case_id": "conda_backend_pytorch_cuda_plan",
+      "test_level": "unit_simulation",
+      "requires": []
     },
     {
       "id": "conda_runner_command_rewrite",
       "purpose": "验证 conda 环境下 runner 会把 .venv/bin/python 改写为 conda run -p",
-      "expected_signal": "effective runner command starts with conda run -p"
+      "expected_signal": "effective runner command starts with conda run -p",
+      "case_id": "conda_runner_command_rewrite",
+      "test_level": "unit_simulation",
+      "requires": []
     },
     {
       "id": "verified_memory_after_self_healing",
       "purpose": "验证自修复后最终 verify pass 会写入 verified success memory",
-      "expected_signal": "memory entry has verified_success=true, trace id, repair hash and environment signature"
+      "expected_signal": "memory entry has verified_success=true, trace id, repair hash and environment signature",
+      "case_id": "verified_memory_after_self_healing",
+      "test_level": "module_integration",
+      "requires": []
     },
     {
       "id": "skill_evolution_from_verified_self_healing",
       "purpose": "验证 skill promotion 可以消费 verified self-healing memory，并在 apply 时写入 history/sha/rollback metadata",
-      "expected_signal": "approved proposal applies skill section and records previous/new sha256 plus rollback path"
+      "expected_signal": "approved proposal applies skill section and records previous/new sha256 plus rollback path",
+      "case_id": "skill_evolution_from_verified_self_healing",
+      "test_level": "module_integration",
+      "requires": []
     },
     {
       "id": "conda_pytorch_env_solve_plan",
       "purpose": "验证 Conda + PyTorch demo 的环境求解方案",
-      "expected_signal": "environment.yml is parsed and conda backend is selected"
+      "expected_signal": "environment.yml is parsed and conda backend is selected",
+      "case_id": "conda_pytorch_env_solve_plan",
+      "test_level": "unit_simulation",
+      "requires": []
     },
     {
       "id": "conda_pytorch_env_deploy_fake_execute",
       "purpose": "验证 Conda + PyTorch demo 的 fake env deploy 命令计划",
-      "expected_signal": "conda command plan contains PyTorch CUDA package command"
+      "expected_signal": "conda command plan contains PyTorch CUDA package command",
+      "case_id": "conda_pytorch_env_deploy_fake_execute",
+      "test_level": "unit_simulation",
+      "requires": []
     },
     {
       "id": "conda_self_healing_missing_package_resume",
       "purpose": "验证 Conda 场景下缺依赖 self-healing 后会从安全阶段 resume",
-      "expected_signal": "auto resume starts from env_deploy after repair"
+      "expected_signal": "auto resume starts from env_deploy after repair",
+      "case_id": "conda_self_healing_missing_package_resume",
+      "test_level": "unit_simulation",
+      "requires": []
     },
     {
       "id": "conda_verified_memory_skill_promotion",
       "purpose": "验证 Conda verified memory 可以进入 skill promotion 闭环",
-      "expected_signal": "verified memory proposal can be approved and applied with rollback metadata"
+      "expected_signal": "verified memory proposal can be approved and applied with rollback metadata",
+      "case_id": "conda_verified_memory_skill_promotion",
+      "test_level": "module_integration",
+      "requires": []
     },
     {
       "id": "agent_runtime_artifacts",
       "purpose": "验证每个 run 可生成 Agent step/state/plan/contribution 证据文件",
-      "expected_signal": "agent_steps.jsonl, agent_state.json, agent_plan.json and agent_contribution.json exist"
+      "expected_signal": "agent_steps.jsonl, agent_state.json, agent_plan.json and agent_contribution.json exist",
+      "case_id": "agent_runtime_artifacts",
+      "test_level": "module_integration",
+      "requires": []
     },
     {
       "id": "tool_registry_policy_gate",
       "purpose": "验证 Agent tool registry 标注 risk level、side effects、policy requirement 和 allowed modes",
-      "expected_signal": "side-effect tools require policy and gated_actor mode"
+      "expected_signal": "side-effect tools require policy and gated_actor mode",
+      "case_id": "tool_registry_policy_gate",
+      "test_level": "unit_simulation",
+      "requires": []
     },
     {
       "id": "agent_comparison_report",
       "purpose": "验证 baseline vs agent 对照报告能统计 baseline failed / agent passed 的 LLM helped case",
-      "expected_signal": "comparison_report.json/md are generated with helped case count"
+      "expected_signal": "comparison_report.json/md are generated with helped case count",
+      "case_id": "agent_comparison_report",
+      "test_level": "module_integration",
+      "requires": []
+    },
+    {
+      "id": "langgraph_self_repair_controller_e2e",
+      "purpose": "验证真实 LangGraph controller 经失败诊断、策略、受控安装、resume 和 fresh trace verify 完成自修复闭环",
+      "expected_signal": "controller_result completed and attempt repair_verified=true with a fresh post-repair trace",
+      "case_id": "langgraph_self_repair_controller_e2e",
+      "test_level": "controller_e2e",
+      "requires": [
+        "local_process",
+        "socket_bind",
+        "python_venv"
+      ]
     }
   ]
 }

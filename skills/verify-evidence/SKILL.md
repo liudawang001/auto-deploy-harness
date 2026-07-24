@@ -2,7 +2,7 @@
 name: verify-evidence
 version: "1.0.0"
 type: verification_skill
-stages: [verify, plan_first, replan]
+stages: [verify, plan, plan_first, replan]
 frameworks: []
 risk_level: low
 side_effects: false

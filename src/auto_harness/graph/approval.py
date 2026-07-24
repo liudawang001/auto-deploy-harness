@@ -2,7 +2,7 @@
 
 Provides:
 - ApprovalStore: persistent approval request/response records
-- build_approval_request: creates a deterministic approval request
+- build_approval_request: creates a deterministic approval request with schema
 - approval_node: LangGraph node that interrupts for approval
 - cleanup_node: LangGraph node that executes approved cleanup
 - resume_approval: resumes the graph with a decision
@@ -13,13 +13,19 @@ Rules:
 - Input changes require re-approval
 - Reject means executor call count = 0
 - Side effects must be AFTER the approval node, not before
+- request_hash binds decision to the original request
 """
 import hashlib
 import json
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional
 
 from auto_harness.utils.atomic import FileLock, atomic_write_text
+
+
+# Schema version for approval requests
+APPROVAL_SCHEMA_VERSION = 1
+ALLOWED_DECISIONS = ("approve", "reject")
 
 
 class ApprovalStore:
@@ -56,28 +62,73 @@ class ApprovalStore:
             return None
 
 
-def build_approval_request(operation, requested_action, reason, risk="high"):
-    """Build an approval request dict.
+def canonical_hash(payload):
+    """Compute a deterministic SHA-256 hash of a payload dict.
 
-    The approval_id is deterministic based on operation_id + action.
+    Used for request_hash to bind approval decisions to the original request.
     """
-    seed = "%s:%s" % (operation["operation_id"], requested_action)
-    approval_id = hashlib.sha256(seed.encode("utf-8")).hexdigest()[:24]
-    return {
-        "approval_id": approval_id,
-        "task_id": operation["task_id"],
-        "operation_id": operation["operation_id"],
-        "requested_action": requested_action,
-        "risk": risk,
+    text = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def build_approval_request(
+    *,
+    approval_id,
+    operation_id,
+    approval_kind,
+    requested_action,
+    risk,
+    reason,
+    allowed_decisions=None,
+    expires_at="",
+):
+    """Build a schema-versioned approval request dict.
+
+    All approval requests must be created through this factory.
+    The request_hash binds the decision to the original request,
+    preventing replay or substitution attacks.
+
+    Args:
+        approval_id: Unique identifier for this approval request.
+        operation_id: The operation this approval pertains to.
+        approval_kind: Type of approval (repair, recovery, etc.).
+        requested_action: What action will be taken if approved.
+        risk: Risk level (e.g. "high", "medium", "low").
+        reason: Human-readable reason for the approval request.
+        allowed_decisions: List of allowed decision values.
+        expires_at: ISO timestamp when this request expires.
+
+    Returns:
+        Dict with all required approval fields including request_hash.
+    """
+    from auto_harness.utils.time import utc_now_iso
+
+    decisions = list(allowed_decisions or ALLOWED_DECISIONS)
+    payload = {
+        "schema_version": APPROVAL_SCHEMA_VERSION,
+        "approval_id": str(approval_id),
+        "operation_id": str(operation_id),
+        "approval_kind": str(approval_kind),
+        "requested_action": str(requested_action),
+        "allowed_decisions": decisions,
+        "risk": str(risk),
         "reason": str(reason)[:2000],
-        "allowed_decisions": ["approve", "reject"],
-        "normalized_input_hash": operation.get("normalized_input_hash", ""),
+        "expires_at": str(expires_at or ""),
     }
+    payload["request_hash"] = canonical_hash(payload)
+    payload["created_at"] = utc_now_iso()
+    return payload
 
 
 ALLOWED_APPROVAL_FIELDS = (
     "approval_id", "operation_id", "decision",
     "reviewer", "note", "resolved_at",
+    "request_hash",
 )
 
 
@@ -85,6 +136,7 @@ def sanitize_approval(decision):
     """Strip non-allowed fields from an approval decision.
 
     Prevents injection of extra fields into the approval record.
+    Allows request_hash for decision binding and reviewer for audit.
     """
     return {
         key: str(decision.get(key, ""))[:2000]
@@ -102,12 +154,29 @@ def approval_node(state):
     The interrupt is BEFORE any side-effect execution. When the
     node resumes after interrupt, it re-runs from the top, so
     the approval request is re-saved (idempotent).
+
+    Validates required fields and request_hash before accepting.
     """
     from langgraph.types import interrupt
 
     request = state.get("pending_approval")
     if not request:
         return {"stop_reason": "approval_request_missing"}
+
+    # Validate required fields before interrupt
+    required = (
+        "approval_id",
+        "operation_id",
+        "approval_kind",
+        "requested_action",
+        "allowed_decisions",
+        "request_hash",
+    )
+    missing = [name for name in required if not request.get(name)]
+    if missing:
+        return {
+            "stop_reason": "approval_request_invalid:%s" % ",".join(missing)
+        }
 
     store = ApprovalStore(state["run_dir"])
     approval_id = request.get("approval_id", "")
@@ -118,6 +187,10 @@ def approval_node(state):
 
     if not isinstance(decision, dict):
         return {"stop_reason": "invalid_approval_response"}
+
+    # Validate request_hash matches (prevents replay/substitution)
+    if decision.get("request_hash") != request.get("request_hash"):
+        return {"stop_reason": "approval_request_hash_mismatch"}
 
     if decision.get("operation_id") != request.get("operation_id"):
         return {"stop_reason": "approval_operation_mismatch"}
@@ -172,9 +245,21 @@ def cleanup_node(state, recovery, cleanup_executor):
     if not check.get("owned"):
         return {"stop_reason": "cleanup_ownership_conflict"}
 
-    cleanup_result = cleanup_executor.remove_owned_resource(operation, check)
+    cleanup_result = cleanup_executor.remove_owned_resource(
+        operation,
+        check,
+        dry_run=bool(state.get("dry_run", True)),
+    )
     if not cleanup_result.get("success"):
         return {"stop_reason": "approved_cleanup_failed"}
+    if not cleanup_result.get("executed"):
+        return {
+            "stop_reason": "cleanup_dry_run_only",
+            "recovery_events": [{
+                "operation_id": operation_id,
+                "event": "cleanup_planned",
+            }],
+        }
 
     recovery.journal.transition(operation_id, "retryable", cleanup=cleanup_result)
     return {

@@ -200,7 +200,13 @@ class DockerReconciler:
         if labels.get("auto-harness.plan-hash") != expected.get("plan_hash"):
             return {"owned": False, "reason": "plan-hash mismatch"}
 
-        return {"owned": True, "container_id": ids[0], "inspect": data}
+        return {
+            "owned": True,
+            "container_id": ids[0],
+            "task_id": labels.get("auto-harness.task-id", ""),
+            "operation_id": labels.get("auto-harness.operation-id", ""),
+            "inspect": data,
+        }
 
 
 def docker_config_matches(inspect_data, expected):

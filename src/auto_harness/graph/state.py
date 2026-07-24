@@ -81,6 +81,7 @@ class DeploymentGraphState(TypedDict, total=False):
     repair_count: int
     max_repairs: int
     repair_resume_stage: str
+    repair_resume_executed: bool
 
     # ── Recovery gate (Phase 6) ────────────────────────────────────────
 
@@ -104,3 +105,12 @@ class DeploymentGraphState(TypedDict, total=False):
     llm_provider: str
     llm_error: str
     previous_plan_path: str
+
+    # ── Memory/Skill fields (Task 8) ───────────────────────────────────
+
+    memory_hits: List[Dict[str, Any]]
+    selected_skills: Dict[str, List[Dict[str, Any]]]
+    skill_contexts: Dict[str, Dict[str, Any]]
+    skill_route_paths: Dict[str, str]
+    verified_memory_path: str
+    skill_outcome_paths: List[str]

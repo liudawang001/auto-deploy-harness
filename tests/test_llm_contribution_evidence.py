@@ -5,13 +5,16 @@ Validates that:
 2. llm_helped=true only when baseline failed and agent passed with trace evidence
 3. Without baseline, llm_required_status is "unknown_without_baseline"
 4. report.md contains LLM Contribution Evidence section
+5. decision=None does not crash
+6. metadata_only is not counted as helped
+7. policy_rejected is not counted as helped
 """
 import json
 import tempfile
 import unittest
 from pathlib import Path
 
-from auto_harness.agent_runtime.evidence import LLMContributionEvidenceWriter
+from auto_harness.agent_runtime.evidence import LLMContributionEvidenceWriter, _decision_dict
 from auto_harness.models.base import write_json
 
 
@@ -212,3 +215,146 @@ class TestLLMContributionEvidence(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestDecisionDictHelper(unittest.TestCase):
+    """Test _decision_dict helper for safe decision access."""
+
+    def test_none_decision_does_not_crash(self):
+        """step.get('decision') returning None should not crash."""
+        step = {"decision": None}
+        result = _decision_dict(step)
+        self.assertEqual(result, {})
+
+    def test_dict_decision_returned(self):
+        """Normal dict decision should be returned as-is."""
+        step = {"decision": {"decision_status": "ok"}}
+        result = _decision_dict(step)
+        self.assertEqual(result, {"decision_status": "ok"})
+
+    def test_non_dict_step_returns_empty(self):
+        """Non-dict step should return empty dict."""
+        result = _decision_dict("not a dict")
+        self.assertEqual(result, {})
+
+    def test_missing_decision_returns_empty(self):
+        """Step without decision key should return empty dict."""
+        step = {"other_key": "value"}
+        result = _decision_dict(step)
+        self.assertEqual(result, {})
+
+
+class TestLLMHelpedTightening(unittest.TestCase):
+    """Test that llm_helped only counts effective decisions."""
+
+    def _write_evidence(self, run_dir, trace_id, content):
+        evidence_dir = run_dir / "evidence"
+        evidence_dir.mkdir(parents=True, exist_ok=True)
+        path = evidence_dir / "verify.json"
+        write_json(path, {"trace_id": trace_id, "content": content})
+        return str(path)
+
+    def test_none_decision_is_not_helped(self):
+        """decision=None should not count as llm_helped."""
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            evidence_path = self._write_evidence(run_dir, "trace-1", "data with trace-1")
+            writer = LLMContributionEvidenceWriter()
+            result = writer.write(
+                run_dir=run_dir,
+                task_id="test-none-decision",
+                baseline_result={"final_status": "failed"},
+                agent_result={"mode": "gated_actor"},
+                agent_steps=[{"decision": None}],
+                pipeline_results={"verify": {"status": "passed", "trace_id": "trace-1", "evidence_paths": [evidence_path]}},
+            )
+            self.assertFalse(result["llm_helped"])
+
+    def test_metadata_only_is_not_helped(self):
+        """metadata_only decision should not count as llm_helped."""
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            evidence_path = self._write_evidence(run_dir, "trace-2", "data with trace-2")
+            writer = LLMContributionEvidenceWriter()
+            result = writer.write(
+                run_dir=run_dir,
+                task_id="test-metadata-only",
+                baseline_result={"final_status": "failed"},
+                agent_result={"mode": "gated_actor"},
+                agent_steps=[{
+                    "decision": {
+                        "decision_status": "ok",
+                        "policy_allowed": True,
+                        "executed": True,
+                        "metadata_only": True,
+                    }
+                }],
+                pipeline_results={"verify": {"status": "passed", "trace_id": "trace-2", "evidence_paths": [evidence_path]}},
+            )
+            self.assertFalse(result["llm_helped"])
+
+    def test_policy_rejected_is_not_helped(self):
+        """policy_rejected decision should not count as llm_helped."""
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            evidence_path = self._write_evidence(run_dir, "trace-3", "data with trace-3")
+            writer = LLMContributionEvidenceWriter()
+            result = writer.write(
+                run_dir=run_dir,
+                task_id="test-policy-rejected",
+                baseline_result={"final_status": "failed"},
+                agent_result={"mode": "gated_actor"},
+                agent_steps=[{
+                    "decision": {
+                        "decision_status": "ok",
+                        "policy_allowed": False,
+                        "executed": True,
+                    }
+                }],
+                pipeline_results={"verify": {"status": "passed", "trace_id": "trace-3", "evidence_paths": [evidence_path]}},
+            )
+            self.assertFalse(result["llm_helped"])
+
+    def test_pass_without_current_trace_is_not_helped(self):
+        """Agent pass without current trace evidence should not count as helped."""
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            writer = LLMContributionEvidenceWriter()
+            result = writer.write(
+                run_dir=run_dir,
+                task_id="test-no-trace",
+                baseline_result={"final_status": "failed"},
+                agent_result={"mode": "gated_actor"},
+                agent_steps=[{
+                    "decision": {
+                        "decision_status": "ok",
+                        "policy_allowed": True,
+                        "executed": True,
+                    }
+                }],
+                pipeline_results={"verify": {"status": "passed", "trace_id": "trace-4", "evidence_paths": []}},
+            )
+            self.assertFalse(result["llm_helped"])
+
+    def test_no_baseline_means_required_unknown(self):
+        """Without baseline, llm_required must be False and status unknown."""
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            evidence_path = self._write_evidence(run_dir, "trace-5", "data with trace-5")
+            writer = LLMContributionEvidenceWriter()
+            result = writer.write(
+                run_dir=run_dir,
+                task_id="test-no-baseline",
+                baseline_result=None,
+                agent_result={"mode": "gated_actor"},
+                agent_steps=[{
+                    "decision": {
+                        "decision_status": "ok",
+                        "policy_allowed": True,
+                        "executed": True,
+                    }
+                }],
+                pipeline_results={"verify": {"status": "passed", "trace_id": "trace-5", "evidence_paths": [evidence_path]}},
+            )
+            self.assertFalse(result["llm_required"])
+            self.assertEqual(result["llm_required_status"], "unknown_without_baseline")

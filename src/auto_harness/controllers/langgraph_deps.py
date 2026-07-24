@@ -25,6 +25,30 @@ class LangGraphControllerDependencies:
     def __init__(self, runner) -> None:
         self.runner = runner
 
+    @property
+    def skill_router(self):
+        return self.runner.skill_router
+
+    @property
+    def skill_context_builder(self):
+        return self.runner.skill_context_builder
+
+    @property
+    def memory_store(self):
+        return self.runner.memory
+
+    @property
+    def verified_memory_recorder(self):
+        return self.runner.verified_memory_recorder
+
+    @property
+    def skill_outcome_recorder(self):
+        return self.runner.skill_outcome_recorder
+
+    @property
+    def skill_routing_service(self):
+        return self.runner.skill_routing_service
+
     def initial_state(self, context: DeploymentContext) -> Dict:
         """Build initial graph state for a new deployment."""
         max_replans = getattr(self.runner.config, "agent_plan_first_max_replans", 2)
@@ -40,8 +64,13 @@ class LangGraphControllerDependencies:
         from auto_harness.agent_runtime.project_snapshot import ProjectSnapshotBuilder
         from auto_harness.agent_runtime.stage_executor import AgentStageExecutor
 
-        provider = self.runner._create_plan_first_provider()
-        planner = LLMDeploymentPlanner(provider)
+        # Support deterministic planner mode for baseline evaluation
+        if getattr(self.runner.config, "langgraph_planner_mode", "llm") == "deterministic":
+            from auto_harness.agent_runtime.deterministic_planner import DeterministicDeploymentPlanner
+            planner = DeterministicDeploymentPlanner()
+        else:
+            provider = self.runner._create_plan_first_provider()
+            planner = LLMDeploymentPlanner(provider)
         parser = DeploymentPlanParser()
         policy_gate = PlanPolicyGate()
         compiler = PlanCompiler()
@@ -69,10 +98,31 @@ class LangGraphControllerDependencies:
                 max_files=getattr(self.runner.config, "agent_plan_first_max_files", 80),
                 max_file_chars=getattr(self.runner.config, "agent_plan_first_max_file_chars", 6000),
             )
-            return snapshot_builder.build(
+            # Build first so routing uses signals from the actual repository.
+            snapshot = snapshot_builder.build(
                 Path(state["repo_dir"]),
                 task_id=state["task_id"],
             )
+            analysis = snapshot.get("detected_signals", {})
+
+            routed = self.runner.skill_routing_service.route(
+                stage="plan",
+                analysis=analysis,
+                allowed_tools=[],
+            )
+
+            snapshot["memory_hits"] = routed["memory_hits"]
+            snapshot["selected_skills"] = routed["selected_skills"]
+            snapshot["skill_context"] = routed["skill_context"]
+            snapshot["_skill_route"] = routed["request"]
+
+            # Write route artifact
+            route_dir = Path(state["run_dir"]) / "skills" / "routes"
+            route_dir.mkdir(parents=True, exist_ok=True)
+            from auto_harness.models.base import write_json
+            write_json(route_dir / "plan.json", routed["artifact"])
+
+            return snapshot
 
         def build_replan_input(state):
             failed_stage = state.get("failed_stage", "")
@@ -161,6 +211,8 @@ class LangGraphControllerDependencies:
             # Phase 6 additions
             recovery_adapter=recovery_adapter,
             runtime_policy_factory=lambda state: state.get("runtime_policy", {}),
+            # Task 10: skill routing
+            route_skills=self.runner.skill_routing_service.route,
         )
 
     def _failure_observer(self):
@@ -198,13 +250,49 @@ class LangGraphControllerDependencies:
         config = self.runner.config
         try:
             if getattr(config, "langgraph_enable_recovery", True):
+                import socket
+                import subprocess
                 from auto_harness.recovery.download import DownloadReconciler
-                from auto_harness.recovery.process import ProcessReconciler
+                from auto_harness.recovery.process import ProcessProbe, ProcessReconciler
                 from auto_harness.recovery.docker import DockerReconciler
                 from auto_harness.recovery.dependency import DependencyReconciler
+
+                def port_probe(host, port):
+                    try:
+                        with socket.create_connection((host, int(port)), timeout=1):
+                            return True
+                    except OSError:
+                        return False
+
+                def docker_command_runner(cmd):
+                    try:
+                        completed = subprocess.run(
+                            cmd,
+                            capture_output=True,
+                            text=True,
+                            timeout=30,
+                            check=False,
+                        )
+                        return {
+                            "exit_code": completed.returncode,
+                            "stdout": completed.stdout,
+                            "stderr": completed.stderr,
+                        }
+                    except (OSError, subprocess.SubprocessError) as exc:
+                        return {
+                            "exit_code": 1,
+                            "stdout": "",
+                            "stderr": str(exc)[:500],
+                        }
+
                 reconcilers["model_download"] = DownloadReconciler()
-                reconcilers["local_process"] = ProcessReconciler()
-                reconcilers["docker_service"] = DockerReconciler()
+                reconcilers["local_process"] = ProcessReconciler(
+                    ProcessProbe(),
+                    port_probe,
+                )
+                reconcilers["docker_service"] = DockerReconciler(
+                    docker_command_runner,
+                )
                 reconcilers["dependency_install"] = DependencyReconciler()
         except Exception:
             # Reconcilers may not be available in all environments

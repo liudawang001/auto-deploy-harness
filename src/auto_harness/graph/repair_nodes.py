@@ -42,12 +42,14 @@ def repair_plan_node(state, deps):
     # Inject diagnosis into stage result data
     stage_result.data["agent_diagnosis"] = state.get("diagnosis", {})
 
-    # Call RepairPlanner
+    # Call RepairPlanner with skill_context (Task 10)
     repair_planner = deps.repair_planner
+    skill_context = state.get("skill_contexts", {}).get("repair", {})
     plan = repair_planner.propose(
         failed_stage,
         stage_result,
         analysis=state.get("compiled_analysis", {}),
+        skill_context=skill_context,
     )
 
     # Write repair plan artifact
@@ -153,13 +155,16 @@ def repair_policy_node(state, deps):
     if needs_approval and effective_policy.get("allowed"):
         update["approval_kind"] = "repair"
         update["approval_resume_target"] = "repair_apply"
-        update["pending_approval"] = {
-            "approval_id": "repair_%s_%s" % (repair_count + 1, utc_now_iso().replace(":", "-").replace(".", "-")),
-            "approval_kind": "repair",
-            "requested_action": "apply_repair",
-            "risk": "high",
-            "reason": "repair requires operator approval: %s" % ", ".join(approval_reasons),
-        }
+        operation_id = state.get("pending_operation_id", "")
+        from auto_harness.graph.approval import build_approval_request
+        update["pending_approval"] = build_approval_request(
+            approval_id="repair_%s_%s" % (repair_count + 1, (operation_id or "unknown")[:8]),
+            operation_id=operation_id or "repair_%d" % (repair_count + 1),
+            approval_kind="repair",
+            requested_action="apply_repair",
+            risk="high",
+            reason="repair requires operator approval: %s" % ", ".join(approval_reasons),
+        )
 
     # Check if policy rejected all actions
     if not effective_policy.get("allowed"):
@@ -203,6 +208,32 @@ def repair_apply_node(state, deps, config=None):
         allowed_commands=getattr(config, "allowed_commands", None) if config else None,
         env_context=env_context,
     )
+    from auto_harness.repair.evidence import (
+        build_repair_attempt,
+        is_effective_repair_action,
+    )
+    previous_verify = state.get("stage_results", {}).get("verify", {})
+    previous_verify_data = (
+        previous_verify.get("data", {})
+        if isinstance(previous_verify, dict)
+        else {}
+    )
+    action_results = list(apply_result.get("action_results") or [])
+    effective_action_count = sum(
+        1 for item in action_results if is_effective_repair_action(item)
+    )
+    metadata_only_count = sum(
+        1
+        for item in action_results
+        if item.get("metadata_only") or item.get("status") == "metadata_only"
+    )
+    apply_result["verification_trace_before"] = str(
+        previous_verify_data.get("trace_id") or ""
+    )
+    apply_result["effective_action_count"] = effective_action_count
+    apply_result["metadata_only_count"] = metadata_only_count
+    apply_result["applied_at"] = utc_now_iso()
+    apply_result["resume_executed"] = False
 
     # Load repair overlay
     repair_overlay_mod = deps.repair_overlay
@@ -215,6 +246,20 @@ def repair_apply_node(state, deps, config=None):
     repairs_dir.mkdir(parents=True, exist_ok=True)
     apply_path = repairs_dir / ("repair_apply_%s.json" % (repair_count + 1))
     write_json(apply_path, apply_result)
+    write_json(repairs_dir / "repair_apply_result.json", apply_result)
+    attempt_path = repairs_dir / ("attempt_%s.json" % (repair_count + 1))
+    write_json(attempt_path, build_repair_attempt(
+        attempt=repair_count + 1,
+        failure_signature_before=state.get("failure_signature", ""),
+        diagnosis_path=state.get("diagnosis_path", ""),
+        plan_path=state.get("repair_plan_path", ""),
+        policy_path=state.get("repair_policy_path", ""),
+        apply_path=str(apply_path),
+        resume_from_stage=repair_plan.get("rerun_from_effective", "")
+        or repair_plan.get("rerun_from", ""),
+        effective_action_count=effective_action_count,
+        metadata_only_count=metadata_only_count,
+    ))
 
     # Determine rerun stage
     rerun_from = repair_plan.get("rerun_from_effective", "") or repair_plan.get("rerun_from", "")
@@ -227,6 +272,7 @@ def repair_apply_node(state, deps, config=None):
         "repair_overlay": overlay,
         "repair_count": repair_count + 1,
         "repair_resume_stage": repair_resume_stage,
+        "repair_resume_executed": False,
         "current_stage": "repair_apply",
     }
 
@@ -243,6 +289,7 @@ def select_repair_resume_node(state, deps):
 
     return {
         "resume_from_stage": selected,
+        "repair_resume_executed": True,
         "current_stage": "select_repair_resume",
     }
 

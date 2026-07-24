@@ -18,6 +18,7 @@ from typing import Dict, List, Optional
 
 from auto_harness.agent_runtime.artifacts import AgentArtifactWriter
 from auto_harness.agent_runtime.contribution import compute_llm_helped
+from auto_harness.agent_runtime.evidence import _decision_dict
 from auto_harness.agent_runtime.decision_gate import AgentDecisionGate
 from auto_harness.agent_runtime.evidence import LLMContributionEvidenceWriter
 from auto_harness.agent_runtime.stage_executor import AgentStageExecutor, StageExecutionResult
@@ -704,12 +705,12 @@ class DeploymentAgentLoop:
             "changed_stage": state.current_stage,
             "decision_type": "",
             "accepted_tool_count": len(state.tool_results),
-            "rejected_tool_count": sum(1 for d in state.decisions if not d.get("decision", {}).get("policy_allowed")),
+            "rejected_tool_count": sum(1 for d in state.decisions if not _decision_dict(d).get("policy_allowed")),
         }
 
         # Extract decision type from decisions
         for decision in state.decisions:
-            d = decision.get("decision", {})
+            d = _decision_dict(decision)
             if d.get("tool_call"):
                 tool_name = d["tool_call"].get("name", "")
                 if tool_name:
@@ -865,7 +866,7 @@ class DeploymentAgentLoop:
         # Compute llm_helped across all decisions
         total_llm_helped = False
         for decision in state.decisions:
-            d = decision.get("decision", {})
+            d = _decision_dict(decision)
             if d.get("llm_helped"):
                 total_llm_helped = True
                 break

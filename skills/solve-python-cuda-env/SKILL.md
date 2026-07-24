@@ -2,7 +2,7 @@
 name: solve-python-cuda-env
 version: "1.0.0"
 type: execution_skill
-stages: [env_solve, env_deploy, plan_first]
+stages: [env_solve, env_deploy, plan, plan_first]
 frameworks: [torch, transformers, vllm]
 risk_level: medium
 side_effects: false
