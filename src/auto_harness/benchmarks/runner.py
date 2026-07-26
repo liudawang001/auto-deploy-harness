@@ -347,6 +347,12 @@ class BenchmarkRunner:
                 return self._case_agent_prompt_injection_defense(case)
             if case_id == "agent_metrics_paired_comparison":
                 return self._case_agent_metrics_paired_comparison(case)
+            if case_id == "langgraph_fault_injection_idempotency":
+                return self._case_langgraph_fault_injection_idempotency(case)
+            if case_id == "docker_phase_security_profiles":
+                return self._case_docker_phase_security_profiles(case)
+            if case_id == "unified_metrics_consistency":
+                return self._case_unified_metrics_consistency(case)
             if case_id in ("conda_backend_environment_yml_plan", "conda_pytorch_env_solve_plan"):
                 return self._case_conda_backend_environment_yml_plan(case)
             if case_id in ("conda_backend_pytorch_cuda_plan", "conda_pytorch_env_deploy_fake_execute"):
@@ -2110,6 +2116,154 @@ class BenchmarkRunner:
                 and report["totals"]["llm_call_count"] == 1
             )
         return self._result(case, "passed" if ok else "failed", "Agent metrics paired comparison verified")
+
+    def _case_langgraph_fault_injection_idempotency(self, case: Dict) -> Dict:
+        from auto_harness.recovery import FaultInjector, InjectedFault, OperationJournal
+        from auto_harness.recovery.graph_adapter import GraphRecoveryAdapter
+
+        class ReuseReconciler:
+            def reconcile(self, _operation):
+                return {"decision": "reuse", "reason": "resource_observed"}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            state = {
+                "task_id": "bench-p1-recovery",
+                "run_dir": str(run_dir),
+                "repo_dir": str(run_dir / "workspace" / "repo"),
+                "runtime_policy": {},
+                "compiled_analysis": {"install_plan": [["pip", "install", "flask"]]},
+            }
+            adapter = GraphRecoveryAdapter(
+                reconcilers={"dependency_install": ReuseReconciler()}
+            )
+            decision = adapter.prepare_or_reconcile(state, "env_deploy")
+            side_effect_calls = 1
+            adapter.persist_result(
+                state,
+                "env_deploy",
+                {"status": "passed", "data": {"side_effect_calls": side_effect_calls}},
+            )
+            try:
+                FaultInjector(
+                    ["env_deploy:after_side_effect_before_commit"]
+                ).raise_if_configured(
+                    run_dir=run_dir,
+                    task_id=state["task_id"],
+                    stage="env_deploy",
+                    window="after_side_effect_before_commit",
+                    operation_id=decision.operation["operation_id"],
+                )
+            except InjectedFault:
+                pass
+            resumed = GraphRecoveryAdapter(
+                reconcilers={"dependency_install": ReuseReconciler()}
+            ).prepare_or_reconcile(state, "env_deploy")
+            record = OperationJournal(run_dir).load(decision.operation["operation_id"])
+            ok = (
+                resumed.decision == "reuse"
+                and resumed.hydrated_stage_result.get("data", {}).get("side_effect_calls") == 1
+                and record.get("status") == "committed"
+                and record.get("idempotency_key") == record.get("operation_id")
+                and side_effect_calls == 1
+            )
+        return self._result(
+            case,
+            "passed" if ok else "failed",
+            "fault window resumed from durable result without duplicate execution",
+        )
+
+    def _case_docker_phase_security_profiles(self, case: Dict) -> Dict:
+        from auto_harness.runtime import DockerSandboxBackend
+
+        install = DockerSandboxBackend.for_phase("install").wrap(
+            Path("/tmp/bench-repo"), ["pip", "install", "flask"]
+        )
+        runtime = DockerSandboxBackend.for_phase("runtime").wrap(
+            Path("/tmp/bench-repo"), ["python", "app.py"]
+        )
+        verify = DockerSandboxBackend.for_phase("verify", gpus="all").wrap(
+            Path("/tmp/bench-repo"), ["python", "verify.py"]
+        )
+        ok = (
+            install.security_options["repo_mount_mode"] == "rw"
+            and install.security_options["read_only_rootfs"] is False
+            and runtime.security_options["repo_mount_mode"] == "ro"
+            and runtime.security_options["read_only_rootfs"] is True
+            and bool(runtime.security_options["user"])
+            and verify.gpus == "none"
+            and verify.security_options["model_cache_mount_mode"] == "ro"
+        )
+        return self._result(
+            case,
+            "passed" if ok else "failed",
+            "Docker install/runtime/verify phase security profiles verified",
+        )
+
+    def _case_unified_metrics_consistency(self, case: Dict) -> Dict:
+        from auto_harness.observability import UnifiedMetricsCollector
+        from auto_harness.recovery import OperationJournal
+
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "bench-p1-metrics"
+            (run_dir / "logs" / "agent_calls").mkdir(parents=True)
+            (run_dir / "repairs").mkdir()
+            (run_dir / "reports").mkdir()
+            write_json(run_dir / "logs" / "agent_calls" / "repair.json", {
+                "stage": "repair",
+                "parsed_decision": {"actions": [{"type": "install_package"}]},
+                "policy_result": {
+                    "accepted_actions": [{"type": "install_package"}],
+                    "rejected_actions": [{"type": "run_shell"}],
+                },
+            })
+            write_json(run_dir / "repairs" / "repair_apply_result.json", {
+                "action_results": [{
+                    "action_type": "install_package",
+                    "executed": True,
+                    "exit_code": 0,
+                }],
+            })
+            write_json(run_dir / "reports" / "pipeline_results.json", {
+                "verify": {"status": "passed", "data": {}},
+            })
+            journal = OperationJournal(run_dir)
+            journal.begin({
+                "operation_id": "bench-operation",
+                "idempotency_key": "bench-operation",
+                "task_id": run_dir.name,
+                "run_dir": str(run_dir),
+                "stage": "env_deploy",
+                "action": "install_dependencies",
+                "resource_type": "dependency_install",
+                "normalized_input_hash": "benchmark",
+            })
+            journal.transition("bench-operation", "unknown")
+            journal.transition(
+                "bench-operation",
+                "committed",
+                reconcile_result={"decision": "reuse"},
+            )
+            report = UnifiedMetricsCollector().collect(run_dir)
+            counters = report["summary"]["counters"]
+            event_lines = (
+                run_dir / "reports" / "agent_metric_events.jsonl"
+            ).read_text(encoding="utf-8").splitlines()
+            ok = (
+                counters["llm_calls"] == 1
+                and counters["policy_accepted"] == 1
+                and counters["policy_rejected"] == 1
+                and counters["repair_actions_executed"] == 1
+                and counters["duplicate_execution_prevented"] == 1
+                and counters["verify_passes"] == 1
+                and len(event_lines) == report["event_count"]
+                and "operations/bench-operation.json" in report["provenance"]
+            )
+        return self._result(
+            case,
+            "passed" if ok else "failed",
+            "unified metrics match persisted source artifacts",
+        )
 
     def _case_conda_backend_environment_yml_plan(self, case: Dict) -> Dict:
         with tempfile.TemporaryDirectory() as tmp:

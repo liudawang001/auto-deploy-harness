@@ -135,9 +135,18 @@ README 和运行证据必须使用“Schema 化 JSON Action + Python Policy/Exec
 
 ### P1
 
-1. LangGraph checkpoint 故障注入和跨进程恢复证据。
-2. Docker build/install 与 runtime/verify 权限分层。
-3. 统一采集 LLM 调用、Policy reject、repair effectiveness、Skill gain 指标。
+1. [已完成] LangGraph checkpoint 故障注入和跨进程恢复证据。
+2. [已完成] Docker install 与 runtime/verify 命令权限分层；未声明已完成持久化镜像 build。
+3. [已完成] 统一采集 LLM 调用、Policy reject、repair effectiveness、Skill gain 指标。
+
+P1 本地验收：
+
+- 三个故障窗口、稳定幂等键、durable result 和独立 Python 子进程恢复测试已接入。
+- Docker install/runtime/verify phase profile 已接入命令构造和测试。
+- 统一 `AgentMetricEvent`、JSONL、聚合和 provenance 已接入 `AgentMetricsCollector`。
+- 新增 3 个 benchmark case，均通过；完整 benchmark 为 `71 passed, 2 not_run`。
+- 完整测试为 `1222 passed, 18 failed`；18 项均因当前执行沙箱禁止本地 socket bind。
+- 未运行真实 LLM API、Docker daemon、联网模型部署或 GPU smoke。
 
 ### 不做
 

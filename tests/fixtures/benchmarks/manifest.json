@@ -563,6 +563,30 @@
         "socket_bind",
         "python_venv"
       ]
+    },
+    {
+      "id": "langgraph_fault_injection_idempotency",
+      "purpose": "验证副作用完成后、journal commit 前崩溃时，恢复流程通过稳定幂等键复用持久化结果且不重复执行",
+      "expected_signal": "resume decision is reuse, committed operation keeps idempotency key, and side effect count remains one",
+      "case_id": "langgraph_fault_injection_idempotency",
+      "test_level": "module_integration",
+      "requires": []
+    },
+    {
+      "id": "docker_phase_security_profiles",
+      "purpose": "验证 Docker 安装、运行、验证阶段使用不同的最小权限策略",
+      "expected_signal": "install is writable while runtime and verify are read-only, non-root, and verify has no GPU",
+      "case_id": "docker_phase_security_profiles",
+      "test_level": "unit_simulation",
+      "requires": []
+    },
+    {
+      "id": "unified_metrics_consistency",
+      "purpose": "验证 Agent、policy、repair、recovery、verify 指标均由持久化工件生成并带来源路径",
+      "expected_signal": "event counters equal source artifacts and duplicate prevention is observable",
+      "case_id": "unified_metrics_consistency",
+      "test_level": "module_integration",
+      "requires": []
     }
   ]
 }

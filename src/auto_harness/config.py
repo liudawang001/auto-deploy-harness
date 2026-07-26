@@ -110,6 +110,7 @@ class HarnessConfig:
     langgraph_enable_repair: bool = True
     langgraph_enable_agent_verify: bool = True
     langgraph_enable_recovery: bool = True
+    langgraph_fault_injection_points: List[str] = None
     langgraph_max_diagnoses: int = 2
     langgraph_max_repairs: int = 2
     langgraph_max_same_failure: int = 2
@@ -128,6 +129,8 @@ class HarnessConfig:
             self.agent_allowed_hosts = ["127.0.0.1", "localhost", "::1"]
         if self.conda_allowed_channels is None:
             self.conda_allowed_channels = ["defaults", "conda-forge", "pytorch", "nvidia", "fastai"]
+        if self.langgraph_fault_injection_points is None:
+            self.langgraph_fault_injection_points = []
         if self.default_controller not in {"legacy", "langgraph"}:
             raise ValueError("default_controller must be 'legacy' or 'langgraph', got: %s" % self.default_controller)
         if self.langgraph_max_diagnoses < 0:
@@ -140,6 +143,15 @@ class HarnessConfig:
             raise ValueError(
                 "langgraph_planner_mode must be 'llm' or 'deterministic', got: %s" % self.langgraph_planner_mode
             )
+        valid_fault_windows = {
+            "before_side_effect",
+            "after_side_effect_before_commit",
+            "after_commit_before_checkpoint",
+        }
+        for point in self.langgraph_fault_injection_points:
+            parts = str(point).split(":", 1)
+            if len(parts) != 2 or not parts[0] or parts[1] not in valid_fault_windows:
+                raise ValueError("invalid langgraph fault injection point: %s" % point)
         if self.docker_network == "host":
             raise ValueError("host network is not allowed")
         if not self.docker_memory:
@@ -205,6 +217,12 @@ class HarnessConfig:
             known["agent_plan_first_mode"] = os.environ["AUTO_HARNESS_AGENT_PLAN_FIRST_MODE"]
         if os.environ.get("AUTO_HARNESS_AGENT_PLAN_FIRST_MAX_REPLANS"):
             known["agent_plan_first_max_replans"] = int(os.environ["AUTO_HARNESS_AGENT_PLAN_FIRST_MAX_REPLANS"])
+        if os.environ.get("AUTO_HARNESS_LANGGRAPH_FAULT_INJECTION"):
+            known["langgraph_fault_injection_points"] = [
+                point.strip()
+                for point in os.environ["AUTO_HARNESS_LANGGRAPH_FAULT_INJECTION"].split(",")
+                if point.strip()
+            ]
         return cls(**known)
 
     @property

@@ -13,6 +13,7 @@ from auto_harness.recovery.schemas import (
 )
 from auto_harness.recovery.journal import OperationJournal
 from auto_harness.recovery.service import RecoveryService
+from auto_harness.recovery.faults import FaultInjector, InjectedFault, FAULT_WINDOWS
 
 __all__ = [
     "OperationRecord",
@@ -23,4 +24,7 @@ __all__ = [
     "RECONCILE_DECISIONS",
     "OperationJournal",
     "RecoveryService",
+    "FaultInjector",
+    "InjectedFault",
+    "FAULT_WINDOWS",
 ]

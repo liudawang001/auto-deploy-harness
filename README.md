@@ -862,3 +862,32 @@ runs/<task-id>/evidence/*trace*.json
 - 所有命令必须通过 command allowlist、path boundary、secret redaction 和 verify trace 检查。
 - 失败后 LLM 可基于真实日志和 evidence replan，但新 plan 仍需通过 policy gate。
 - 最终成功只能由 VerifyModule 的当前 trace evidence 判定。
+
+## P1 恢复、Docker 分层和统一指标
+
+LangGraph side-effect stage 支持三个默认关闭的故障注入窗口：
+
+```text
+env_deploy:before_side_effect
+env_deploy:after_side_effect_before_commit
+env_deploy:after_commit_before_checkpoint
+```
+
+可通过 `langgraph_fault_injection_points` 或
+`AUTO_HARNESS_LANGGRAPH_FAULT_INJECTION` 启用。每个 fault marker 在 run 内只触发一次，
+用于验证 operation journal、稳定幂等键和 checkpoint 恢复，不应作为生产配置常开。
+
+Docker 命令按 install/runtime/verify 分层：install 允许必要写入；runtime/verify 强制只读
+repo、只读 rootfs、非 root 和只读模型缓存；verify profile 禁用 GPU。这里验证的是命令
+策略，真实 Docker/GPU 执行仍属于外部 smoke gate。
+
+每次收集 Agent metrics 会额外生成：
+
+```text
+runs/<task-id>/reports/agent_metric_events.jsonl
+runs/<task-id>/reports/unified_metrics.json
+```
+
+指标从 LLM trace、Policy、Repair、Recovery、Verify 和 Skill 工件生成，并保留
+`source_artifact`。详细设计和本地证据见
+`docs/agent-p1-recovery-sandbox-observability-report.md`。

@@ -33,6 +33,7 @@ class OperationRecord(TypedDict, total=False):
     """
     schema_version: int
     operation_id: str
+    idempotency_key: str
     task_id: str
     stage: str
     action: str

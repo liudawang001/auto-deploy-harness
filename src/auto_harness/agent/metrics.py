@@ -26,7 +26,15 @@ class AgentMetricsCollector:
         help_types = self._help_types(results, metrics)
         metrics["help_type"] = help_types
         metrics["agent_helped"] = bool(help_types)
-        payload = {"agent_metrics": metrics}
+        from auto_harness.observability.metrics import UnifiedMetricsCollector
+        unified = UnifiedMetricsCollector().collect(run_dir)
+        payload = {
+            "agent_metrics": metrics,
+            "unified_metrics": unified.get("summary", {}),
+            "unified_metrics_path": str(
+                run_dir / "reports" / "unified_metrics.json"
+            ),
+        }
         if output_path:
             write_json(Path(output_path), payload)
         return payload

@@ -45,6 +45,8 @@ class ReadinessAuditor:
         "src/auto_harness/agent/metrics.py",
         "src/auto_harness/agent/diagnoser.py",
         "src/auto_harness/agent/verify_planner.py",
+        "src/auto_harness/observability/metrics.py",
+        "src/auto_harness/recovery/faults.py",
         "src/auto_harness/live_smoke.py",
         "src/auto_harness/orchestrator.py",
         "src/auto_harness/modules/verify.py",
@@ -86,6 +88,9 @@ class ReadinessAuditor:
         "agent_loop_dependency_self_repair_e2e",
         "agent_prompt_injection_defense",
         "agent_metrics_paired_comparison",
+        "langgraph_fault_injection_idempotency",
+        "docker_phase_security_profiles",
+        "unified_metrics_consistency",
     ]
 
     EXTERNAL_GATES = [
@@ -373,6 +378,27 @@ class CapabilityMatrix:
                 reports_dir / "evidence_package_result.json"
             ),
             "evidence": ["tests/test_evidence_package.py"],
+        }
+
+        capabilities["fault_window_idempotency"] = {
+            "status": _check_test_artifact(
+                reports_dir / "p1_fault_window_result.json"
+            ),
+            "evidence": ["tests/test_p1_recovery_fault_windows.py"],
+        }
+
+        capabilities["docker_phase_profiles"] = {
+            "status": _check_test_artifact(
+                reports_dir / "p1_docker_phase_result.json"
+            ),
+            "evidence": ["tests/test_docker_sandbox_policy.py"],
+        }
+
+        capabilities["unified_agent_observability"] = {
+            "status": _check_test_artifact(
+                reports_dir / "p1_unified_metrics_result.json"
+            ),
+            "evidence": ["tests/test_p1_unified_metrics.py"],
         }
 
         return {

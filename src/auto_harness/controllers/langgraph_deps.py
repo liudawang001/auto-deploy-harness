@@ -184,8 +184,12 @@ class LangGraphControllerDependencies:
 
         # Phase 6: recovery adapter with available reconcilers
         from auto_harness.recovery.graph_adapter import GraphRecoveryAdapter
+        from auto_harness.recovery.faults import FaultInjector
         reconcilers = self._build_reconcilers()
         recovery_adapter = GraphRecoveryAdapter(reconcilers=reconcilers)
+        fault_injector = FaultInjector(
+            getattr(self.runner.config, "langgraph_fault_injection_points", [])
+        )
 
         return GraphNodeDependencies(
             build_snapshot=build_snapshot,
@@ -213,6 +217,7 @@ class LangGraphControllerDependencies:
             runtime_policy_factory=lambda state: state.get("runtime_policy", {}),
             # Task 10: skill routing
             route_skills=self.runner.skill_routing_service.route,
+            fault_injector=fault_injector,
         )
 
     def _failure_observer(self):

@@ -127,7 +127,8 @@ class EnvDeployModule:
     ):
         if execution_backend != "docker":
             return [list(cmd) for cmd in plan], {"backend": "local"}
-        backend = DockerSandboxBackend(
+        backend = DockerSandboxBackend.for_phase(
+            "install",
             image=docker_image,
             network=docker_network,
             gpus=docker_gpus,

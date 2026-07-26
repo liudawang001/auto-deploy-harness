@@ -81,6 +81,8 @@ class DockerSandboxBackend:
         repo_mount_mode: str = "rw",
         read_only_rootfs: bool = False,
         user: str = "",
+        phase: str = "custom",
+        model_cache_mount_mode: str = "rw",
     ) -> None:
         # Validate
         if network == "host":
@@ -93,6 +95,13 @@ class DockerSandboxBackend:
             raise ValueError("pids_limit must be positive, got: %s" % pids_limit)
         if repo_mount_mode not in ("ro", "rw"):
             raise ValueError("repo_mount_mode must be 'ro' or 'rw', got: %s" % repo_mount_mode)
+        if phase not in ("custom", "install", "runtime", "verify"):
+            raise ValueError("unsupported sandbox phase: %s" % phase)
+        if model_cache_mount_mode not in ("ro", "rw"):
+            raise ValueError(
+                "model_cache_mount_mode must be 'ro' or 'rw', got: %s"
+                % model_cache_mount_mode
+            )
 
         self.image = image
         self.network = network
@@ -107,6 +116,30 @@ class DockerSandboxBackend:
         self.repo_mount_mode = repo_mount_mode
         self.read_only_rootfs = read_only_rootfs
         self.user = user
+        self.phase = phase
+        self.model_cache_mount_mode = model_cache_mount_mode
+
+    @classmethod
+    def for_phase(cls, phase: str, **options):
+        """Build a backend with security invariants for a lifecycle phase."""
+        if phase not in ("install", "runtime", "verify"):
+            raise ValueError("unsupported sandbox phase: %s" % phase)
+        effective = dict(options)
+        effective["phase"] = phase
+        effective["cap_drop_all"] = True
+        effective["no_new_privileges"] = True
+        if phase == "install":
+            effective["repo_mount_mode"] = "rw"
+            effective["read_only_rootfs"] = False
+            effective["model_cache_mount_mode"] = "rw"
+        else:
+            effective["repo_mount_mode"] = "ro"
+            effective["read_only_rootfs"] = True
+            effective["model_cache_mount_mode"] = "ro"
+            effective["user"] = effective.get("user") or "65532:65532"
+        if phase == "verify":
+            effective["gpus"] = "none"
+        return cls(**effective)
 
     def wrap(self, repo_dir: Path, cmd: List[str], ports: Optional[List[int]] = None, container_name: str = "", auto_remove: bool = True, detached: bool = False, labels: Optional[Dict[str, str]] = None) -> SandboxCommand:
         ports = [int(port) for port in (ports or []) if int(port) > 0]
@@ -152,6 +185,10 @@ class DockerSandboxBackend:
         if self.read_only_rootfs:
             effective.append("--read-only")
 
+        if self.phase in ("runtime", "verify"):
+            effective.extend(["-e", "HOME=/tmp"])
+            effective.extend(["-e", "PYTHONDONTWRITEBYTECODE=1"])
+
         effective.extend([
             "-v",
             "%s:/workspace/repo:%s" % (repo_dir, self.repo_mount_mode),
@@ -166,12 +203,19 @@ class DockerSandboxBackend:
             effective.extend(["--gpus", self.gpus])
         model_cache_mount = {}
         if self.model_cache_dir:
-            effective.extend(["-v", "%s:/workspace/model_cache" % self.model_cache_dir])
+            cache_volume = "%s:/workspace/model_cache" % self.model_cache_dir
+            if self.model_cache_mount_mode == "ro":
+                cache_volume += ":ro"
+            effective.extend([
+                "-v",
+                cache_volume,
+            ])
             effective.extend(["-e", "AUTO_HARNESS_MODEL_CACHE=/workspace/model_cache"])
             model_cache_mount = {
                 "host_path": str(self.model_cache_dir),
                 "container_path": "/workspace/model_cache",
                 "env": "AUTO_HARNESS_MODEL_CACHE",
+                "mount_mode": self.model_cache_mount_mode,
             }
         for port in ports:
             effective.extend(["-p", "127.0.0.1:%s:%s" % (port, port)])
@@ -189,6 +233,9 @@ class DockerSandboxBackend:
             "tmpfs_size": self.tmpfs_size,
             "repo_mount_mode": self.repo_mount_mode,
             "read_only_rootfs": self.read_only_rootfs,
+            "user": self.user,
+            "phase": self.phase,
+            "model_cache_mount_mode": self.model_cache_mount_mode,
         }
 
         return SandboxCommand(

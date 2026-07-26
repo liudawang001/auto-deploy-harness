@@ -60,6 +60,7 @@
   "langgraph_enable_repair": true,
   "langgraph_enable_agent_verify": true,
   "langgraph_enable_recovery": true,
+  "langgraph_fault_injection_points": [],
   "langgraph_max_diagnoses": 2,
   "langgraph_max_repairs": 2,
   "langgraph_max_same_failure": 2,

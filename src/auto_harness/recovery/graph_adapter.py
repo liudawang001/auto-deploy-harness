@@ -86,7 +86,9 @@ class GraphRecoveryAdapter:
 
         return {
             "operation_id": operation_id,
+            "idempotency_key": operation_id,
             "task_id": state.get("task_id", ""),
+            "run_dir": state.get("run_dir", ""),
             "stage": stage,
             "action": self._stage_action(stage),
             "resource_type": resource_type,
@@ -271,7 +273,13 @@ class GraphRecoveryAdapter:
             stop_reason="unexpected_operation_status:%s" % status,
         )
 
-    def commit(self, state: dict, stage: str, executed_result: dict) -> dict:
+    def commit(
+        self,
+        state: dict,
+        stage: str,
+        executed_result: dict,
+        artifact_path: Optional[Path] = None,
+    ) -> dict:
         """Commit a successfully executed side-effect operation.
 
         Writes the stage result artifact and records it in the journal.
@@ -281,13 +289,9 @@ class GraphRecoveryAdapter:
 
         operation = self.build_operation(state, stage)
         operation_id = operation["operation_id"]
-
-        # Write stage result artifact for hydration
-        artifacts_dir = run_dir / "operations"
-        artifacts_dir.mkdir(parents=True, exist_ok=True)
-        from auto_harness.models.base import write_json
-        artifact_path = artifacts_dir / ("%s_result.json" % operation_id)
-        write_json(artifact_path, executed_result)
+        artifact_path = Path(artifact_path) if artifact_path else self.persist_result(
+            state, stage, executed_result
+        )
 
         # Commit in journal
         record = journal.load(operation_id)
@@ -295,6 +299,27 @@ class GraphRecoveryAdapter:
             journal.transition(operation_id, "committed", result_artifacts=[str(artifact_path)])
 
         return {"status": "committed", "operation_id": operation_id, "artifact_path": str(artifact_path)}
+
+    def persist_result(self, state: dict, stage: str, executed_result: dict) -> Path:
+        """Persist a deterministic hydration artifact before journal commit."""
+        run_dir = Path(state["run_dir"])
+        operation_id = self.build_operation(state, stage)["operation_id"]
+        artifacts_dir = run_dir / "operations"
+        artifacts_dir.mkdir(parents=True, exist_ok=True)
+        import json
+        from auto_harness.models.base import to_plain
+        from auto_harness.utils.atomic import atomic_write_text
+        artifact_path = artifacts_dir / ("%s_result.json" % operation_id)
+        atomic_write_text(
+            artifact_path,
+            json.dumps(
+                to_plain(executed_result),
+                ensure_ascii=False,
+                sort_keys=True,
+                indent=2,
+            ) + "\n",
+        )
+        return artifact_path
 
     def fail(self, state: dict, stage: str, error: str) -> dict:
         """Mark a side-effect operation as failed."""
@@ -411,7 +436,14 @@ class GraphRecoveryAdapter:
 
     def _hydrate_committed_result(self, operation: dict) -> dict:
         """Hydrate stage result from committed operation artifact."""
-        artifacts = operation.get("result_artifacts", [])
+        artifacts = list(operation.get("result_artifacts", []) or [])
+        if not artifacts:
+            operation_id = operation.get("operation_id", "")
+            task_run_dir = operation.get("run_dir", "")
+            if task_run_dir and operation_id:
+                artifacts.append(
+                    str(Path(task_run_dir) / "operations" / ("%s_result.json" % operation_id))
+                )
         if artifacts:
             artifact_path = artifacts[0] if isinstance(artifacts, list) else artifacts
             try:

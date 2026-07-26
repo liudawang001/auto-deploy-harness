@@ -163,7 +163,8 @@ class RunnerModule:
             return effective, {"backend": "local", "environment_backend": env_solution.get("backend", "venv")}
         port = int(candidate.get("expected_port") or 0)
         container_name = "auto-harness-%s-%s" % (short_hash(str(repo_dir), 8), port or "svc")
-        sandbox_command = DockerSandboxBackend(
+        sandbox_command = DockerSandboxBackend.for_phase(
+            "runtime",
             image=docker_image,
             network=docker_network,
             gpus=docker_gpus,

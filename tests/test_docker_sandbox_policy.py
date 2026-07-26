@@ -148,3 +148,69 @@ class TestDockerSecurity:
         cmd = backend.wrap(Path("/repo"), ["python"])
         assert "--read-only" in cmd.effective_cmd
         assert cmd.security_options["read_only_rootfs"] is True
+
+
+class TestDockerPhaseProfiles:
+    def test_install_profile_allows_only_required_writes(self, tmp_path):
+        backend = DockerSandboxBackend.for_phase(
+            "install",
+            model_cache_dir=tmp_path / "cache",
+            cap_drop_all=False,
+            no_new_privileges=False,
+            repo_mount_mode="ro",
+            read_only_rootfs=True,
+        )
+        command = backend.wrap(tmp_path / "repo", ["pip", "install", "-r", "requirements.txt"])
+
+        assert command.security_options["phase"] == "install"
+        assert command.security_options["repo_mount_mode"] == "rw"
+        assert command.security_options["read_only_rootfs"] is False
+        assert command.security_options["model_cache_mount_mode"] == "rw"
+        assert command.security_options["cap_drop_all"] is True
+        assert command.security_options["no_new_privileges"] is True
+
+    @pytest.mark.parametrize("phase", ["runtime", "verify"])
+    def test_runtime_profiles_force_non_root_and_read_only(self, tmp_path, phase):
+        backend = DockerSandboxBackend.for_phase(
+            phase,
+            gpus="all",
+            model_cache_dir=tmp_path / "cache",
+            repo_mount_mode="rw",
+            read_only_rootfs=False,
+            user="",
+        )
+        command = backend.wrap(tmp_path / "repo", ["python", "app.py"])
+        joined = " ".join(command.effective_cmd)
+
+        assert command.security_options["phase"] == phase
+        assert command.security_options["repo_mount_mode"] == "ro"
+        assert command.security_options["read_only_rootfs"] is True
+        assert command.security_options["user"] == "65532:65532"
+        assert command.security_options["model_cache_mount_mode"] == "ro"
+        assert "--read-only" in command.effective_cmd
+        assert "HOME=/tmp" in command.effective_cmd
+        assert "PYTHONDONTWRITEBYTECODE=1" in command.effective_cmd
+        assert ":/workspace/model_cache:ro" in joined
+        assert command.gpus == ("none" if phase == "verify" else "all")
+
+    def test_env_deploy_and_runner_use_distinct_profiles(self, tmp_path):
+        from auto_harness.modules.env_deploy import EnvDeployModule
+        from auto_harness.modules.runner import RunnerModule
+
+        deploy = EnvDeployModule().deploy(
+            tmp_path,
+            {"install_plan": [["pip", "install", "flask"]]},
+            execution_backend="docker",
+        )
+        runner = RunnerModule().run(
+            tmp_path,
+            {"run_candidates": [{"cmd": ["python", "app.py"], "expected_port": 7860}]},
+            execution_backend="docker",
+        )
+
+        install_security = deploy.data["sandbox"]["commands"][0]["security_options"]
+        runtime_security = runner.data["sandbox"]["security_options"]
+        assert install_security["phase"] == "install"
+        assert install_security["repo_mount_mode"] == "rw"
+        assert runtime_security["phase"] == "runtime"
+        assert runtime_security["repo_mount_mode"] == "ro"

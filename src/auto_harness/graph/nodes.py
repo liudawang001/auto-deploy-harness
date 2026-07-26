@@ -42,6 +42,7 @@ class GraphNodeDependencies:
     recovery_adapter: Any = None
     runtime_policy_factory: Any = None
     route_skills: Any = None
+    fault_injector: Any = None
 
 
 def stage_data(state, stage):
@@ -138,10 +139,18 @@ def make_stage_node(stage, deps):
             recovery_decision = state.get("recovery_decision", "")
             if recovery_stage != stage:
                 return {"stop_reason": "recovery_gate_missing", "current_stage": stage}
-            if recovery_decision not in {"execute", "continue", "retry"}:
-                return {"stop_reason": "recovery_execution_not_allowed", "current_stage": stage}
             if state.get("recovery_skip_stage"):
                 return {"current_stage": stage, "node_history": [{"node": stage, "status": "skipped_recovery_reuse", "at": utc_now_iso()}]}
+            if recovery_decision not in {"execute", "continue", "retry"}:
+                return {"stop_reason": "recovery_execution_not_allowed", "current_stage": stage}
+            if deps.fault_injector:
+                deps.fault_injector.raise_if_configured(
+                    run_dir=Path(state["run_dir"]),
+                    task_id=state["task_id"],
+                    stage=stage,
+                    window="before_side_effect",
+                    operation_id=state.get("pending_operation_id", ""),
+                )
 
         deterministic_analysis = stage_data(state, "analyze")
         analysis = deps.merge_analysis(deterministic_analysis, state.get("compiled_analysis", {}))
@@ -161,7 +170,6 @@ def make_stage_node(stage, deps):
             runtime_policy=state.get("runtime_policy", {}),
             skill_context=state.get("skill_contexts", {}).get(stage, {}),
         )
-
         results = dict(state.get("stage_results", {}))
         results[stage] = executed.result or {"status": executed.after_status, "error": executed.error, "data": {}}
         update = {
@@ -177,10 +185,42 @@ def make_stage_node(stage, deps):
 
         if stage in SIDE_EFFECT_STAGES and deps.recovery_adapter:
             if executed.after_status in ("failed", "uncertain"):
+                if deps.fault_injector:
+                    deps.fault_injector.raise_if_configured(
+                        run_dir=Path(state["run_dir"]),
+                        task_id=state["task_id"],
+                        stage=stage,
+                        window="after_side_effect_before_commit",
+                        operation_id=state.get("pending_operation_id", ""),
+                    )
                 deps.recovery_adapter.fail(state, stage, executed.error or "stage_failed")
             else:
                 result_for_journal = executed.result or {"status": executed.after_status, "data": {}}
-                deps.recovery_adapter.commit(state, stage, result_for_journal)
+                result_artifact = deps.recovery_adapter.persist_result(
+                    state, stage, result_for_journal
+                )
+                if deps.fault_injector:
+                    deps.fault_injector.raise_if_configured(
+                        run_dir=Path(state["run_dir"]),
+                        task_id=state["task_id"],
+                        stage=stage,
+                        window="after_side_effect_before_commit",
+                        operation_id=state.get("pending_operation_id", ""),
+                    )
+                deps.recovery_adapter.commit(
+                    state,
+                    stage,
+                    result_for_journal,
+                    artifact_path=result_artifact,
+                )
+                if deps.fault_injector:
+                    deps.fault_injector.raise_if_configured(
+                        run_dir=Path(state["run_dir"]),
+                        task_id=state["task_id"],
+                        stage=stage,
+                        window="after_commit_before_checkpoint",
+                        operation_id=state.get("pending_operation_id", ""),
+                    )
         return update
     return execute_stage
 
