@@ -79,6 +79,17 @@ Verify deployment by sending trace requests and checking responses.
 """
 
 
+class _PassingBenchmarkRunner:
+    def run(self, manifest_path, output_path=None, case_ids=None):
+        return {
+            "status": "passed",
+            "cases": [
+                {"id": case_id, "status": "passed"}
+                for case_id in (case_ids or [])
+            ],
+        }
+
+
 class TestMemoryEvolutionE2E(unittest.TestCase):
     """End-to-end smoke test for memory-to-skill evolution pipeline."""
 
@@ -128,25 +139,18 @@ class TestMemoryEvolutionE2E(unittest.TestCase):
         # Verify candidate content
         loaded = json.loads(candidate_path.read_text(encoding="utf-8"))
         self.assertEqual(loaded["candidate_id"], candidate_id)
-        self.assertEqual(loaded["status"], "candidate")
+        self.assertEqual(loaded["status"], "proposed")
         self.assertTrue(loaded["quality_gate"]["passed"])
         self.assertIn("patch", loaded)
         self.assertIn("markdown", loaded["patch"])
 
-        # Step 2: Regression — mock pass by setting regression case_ids and status
-        # Since BenchmarkRunner may not be available, we manually set regression_passed
-        loaded["regression"] = {
-            "status": "passed",
-            "candidate_id": candidate_id,
-            "case_ids": ["gradio_config_discovery", "gradio_api_shape_variation"],
-            "failed_case_ids": [],
-        }
-        loaded["status"] = "regression_passed"
-        from auto_harness.models.base import write_json
-        write_json(candidate_path, loaded)
-
-        # Verify regression artifact could be written
-        # (In real flow, run_regression() writes it; here we verify the status update)
+        # Step 2: explicit approval, then execute the regression gate.
+        self.assertEqual(manager.approve(candidate_path, reviewer="e2e")["status"], "approved")
+        regression = manager.run_regression(
+            candidate_path,
+            benchmark_runner=_PassingBenchmarkRunner(),
+        )
+        self.assertEqual(regression["status"], "passed")
 
         # Step 3: Shadow evaluation
         shadow_eval = ShadowSkillEvaluator()
@@ -261,12 +265,8 @@ class TestMemoryEvolutionE2E(unittest.TestCase):
         candidate = result["candidates"][0]
         candidate_path = self.candidate_dir / ("candidate_%s.json" % candidate["candidate_id"])
 
-        # Set regression passed but no shadow
-        loaded = json.loads(candidate_path.read_text(encoding="utf-8"))
-        loaded["regression"] = {"status": "passed", "case_ids": ["gradio_config_discovery"]}
-        loaded["status"] = "regression_passed"
-        from auto_harness.models.base import write_json
-        write_json(candidate_path, loaded)
+        manager.approve(candidate_path, reviewer="e2e")
+        manager.run_regression(candidate_path, benchmark_runner=_PassingBenchmarkRunner())
 
         # Promote with shadow required should fail
         promote_result = manager.promote(candidate_path, require_shadow=True)
@@ -284,12 +284,8 @@ class TestMemoryEvolutionE2E(unittest.TestCase):
         candidate = result["candidates"][0]
         candidate_path = self.candidate_dir / ("candidate_%s.json" % candidate["candidate_id"])
 
-        # Set regression passed
-        loaded = json.loads(candidate_path.read_text(encoding="utf-8"))
-        loaded["regression"] = {"status": "passed", "case_ids": ["gradio_config_discovery"]}
-        loaded["status"] = "regression_passed"
-        from auto_harness.models.base import write_json
-        write_json(candidate_path, loaded)
+        manager.approve(candidate_path, reviewer="e2e")
+        manager.run_regression(candidate_path, benchmark_runner=_PassingBenchmarkRunner())
 
         # Promote without shadow requirement
         promote_result = manager.promote(candidate_path, require_shadow=False)

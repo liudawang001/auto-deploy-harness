@@ -20,13 +20,14 @@ auto-deploy-harness 是一个基于 LangGraph 编排、由 LLM 负责不确定�
 
 当前仓库已经包含：
 
-- CLI：`init`、`deploy`、`resume`、`status`、`report`、`package`、`dashboard`、`queue`、`readiness`、`llm-test`、`benchmark`、`eval-compare`、`live-smoke-plan`、`agent-live-smoke`、`docker-smoke`、`repair-approve`、`memory-promote`。
+- CLI：`init`、`deploy`、`resume`、`status`、`report`、`package`、`dashboard`、`queue`、`readiness`、`llm-test`、`benchmark`、`eval-compare`、`live-smoke-plan`、`agent-live-smoke`、`docker-smoke`、`repair-approve`、`memory-evolve`；`memory-promote` 仅保留为旧 proposal 只读兼容入口。
 - 任务状态存储：`task.json`、`state.json`、`events.jsonl`。
 - 确定性项目分析器。
 - 安全默认的 `env_solve`、`env_deploy`、`runner`、`verify`、report 模块。
 - Mock LLM provider 和讯飞 Anthropic-compatible provider。
 - Claude Code executor wrapper。
 - Policy-constrained LLM Agent：`agent_mode=planner` 时 LLM 可通过 schema 化 action 影响 analyze plan；`agent_mode=gated_actor` 且显式开关打开时，LLM repair action 可在 policy gate 后执行安全动作；LLM 永远不能直接执行 shell、修改源码或判定成功。
+- Provider protocol：当前 Mock 与讯飞 Provider 使用 `json_action`（模型输出 Schema 化 JSON，再由 Python 校验和执行），不是 provider-native function/tool calling；运行证据会显式记录 `provider_protocol`，避免把 JSON Action 包装成原生 Tool Calling。
 - Self-healing 主流程：`deploy/resume --agent-self-heal` 会打开 bounded repair/resume loop，普通 `TaskRunner.run_existing()` 能在 policy-approved repair 后自动从 `env_deploy` / `model_prepare` / `runner` / `verify` 安全阶段恢复，最终仍由 verify trace 判定成功。
 - Agent runtime 证据：每个 run 会生成 `agent_steps.jsonl`、`agent_state.json`、`agent_plan.json`、`agent_plan_revisions.jsonl` 和 `reports/agent_contribution.json`，记录 observe / plan / policy gate / tool call / observe / critique 的受控探索过程。
 - Tool registry：LLM 只能请求命名 tool，Python runtime 根据 `risk_level`、`side_effects`、`requires_policy` 和 `allowed_modes` 进行执行控制；side-effect tool 默认需要 policy gate。
@@ -35,7 +36,7 @@ auto-deploy-harness 是一个基于 LangGraph 编排、由 LLM 负责不确定�
 - 仓库内置 skill：位于 `skills/*/SKILL.md`，使用统一 schema（name/version/type/stages/risk_level/allowed_tools 等），按阶段选择并记录 hash。
 - Skill-driven Agent System：`SkillSchemaParser` 解析校验 skill frontmatter；`SkillRouter` 根据 stage/framework/failure_category/history 选择最相关 skills；`SkillContextBuilder` 将 skill 压缩为 LLM 可用上下文；Plan-first / Replan / Verify / Repair 均接入 skill context；`SkillEffectRecorder` 记录 skill 对 plan 的影响；`SkillOutcomeRecorder` 评估 skill 是否带来 trace-verified success；`SkillMetricsReporter` 汇总 selection/influence/pass/harm 指标；report 展示 Skill Usage / Effects / Outcomes。
 - 结构化问题记忆：位于 `memory/deployment_issues.jsonl`，用于检索历史相似失败。
-- Memory promotion：`memory-promote` 会把高频 issue memory 聚类为可审核的 skill 更新 proposal；默认只生成 proposal，不直接修改 skill，apply 前必须先审批，apply 后默认运行绑定 benchmark 子集并写出 regression report。
+- Memory evolution：`memory-evolve` 将 verified memory 生成 Skill candidate，并强制经过 `proposed -> approved -> regression_passed -> shadow_passed -> active -> rolled_back/rejected` 生命周期；每次迁移写入哈希链审计。旧 `memory-promote --apply` 已禁用，避免绕过主状态机修改 Skill。
 - `resource_plan` 阶段：识别模型资产、GPU/CUDA 信号、磁盘风险和外部 token 需求。
 - `env_solve` 阶段：在安装前生成更稳定的依赖方案，识别老 Gradio 与 `numpy<2` / `pydantic<2` 兼容风险、headless OpenCV 替换建议，解析 `environment.yml` 并选择 `venv` / `conda` / `mamba` backend；根据本机 CUDA/Python 生成 PyTorch pip wheel 或 conda `pytorch-cuda` 方案、fallback 和 `xformers` / `flash-attn` / `bitsandbytes` / `triton` / `deepspeed` / `accelerate` GPU 包兼容矩阵。
 - Verified long-term memory：自修复后只有最终 verify pass、repair policy 通过、repair action 有效且存在 trace id 时，才会写入 `memory_type=verified_success` 的长期记忆；report 会展示 memory id、repair action hash 和 verification trace id。
@@ -761,38 +762,44 @@ PYTHONPATH=src python3 -m auto_harness.cli repair-approve --task-id <task-id> --
 
 该命令只写入 action 类型、审批时间和备注，不记录任何 token、key 或 secret 值。
 
-## Memory Promotion
+## Memory Evolution
 
-当 `memory/deployment_issues.jsonl` 中同类已验证成功经验反复出现，可以生成可审核的 skill 更新建议：
+当 `memory/deployment_issues.jsonl` 中同类已验证成功经验反复出现，通过统一主链路生成 Skill candidate：
 
 ```bash
-PYTHONPATH=src python3 -m auto_harness.cli memory-promote --min-count 2
+PYTHONPATH=src python3 -m auto_harness.cli memory-evolve --propose --min-verified-count 3 --provider mock
 ```
 
-默认只写入：
+默认只写入 candidate，不修改 Skill：
 
 ```text
-memory/promotions/<proposal_id>.json
-memory/promotions/<proposal_id>.md
+memory/skill_candidates/candidate_<candidate_id>.json
+memory/skill_candidates/candidate_<candidate_id>.md
+memory/skill_candidates/candidate_<candidate_id>.lifecycle.jsonl
 ```
 
-普通失败或 LLM diagnosis 记忆仍会用于后续相似问题检索，但不会进入 skill promotion。只有同时满足 `verified_success=true`、存在 `verification_trace_id`、存在 `repair_action_hash`、绑定并通过 `regression_case_ids`，且没有 `policy_rejected_high_risk=true` 的条目，才会参与聚类生成 proposal。
+普通失败或未验证的 LLM diagnosis 仍可用于相似问题检索，但不能进入 Skill evolution。只有满足 verified memory quality gate 的记录才会生成 candidate。
 
-proposal 会包含 memory cluster、verified success evidence、目标 skill、建议追加的 Markdown 片段、`approval` 审批元数据、`regression_binding` 回归 case 绑定和 `review_required=true`。先审批：
+候选项必须先写入显式审批：
 
 ```bash
-PYTHONPATH=src python3 -m auto_harness.cli memory-promote --approve --proposal memory/promotions/<proposal_id>.json --reviewer <name> --note "benchmarks passed"
+PYTHONPATH=src python3 -m auto_harness.cli memory-evolve --approve --candidate memory/skill_candidates/candidate_<candidate_id>.json --reviewer <name> --note "reviewed"
 ```
 
-审批后显式执行下面的命令，才会修改对应 `skills/*/SKILL.md`：
+然后运行绑定回归，并用真实历史 run 做 shadow 评估：
 
 ```bash
-PYTHONPATH=src python3 -m auto_harness.cli memory-promote --apply --proposal memory/promotions/<proposal_id>.json
+PYTHONPATH=src python3 -m auto_harness.cli memory-evolve --regression --candidate memory/skill_candidates/candidate_<candidate_id>.json
+PYTHONPATH=src python3 -m auto_harness.cli memory-evolve --shadow --candidate memory/skill_candidates/candidate_<candidate_id>.json --run-dir runs/<task-id>
 ```
 
-`--apply` 默认会读取 proposal 的 `regression_binding`，只运行绑定的 benchmark case，并把结果写入 `memory/promotions/<proposal_id>.regression.json`。如果回归失败，CLI 会返回非 0；紧急场景可显式使用 `--skip-regression` 跳过，但不建议作为常规路径。
+只有状态达到 `shadow_passed` 后才允许修改 Skill：
 
-该流程不会记录密钥值，也不会把一次性日志直接写入 skill；skill 更新仍应通过测试和代码审查。
+```bash
+PYTHONPATH=src python3 -m auto_harness.cli memory-evolve --promote --candidate memory/skill_candidates/candidate_<candidate_id>.json
+```
+
+每次状态迁移都写入带 `previous_event_hash` / `event_hash` 的 JSONL 审计。晋升记录保留修改前 SHA、修改后 SHA 和 rollback artifact。`memory-promote` 仍可读取并生成旧格式 proposal，但 `memory-promote --apply` 固定失败，不能再作为 Skill 写入口。
 
 也可以单独运行某些 benchmark case：
 

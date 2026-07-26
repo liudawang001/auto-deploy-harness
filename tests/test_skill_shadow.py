@@ -21,7 +21,7 @@ def _make_candidate() -> dict:
     """Create a minimal candidate for shadow eval."""
     return {
         "candidate_id": "skillcand_shadow_test",
-        "status": "candidate",
+        "status": "regression_passed",
         "target_skill": "verify-evidence/SKILL.md",
         "base_skill_sha256": "abc123",
         "pattern": {
@@ -162,6 +162,28 @@ class TestShadowSkillEvaluator(unittest.TestCase):
             # Check candidate status updated to shadow_passed
             candidate = json.loads(candidate_path.read_text(encoding="utf-8"))
             self.assertEqual(candidate["status"], "shadow_passed")
+
+    def test_duplicate_run_id_does_not_inflate_shadow_count(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            candidate_path = Path(tmp) / "candidate.json"
+            candidate_path.write_text(json.dumps(_make_candidate()), encoding="utf-8")
+            evaluator = ShadowSkillEvaluator()
+            result = {
+                "would_help": True,
+                "would_harm": False,
+                "run_id": "same-run",
+                "matched": True,
+                "reason": "ok",
+                "evaluated_at": "2026-07-09T00:00:00+00:00",
+            }
+
+            first = evaluator.record(candidate_path, result)
+            duplicate = evaluator.record(candidate_path, result)
+
+            self.assertEqual(first["helped_count"], 1)
+            self.assertEqual(duplicate["status"], "duplicate")
+            candidate = json.loads(candidate_path.read_text(encoding="utf-8"))
+            self.assertEqual(candidate["shadow"]["helped_count"], 1)
 
     def test_record_harmful_blocks_promotion(self):
         """Harmful shadow result blocks promotion."""

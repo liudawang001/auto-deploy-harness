@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Dict
 
 from auto_harness.models.base import write_json
+from auto_harness.memory.lifecycle import SkillCandidateLifecycle
 from auto_harness.utils.atomic import FileLock, atomic_write_text
 from auto_harness.utils.time import utc_now_iso
 
@@ -116,14 +117,21 @@ class SkillRollbackManager:
             audit_path.write_text(json.dumps(audit, ensure_ascii=False, indent=2), encoding="utf-8")
 
         # Update candidate (outside lock — candidate json is separate from skill file)
-        candidate["status"] = "rolled_back"
-        candidate["rollback"] = {
+        rollback = {
             "rolled_back_at": utc_now_iso(),
             "restored_sha256": restored_sha,
             "previous_active_sha256": previous_sha,
             "pre_rollback_backup": str(pre_rollback_path),
         }
-        write_json(candidate_path, candidate)
+        transition = SkillCandidateLifecycle().transition(
+            candidate_path,
+            "rolled_back",
+            "rollback_manager",
+            evidence=rollback,
+            updates={"rollback": rollback},
+        )
+        if transition.get("status") == "failed":
+            return transition
 
         return {
             "status": "rolled_back",
@@ -132,6 +140,7 @@ class SkillRollbackManager:
             "restored_sha256": restored_sha,
             "previous_active_sha256": previous_sha,
             "pre_rollback_backup": str(pre_rollback_path),
+            "lifecycle": transition,
         }
 
     def rollback_to_history(self, skill_path: Path, history_path: Path) -> Dict:

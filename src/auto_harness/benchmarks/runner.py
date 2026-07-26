@@ -23,6 +23,7 @@ from auto_harness.env import CondaBackend, CondaEnvironmentParser
 from auto_harness.agent_runtime import AgentContributionAnalyzer, AgentGoal, AgentRuntime
 from auto_harness.evals import AgentComparisonReporter
 from auto_harness.memory import MemoryPromoter, VerifiedMemoryRecorder
+from auto_harness.memory.evolution import MemoryEvolutionManager
 from auto_harness.models.base import read_json, to_plain, write_json
 from auto_harness.modules.env_deploy import EnvDeployModule
 from auto_harness.modules.env_solve import EnvSolveModule
@@ -35,12 +36,24 @@ from auto_harness.modules.verify import VerifyModule
 from auto_harness.models.result import StageResult
 from auto_harness.models.task import ProjectSpec, RuntimePolicy, TaskSpec
 from auto_harness.providers import LLMResult, MockLLMProvider
+from auto_harness.providers.memory_evolution_mock import MemoryEvolutionMockProvider
 from auto_harness.repair import RepairApplier, RepairLoopController, RepairPlanner, RepairPolicy
 from auto_harness.orchestrator import TaskRunner
 from auto_harness.queue import DeploymentQueue
 from auto_harness.readiness import ReadinessAuditor
 from auto_harness.verify import BrowserVerifier, StreamlitVerifier
 from auto_harness.utils.shell import CommandResult
+
+
+class _PassingRegressionRunner:
+    def run(self, manifest_path, output_path=None, case_ids=None):
+        return {
+            "status": "passed",
+            "cases": [
+                {"id": case_id, "status": "passed"}
+                for case_id in (case_ids or [])
+            ],
+        }
 
 
 class _FakeResponse:
@@ -602,16 +615,19 @@ class BenchmarkRunner:
 
     def _case_operator_repair_approval(self, case: Dict) -> Dict:
         action = {
-            "type": "change_cache_dir",
-            "requires": {"operator_approval": True},
-            "payload": {"config": "model_cache_dir"},
+            "type": "install_package",
+            "requires": {"operator_approval": True, "dependency_install": True},
+            "payload": {"package": "numpy<2"},
         }
-        runtime = RuntimePolicy(workspace_root="/tmp/auto-harness-benchmark")
+        runtime = RuntimePolicy(
+            workspace_root="/tmp/auto-harness-benchmark",
+            allow_dependency_install=True,
+        )
         rejected = RepairPolicy().check({"actions": [action]}, runtime)
         approved = RepairPolicy().check(
             {"actions": [action]},
             runtime,
-            operator_approval={"approved": True, "approved_action_types": ["change_cache_dir"]},
+            operator_approval={"approved": True, "approved_action_types": ["install_package"]},
         )
         ok = rejected["allowed"] is False and approved["allowed"] is True
         return self._result(case, "passed" if ok else "failed", "operator approval gate verified")
@@ -983,21 +999,28 @@ class BenchmarkRunner:
                 "\n".join(json.dumps(item, ensure_ascii=False) for item in entries) + "\n",
                 encoding="utf-8",
             )
-            promoter = MemoryPromoter(memory_dir, skills_dir)
-            proposal = promoter.propose(min_count=2)["proposals"][0]
-            proposal_path = memory_dir / "promotions" / ("%s.json" % proposal["proposal_id"])
-            rejected = promoter.apply(proposal_path)
-            approved = promoter.approve(proposal_path, reviewer="benchmark", note="regression cases selected")
-            applied = promoter.apply(proposal_path)
+            manager = MemoryEvolutionManager(
+                memory_dir,
+                skills_dir,
+                provider=MemoryEvolutionMockProvider(),
+            )
+            candidate = manager.propose(min_verified_count=2)["candidates"][0]
+            candidate_path = memory_dir / "skill_candidates" / (
+                "candidate_%s.json" % candidate["candidate_id"]
+            )
+            rejected = manager.run_regression(candidate_path, benchmark_runner=_PassingRegressionRunner())
+            approved = manager.approve(candidate_path, reviewer="benchmark", note="regression cases selected")
+            regression = manager.run_regression(candidate_path, benchmark_runner=_PassingRegressionRunner())
+            applied = manager.promote(candidate_path, require_shadow=False)
             skill_text = skill_path.read_text(encoding="utf-8")
             ok = (
                 rejected.get("status") == "approval_required"
                 and approved.get("status") == "approved"
-                and "gradio_config_discovery" in approved.get("regression_binding", {}).get("case_ids", [])
-                and applied.get("status") == "applied"
-                and "Memory Promotion" in skill_text
+                and regression.get("status") == "passed"
+                and applied.get("status") == "promoted"
+                and "auto-harness-skill-evolution" in skill_text
             )
-        return self._result(case, "passed" if ok else "failed", "memory promotion approval and regression binding verified")
+        return self._result(case, "passed" if ok else "failed", "memory evolution approval and regression lifecycle verified")
 
     def _case_memory_promotion_apply_regression_run(self, case: Dict) -> Dict:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1016,21 +1039,30 @@ class BenchmarkRunner:
                 "\n".join(json.dumps(item, ensure_ascii=False) for item in entries) + "\n",
                 encoding="utf-8",
             )
-            promoter = MemoryPromoter(memory_dir, skills_dir)
-            proposal = promoter.propose(min_count=2)["proposals"][0]
-            proposal_path = memory_dir / "promotions" / ("%s.json" % proposal["proposal_id"])
-            promoter.approve(proposal_path, reviewer="benchmark", note="run regression after apply")
-            applied = promoter.apply(proposal_path)
-            regression_path = Path(applied.get("regression", {}).get("output_path", ""))
+            manager = MemoryEvolutionManager(
+                memory_dir,
+                skills_dir,
+                provider=MemoryEvolutionMockProvider(),
+            )
+            candidate = manager.propose(min_verified_count=2)["candidates"][0]
+            candidate_path = memory_dir / "skill_candidates" / (
+                "candidate_%s.json" % candidate["candidate_id"]
+            )
+            manager.approve(candidate_path, reviewer="benchmark", note="run regression before promotion")
+            regression_result = manager.run_regression(
+                candidate_path,
+                benchmark_runner=_PassingRegressionRunner(),
+            )
+            applied = manager.promote(candidate_path, require_shadow=False)
+            regression_path = Path(regression_result.get("output_path", ""))
             regression = read_json(regression_path) if regression_path.exists() else {}
             ok = (
-                applied.get("status") == "applied"
-                and applied.get("regression", {}).get("status") == "passed"
-                and regression.get("selected") is True
-                and regression.get("selected_case_ids") == proposal.get("regression_binding", {}).get("case_ids")
-                and all(item.get("status") == "passed" for item in regression.get("cases", []))
+                applied.get("status") == "promoted"
+                and regression_result.get("status") == "passed"
+                and regression.get("status") == "passed"
+                and regression.get("failed_case_ids") == []
             )
-        return self._result(case, "passed" if ok else "failed", "memory promotion apply regression execution verified")
+        return self._result(case, "passed" if ok else "failed", "memory evolution regression execution verified")
 
     def _case_verify_progress_refresh(self, case: Dict) -> Dict:
         updates = []
@@ -2177,12 +2209,19 @@ class BenchmarkRunner:
                 _verified_memory_entry("mem_b", stage="runner", category="dependency_missing", frameworks=["gradio"], environment_backend="conda", torch_variant="cu121"),
             ]
             (memory_dir / "deployment_issues.jsonl").write_text("\n".join(json.dumps(item, ensure_ascii=False) for item in entries) + "\n", encoding="utf-8")
-            promoter = MemoryPromoter(memory_dir, skills_dir)
-            proposal = promoter.propose(min_count=2)["proposals"][0]
-            proposal_path = memory_dir / "promotions" / ("%s.json" % proposal["proposal_id"])
-            promoter.approve(proposal_path, reviewer="bench")
-            applied = promoter.apply(proposal_path, run_regression=False)
-            ok = applied["status"] == "applied" and Path(applied["rollback_path"]).exists() and "previous_sha256" in applied
+            manager = MemoryEvolutionManager(
+                memory_dir,
+                skills_dir,
+                provider=MemoryEvolutionMockProvider(),
+            )
+            candidate = manager.propose(min_verified_count=2)["candidates"][0]
+            candidate_path = memory_dir / "skill_candidates" / (
+                "candidate_%s.json" % candidate["candidate_id"]
+            )
+            manager.approve(candidate_path, reviewer="bench")
+            manager.run_regression(candidate_path, benchmark_runner=_PassingRegressionRunner())
+            applied = manager.promote(candidate_path, require_shadow=False)
+            ok = applied["status"] == "promoted" and Path(applied["rollback_path"]).exists() and "previous_sha256" in applied
         return self._result(case, "passed" if ok else "failed", "skill evolution from verified self-healing verified")
 
     def _case_agent_runtime_artifacts(self, case: Dict) -> Dict:

@@ -2,12 +2,13 @@ from typing import Dict, List
 
 from auto_harness.agent.repair_actions import safe_package_spec
 from auto_harness.models.task import RuntimePolicy
-from auto_harness.repair.actions import RepairActionNormalizer
+from auto_harness.repair.actions import RepairActionNormalizer, RepairActionRegistry
 
 
 class RepairPolicy:
     def __init__(self) -> None:
         self.normalizer = RepairActionNormalizer()
+        self.registry = RepairActionRegistry()
 
     def check(self, plan: Dict, runtime: RuntimePolicy, operator_approval: Dict = None) -> Dict:
         decisions: List[Dict] = []
@@ -24,7 +25,8 @@ class RepairPolicy:
 
     def _check_action(self, action: Dict, runtime: RuntimePolicy, operator_approval: Dict) -> Dict:
         requires = action.get("requires") or {}
-        reasons = []
+        contract = self.registry.validate(action)
+        reasons = list(contract["reasons"])
         if requires.get("source_edit") and not runtime.allow_source_edit:
             reasons.append("source edit is not allowed")
         if requires.get("dependency_install") and not runtime.allow_dependency_install:
@@ -47,6 +49,7 @@ class RepairPolicy:
             "action_type": action.get("type", ""),
             "allowed": not reasons,
             "reasons": reasons,
+            "contract_kind": contract["kind"],
         }
 
     def _approved(self, action: Dict, operator_approval: Dict) -> bool:

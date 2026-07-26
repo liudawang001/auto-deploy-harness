@@ -17,6 +17,7 @@ from typing import Dict, List, Optional
 
 from auto_harness.memory.quality import MemoryQualityGate
 from auto_harness.memory.curator import MemoryCurator
+from auto_harness.memory.lifecycle import SkillCandidateLifecycle
 from auto_harness.skills.patch import SkillPatchValidator, SkillPatchApplier
 from auto_harness.models.base import write_json
 from auto_harness.utils.files import ensure_dir, short_hash
@@ -41,6 +42,7 @@ class MemoryEvolutionManager:
         self.curator = MemoryCurator(provider=provider)
         self.patch_validator = SkillPatchValidator()
         self.patch_applier = SkillPatchApplier()
+        self.lifecycle = SkillCandidateLifecycle()
         self.issue_path = self.memory_dir / "deployment_issues.jsonl"
         self.candidate_dir = ensure_dir(self.memory_dir / "skill_candidates")
 
@@ -123,6 +125,19 @@ class MemoryEvolutionManager:
 
         candidate = json.loads(candidate_path.read_text(encoding="utf-8"))
         candidate_id = candidate.get("candidate_id", "unknown")
+        if candidate.get("approval", {}).get("status") != "approved":
+            return {
+                "status": "approval_required",
+                "candidate_id": candidate_id,
+                "error": "candidate must be approved before regression",
+            }
+        current_status = self.lifecycle.normalize_status(candidate.get("status"))
+        if current_status not in ("approved", "regression_failed"):
+            return {
+                "status": "failed",
+                "candidate_id": candidate_id,
+                "error": "regression requires approved or regression_failed candidate (got '%s')" % current_status,
+            }
 
         # Read regression binding
         binding = candidate.get("regression_binding", {})
@@ -139,9 +154,14 @@ class MemoryEvolutionManager:
             # Write regression artifact
             write_json(candidate_path.with_suffix(".regression.json"), result)
             # Update candidate status
-            candidate["regression"] = {"status": "failed", "error": "no case_ids"}
-            candidate["status"] = "regression_failed"
-            write_json(candidate_path, candidate)
+            transition = self.lifecycle.transition(
+                candidate_path,
+                "regression_failed",
+                "regression_gate",
+                evidence=result,
+                updates={"regression": {"status": "failed", "error": "no case_ids"}},
+            )
+            result["lifecycle"] = transition
             return result
 
         # Run benchmark
@@ -156,6 +176,13 @@ class MemoryEvolutionManager:
                     "error": "BenchmarkRunner not available",
                 }
                 write_json(candidate_path.with_suffix(".regression.json"), result)
+                result["lifecycle"] = self.lifecycle.transition(
+                    candidate_path,
+                    "regression_failed",
+                    "regression_gate",
+                    evidence=result,
+                    updates={"regression": result},
+                )
                 return result
 
         manifest_path = Path(manifest)
@@ -172,9 +199,13 @@ class MemoryEvolutionManager:
                 "error": "benchmark runner error: %s" % str(exc)[:200],
             }
             write_json(output_path, result)
-            candidate["regression"] = result
-            candidate["status"] = "regression_failed"
-            write_json(candidate_path, candidate)
+            result["lifecycle"] = self.lifecycle.transition(
+                candidate_path,
+                "regression_failed",
+                "regression_gate",
+                evidence=result,
+                updates={"regression": result},
+            )
             return result
 
         failed_case_ids = [
@@ -196,20 +227,53 @@ class MemoryEvolutionManager:
         write_json(output_path, result)
 
         # Update candidate
-        candidate["regression"] = result
-        if regression_status == "passed":
-            candidate["status"] = "regression_passed"
-        else:
-            candidate["status"] = "regression_failed"
-        write_json(candidate_path, candidate)
+        result["lifecycle"] = self.lifecycle.transition(
+            candidate_path,
+            "regression_passed" if regression_status == "passed" else "regression_failed",
+            "regression_gate",
+            evidence={
+                "manifest": str(manifest_path),
+                "case_ids": case_ids,
+                "failed_case_ids": failed_case_ids,
+            },
+            updates={"regression": result},
+        )
 
         return result
+
+    def approve(self, candidate_path: Path, reviewer: str = "operator", note: str = "") -> Dict:
+        candidate_path = Path(candidate_path)
+        if not candidate_path.exists():
+            return {"status": "failed", "error": "candidate file not found"}
+        approval = {
+            "required": True,
+            "status": "approved",
+            "reviewer": reviewer or "operator",
+            "approved_at": utc_now_iso(),
+            "note": note,
+        }
+        transition = self.lifecycle.transition(
+            candidate_path,
+            "approved",
+            reviewer or "operator",
+            evidence={"approval": approval},
+            updates={"approval": approval},
+        )
+        if transition.get("status") == "failed":
+            return transition
+        return {
+            "status": "approved",
+            "candidate_id": transition.get("candidate_id", ""),
+            "approval": approval,
+            "lifecycle": transition,
+        }
 
     def promote(self, candidate_path: Path, require_shadow: bool = True) -> Dict:
         """Promote a candidate to active skill after all gates pass.
 
         Gates checked:
-        - candidate.status in candidate|shadow_passed|regression_passed
+        - explicit operator approval artifact exists
+        - candidate.status is shadow_passed, or regression_passed when shadow is explicitly disabled
         - quality_gate.passed == true
         - regression.status == passed
         - base_skill_sha256 == current target skill sha
@@ -231,12 +295,21 @@ class MemoryEvolutionManager:
         candidate_id = candidate.get("candidate_id", "unknown")
 
         # Gate 1: status check
-        allowed_statuses = {"candidate", "shadow_passed", "regression_passed"}
-        if candidate.get("status") not in allowed_statuses:
+        required_status = "shadow_passed" if require_shadow else "regression_passed"
+        if self.lifecycle.normalize_status(candidate.get("status")) != required_status:
             return {
                 "status": "failed",
                 "candidate_id": candidate_id,
-                "error": "candidate status '%s' not in %s" % (candidate.get("status"), allowed_statuses),
+                "error": "candidate status must be '%s' before promotion (got '%s')" % (
+                    required_status,
+                    candidate.get("status"),
+                ),
+            }
+        if candidate.get("approval", {}).get("status") != "approved":
+            return {
+                "status": "failed",
+                "candidate_id": candidate_id,
+                "error": "operator approval artifact is missing",
             }
 
         # Gate 2: quality gate
@@ -296,15 +369,27 @@ class MemoryEvolutionManager:
             }
 
         # Update candidate with promotion info
-        candidate["promotion"] = {
+        promotion = {
             "status": "promoted",
             "promoted_at": utc_now_iso(),
             "previous_sha256": apply_result.get("previous_sha256", ""),
             "new_sha256": apply_result.get("new_sha256", ""),
             "rollback_path": apply_result.get("rollback_path", ""),
         }
-        candidate["status"] = "active"
-        write_json(candidate_path, candidate)
+        transition = self.lifecycle.transition(
+            candidate_path,
+            "active",
+            "promotion_gate",
+            evidence={
+                "regression": candidate.get("regression", {}),
+                "shadow": candidate.get("shadow", {}),
+                "previous_sha256": apply_result.get("previous_sha256", ""),
+                "new_sha256": apply_result.get("new_sha256", ""),
+            },
+            updates={"promotion": promotion},
+        )
+        if transition.get("status") == "failed":
+            return transition
 
         return {
             "status": "promoted",
@@ -313,6 +398,7 @@ class MemoryEvolutionManager:
             "previous_sha256": apply_result.get("previous_sha256", ""),
             "new_sha256": apply_result.get("new_sha256", ""),
             "rollback_path": apply_result.get("rollback_path", ""),
+            "lifecycle": transition,
         }
 
     def reject(self, candidate_path: Path, reason: str) -> Dict:
@@ -331,17 +417,25 @@ class MemoryEvolutionManager:
 
         candidate = json.loads(candidate_path.read_text(encoding="utf-8"))
         candidate_id = candidate.get("candidate_id", "unknown")
-        candidate["status"] = "rejected"
-        candidate["rejection"] = {
+        rejection = {
             "reason": reason,
             "rejected_at": utc_now_iso(),
         }
-        write_json(candidate_path, candidate)
+        transition = self.lifecycle.transition(
+            candidate_path,
+            "rejected",
+            "operator",
+            evidence=rejection,
+            updates={"rejection": rejection},
+        )
+        if transition.get("status") == "failed":
+            return transition
 
         return {
             "status": "rejected",
             "candidate_id": candidate_id,
             "reason": reason,
+            "lifecycle": transition,
         }
 
     def _read_entries(self) -> List[Dict]:
@@ -450,7 +544,7 @@ class MemoryEvolutionManager:
         candidate = {
             "candidate_id": candidate_id,
             "created_at": utc_now_iso(),
-            "status": "candidate",
+            "status": "proposed",
             "source_memory_ids": cluster["memory_ids"],
             "target_skill": target_skill,
             "base_skill_sha256": base_skill_sha,
@@ -468,6 +562,13 @@ class MemoryEvolutionManager:
                 "passed": True,
                 "reasons": validation.get("reasons", []),
                 "reject_reasons": validation.get("reject_reasons", []),
+            },
+            "approval": {
+                "required": True,
+                "status": "pending",
+                "reviewer": "",
+                "approved_at": "",
+                "note": "",
             },
             "regression_binding": regression_binding,
             "shadow": {
@@ -487,7 +588,14 @@ class MemoryEvolutionManager:
         # Write candidate files
         candidate_json_path = output_dir / ("candidate_%s.json" % candidate_id)
         candidate_md_path = output_dir / ("candidate_%s.md" % candidate_id)
+        if candidate_json_path.exists():
+            try:
+                return json.loads(candidate_json_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                return None
         write_json(candidate_json_path, candidate)
+        self.lifecycle.initialize(candidate_json_path)
+        candidate = json.loads(candidate_json_path.read_text(encoding="utf-8"))
         candidate_md_path.write_text(
             "# Skill Candidate: %s\n\n%s" % (candidate_id, patch_markdown),
             encoding="utf-8",

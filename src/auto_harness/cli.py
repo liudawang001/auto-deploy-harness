@@ -96,7 +96,7 @@ def build_parser() -> argparse.ArgumentParser:
     repair_approve.add_argument("--task-id", required=True)
     repair_approve.add_argument("--note", default="")
 
-    memory_promote = sub.add_parser("memory-promote", help="generate or apply skill update proposals from issue memory")
+    memory_promote = sub.add_parser("memory-promote", help="legacy read-only proposal workflow; use memory-evolve for skill mutation")
     memory_promote.add_argument("--min-count", type=int, default=2)
     memory_promote.add_argument("--stage", default=None)
     memory_promote.add_argument("--category", default=None)
@@ -113,6 +113,7 @@ def build_parser() -> argparse.ArgumentParser:
     memory_evolve.add_argument("--regression", action="store_true", default=False)
     memory_evolve.add_argument("--shadow", action="store_true", default=False)
     memory_evolve.add_argument("--promote", action="store_true", default=False)
+    memory_evolve.add_argument("--approve", action="store_true", default=False)
     memory_evolve.add_argument("--reject", action="store_true", default=False)
     memory_evolve.add_argument("--candidate", default="")
     memory_evolve.add_argument("--min-verified-count", type=int, default=3)
@@ -123,6 +124,8 @@ def build_parser() -> argparse.ArgumentParser:
     memory_evolve.add_argument("--run-dir", default="")
     memory_evolve.add_argument("--no-require-shadow", action="store_true", default=False)
     memory_evolve.add_argument("--reason", default="")
+    memory_evolve.add_argument("--reviewer", default="operator")
+    memory_evolve.add_argument("--note", default="")
 
     skill_rollback = sub.add_parser("skill-rollback", help="rollback a promoted skill candidate")
     skill_rollback.add_argument("--candidate", required=True)
@@ -535,6 +538,11 @@ def main(argv=None) -> int:
                 category=args.category,
                 output_dir=output_dir,
             )
+        elif args.approve:
+            if not args.candidate:
+                result = {"status": "failed", "error": "--candidate is required with --approve"}
+            else:
+                result = manager.approve(Path(args.candidate), reviewer=args.reviewer, note=args.note)
         elif args.regression:
             if not args.candidate:
                 result = {"status": "failed", "error": "--candidate is required with --regression"}
@@ -548,7 +556,11 @@ def main(argv=None) -> int:
                 evaluator = ShadowSkillEvaluator()
                 eval_result = evaluator.evaluate_run(Path(args.run_dir), Path(args.candidate))
                 shadow_result = evaluator.record(Path(args.candidate), eval_result)
-                result = {"status": "ok", "evaluation": eval_result, "shadow": shadow_result}
+                result = {
+                    "status": "blocked" if shadow_result.get("status") in ("blocked", "failed") else "ok",
+                    "evaluation": eval_result,
+                    "shadow": shadow_result,
+                }
         elif args.promote:
             if not args.candidate:
                 result = {"status": "failed", "error": "--candidate is required with --promote"}
@@ -561,11 +573,11 @@ def main(argv=None) -> int:
             else:
                 result = manager.reject(Path(args.candidate), reason=args.reason or "operator rejected")
         else:
-            result = {"status": "failed", "error": "one of --propose/--regression/--shadow/--promote/--reject is required"}
+            result = {"status": "failed", "error": "one of --propose/--approve/--regression/--shadow/--promote/--reject is required"}
         print(json.dumps(result, ensure_ascii=False, indent=2))
         exit_code = 0
         if isinstance(result, dict):
-            if result.get("status") in ("failed", "rejected", "regression_failed", "base_changed"):
+            if result.get("status") in ("failed", "rejected", "regression_failed", "base_changed", "approval_required", "blocked"):
                 exit_code = 2
             reg = result.get("regression") if isinstance(result.get("regression"), dict) else {}
             if reg.get("status") == "failed":

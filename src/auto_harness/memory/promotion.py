@@ -8,7 +8,12 @@ from auto_harness.utils.time import utc_now_iso
 
 
 class MemoryPromoter:
-    """Turns repeated issue memories into human-reviewable skill update proposals."""
+    """Legacy proposal generator.
+
+    Skill mutation is intentionally disabled here. New promotions must use
+    MemoryEvolutionManager so approval, regression, lifecycle audit, promotion,
+    and rollback share one state machine.
+    """
 
     def __init__(self, memory_dir: Path, skills_dir: Path) -> None:
         self.memory_dir = ensure_dir(memory_dir)
@@ -48,71 +53,11 @@ class MemoryPromoter:
     def apply(self, proposal_path: Path, run_regression: bool = True, benchmark_runner=None) -> Dict:
         proposal_path = Path(proposal_path)
         proposal = json.loads(proposal_path.read_text(encoding="utf-8"))
-        approval = proposal.get("approval") if isinstance(proposal.get("approval"), dict) else {}
-        if approval.get("status") != "approved":
-            return {
-                "status": "approval_required",
-                "proposal_id": proposal.get("proposal_id"),
-                "approval": approval or {"required": True, "status": "pending"},
-                "error": "memory promotion must be approved before apply",
-            }
-        target = self.skills_dir / proposal["target_skill"]
-        if not target.exists():
-            return {
-                "status": "failed",
-                "proposal_id": proposal.get("proposal_id"),
-                "target_skill": str(target),
-                "error": "target skill does not exist",
-            }
-        raw = target.read_text(encoding="utf-8")
-        marker = "auto-harness-memory-promotion:%s" % proposal["proposal_id"]
-        if marker in raw:
-            regression_result = self._run_regression(proposal, proposal_path, benchmark_runner) if run_regression else self._skipped_regression(proposal)
-            return {
-                "status": "already_applied",
-                "proposal_id": proposal["proposal_id"],
-                "target_skill": str(target),
-                "regression": regression_result,
-            }
-        regression_result = self._run_regression(proposal, proposal_path, benchmark_runner) if run_regression else self._skipped_regression(proposal)
-        if run_regression and regression_result.get("status") == "failed":
-            return {
-                "status": "failed",
-                "proposal_id": proposal["proposal_id"],
-                "target_skill": str(target),
-                "regression": regression_result,
-                "error": "regression failed; skill was not modified",
-            }
-        previous_sha = self._sha256(raw)
-        history_dir = target.parent / "history"
-        history_dir.mkdir(parents=True, exist_ok=True)
-        rollback_path = history_dir / ("%s_%s.md" % (utc_now_iso().replace(":", "").replace("-", ""), proposal["proposal_id"]))
-        rollback_path.write_text(raw, encoding="utf-8")
-        block = "\n\n<!-- %s -->\n%s\n<!-- /%s -->\n" % (
-            marker,
-            proposal["suggested_skill_section"].strip(),
-            marker,
-        )
-        new_raw = raw.rstrip() + block
-        target.write_text(new_raw, encoding="utf-8")
-        applied = dict(proposal)
-        applied["status"] = "applied"
-        applied["applied_at"] = utc_now_iso()
-        applied["applied_target"] = str(target)
-        applied["regression"] = regression_result
-        applied["previous_sha256"] = previous_sha
-        applied["new_sha256"] = self._sha256(new_raw)
-        applied["rollback_path"] = str(rollback_path)
-        write_json(proposal_path, applied)
         return {
-            "status": "applied",
-            "proposal_id": proposal["proposal_id"],
-            "target_skill": str(target),
-            "regression_binding": proposal.get("regression_binding", {}),
-            "regression": regression_result,
-            "previous_sha256": applied["previous_sha256"],
-            "new_sha256": applied["new_sha256"],
-            "rollback_path": str(rollback_path),
+            "status": "failed",
+            "proposal_id": proposal.get("proposal_id"),
+            "deprecated": True,
+            "error": "legacy memory-promote apply is disabled; use memory-evolve --propose/--approve/--regression/--shadow/--promote",
         }
 
     def approve(self, proposal_path: Path, reviewer: str = "operator", note: str = "") -> Dict:
@@ -253,7 +198,9 @@ class MemoryPromoter:
                 "note": "",
             },
             "regression_binding": self._regression_binding(key["stage"], key["category"], key["frameworks"]),
-            "apply_command": "PYTHONPATH=src python3 -m auto_harness.cli memory-promote --apply --proposal memory/promotions/%s.json" % proposal_id,
+            "apply_command": "",
+            "replacement_command": "PYTHONPATH=src python3 -m auto_harness.cli memory-evolve --propose",
+            "deprecated_apply": True,
             "suggested_skill_section": section,
         }
 

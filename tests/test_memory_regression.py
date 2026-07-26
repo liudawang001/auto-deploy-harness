@@ -21,7 +21,13 @@ def _make_candidate(status: str = "candidate", case_ids: list = None) -> dict:
         case_ids = ["gradio_config_discovery"]
     return {
         "candidate_id": "skillcand_regtest",
-        "status": status,
+        "status": "approved" if status == "candidate" else status,
+        "approval": {
+            "required": True,
+            "status": "approved",
+            "reviewer": "test",
+            "approved_at": "2026-07-09T00:00:00+00:00",
+        },
         "target_skill": "verify-evidence/SKILL.md",
         "base_skill_sha256": "",
         "quality_gate": {"passed": True},

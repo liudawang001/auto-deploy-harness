@@ -1374,7 +1374,15 @@ class TaskRunner:
             previous_results=self._load_previous_results(run_dir),
             memory_hits=self.memory.query(stage, analysis, limit=self.config.max_memory_items),
             runtime_policy=runtime.__dict__,
-            allowed_action_types=["install_package", "update_verify_hint", "request_env_var_name_only", "rerun_from_stage"],
+            allowed_action_types=[
+                "install_package",
+                "install_pip_package",
+                "pin_dependency",
+                "install_conda_package",
+                "update_verify_hint",
+                "set_env_var_name_only",
+                "rerun_from_stage",
+            ],
             extra={"analysis": analysis},
         )
         diagnoser = AgentDiagnoser(self._agent_provider(), config=self.config, trace_writer=self._agent_trace_writer(run_dir))

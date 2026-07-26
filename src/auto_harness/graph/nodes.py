@@ -449,7 +449,15 @@ class DeploymentGraphNodes:
             memory_hits=snapshot.get("memory_hits", []),
             selected_skills=snapshot.get("selected_skills", []),
             runtime_policy=state.get("runtime_policy", {}),
-            allowed_action_types=["install_package", "install_conda_package", "update_verify_hint", "rerun_from_stage", "select_run_candidate", "adjust_runtime", "set_env_var_name_only"],
+            allowed_action_types=[
+                "install_package",
+                "install_pip_package",
+                "pin_dependency",
+                "install_conda_package",
+                "update_verify_hint",
+                "rerun_from_stage",
+                "set_env_var_name_only",
+            ],
             extra={"compiled_analysis": state.get("compiled_analysis", {}), "replan_count": state.get("replan_count", 0), "repair_count": state.get("repair_count", 0)},
         )
         try:

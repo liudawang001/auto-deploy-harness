@@ -2,7 +2,7 @@ from typing import Dict, List
 
 from auto_harness.models.base import to_plain
 from auto_harness.models.result import StageResult
-from auto_harness.repair.actions import RepairActionNormalizer
+from auto_harness.repair.actions import RepairActionNormalizer, RepairActionRegistry
 from auto_harness.repair.schema import RepairAction, RepairPlan
 
 
@@ -11,6 +11,7 @@ class RepairPlanner:
 
     def __init__(self) -> None:
         self.normalizer = RepairActionNormalizer()
+        self.registry = RepairActionRegistry()
 
     def propose(self, stage: str, result: StageResult, analysis: Dict = None, skill_context: Dict = None) -> Dict:
         analysis = analysis or {}
@@ -55,6 +56,19 @@ class RepairPlanner:
         plain_plan["rerun_reason"] = diagnosis.get("rerun_reason", "")
         plain_plan["rerun_from_source"] = "llm" if proposed_rerun else "deterministic"
         plain_plan["actions"] = self.normalizer.normalize_many(plain_plan.get("actions", []))
+        contract_decisions = [self.registry.validate(action) for action in plain_plan["actions"]]
+        unsupported = [item for item in contract_decisions if not item["allowed"]]
+        plain_plan["action_contract"] = {
+            "supported_types": self.registry.supported_types(),
+            "decisions": contract_decisions,
+            "valid": not unsupported,
+        }
+        if unsupported:
+            plain_plan["status"] = "needs_manual_review"
+            plain_plan["contract_rejection_reasons"] = [
+                "%s: %s" % (item["action_type"] or "<missing>", "; ".join(item["reasons"]))
+                for item in unsupported
+            ]
         plain_plan["failure_hypothesis"] = root_cause
         plain_plan["hypothesis_confidence"] = confidence
         plain_plan["evidence"] = self._evidence(stage, plain, diagnosis)

@@ -51,7 +51,7 @@ def diagnosis_prompt(observation: AgentObservation) -> str:
         },
         "actions": [
             {
-                "type": "install_package | update_verify_hint | request_env_var_name_only | rerun_from_stage",
+                "type": "install_package | install_pip_package | pin_dependency | install_conda_package | update_verify_hint | set_env_var_name_only | rerun_from_stage",
                 "reason": "why this action is useful",
                 "confidence": 0.0,
                 "payload": {},

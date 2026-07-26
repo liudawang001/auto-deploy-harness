@@ -4,7 +4,7 @@ from typing import Dict, List
 
 from auto_harness.agent.repair_actions import install_package_command
 from auto_harness.models.base import write_json
-from auto_harness.repair.actions import RepairActionNormalizer
+from auto_harness.repair.actions import RepairActionNormalizer, RepairActionRegistry
 from auto_harness.utils.shell import run_command
 
 
@@ -13,6 +13,7 @@ class RepairApplier:
 
     def __init__(self) -> None:
         self.normalizer = RepairActionNormalizer()
+        self.registry = RepairActionRegistry()
 
     def apply(
         self,
@@ -27,10 +28,16 @@ class RepairApplier:
     ) -> Dict:
         repair_dir = run_dir / "repairs"
         repair_dir.mkdir(parents=True, exist_ok=True)
+        normalized_actions = self.normalizer.normalize_many(plan.get("actions", []))
+        contract_decisions = [self.registry.validate(action) for action in normalized_actions]
+        contract_allowed = all(item["allowed"] for item in contract_decisions)
+        effective_policy = dict(policy_result)
+        effective_policy["contract_decisions"] = contract_decisions
+        effective_policy["allowed"] = bool(policy_result.get("allowed")) and contract_allowed
         result = {
-            "status": "applied" if policy_result.get("allowed") else "rejected",
+            "status": "applied" if effective_policy["allowed"] else "rejected",
             "artifacts": [],
-            "policy": policy_result,
+            "policy": effective_policy,
             "executed": False,
             "executed_action_count": 0,
             "action_results": [],
@@ -38,7 +45,17 @@ class RepairApplier:
         safe_plan = self._sanitize(plan)
         write_json(repair_dir / "repair_plan.json", safe_plan)
         result["artifacts"].append(str(repair_dir / "repair_plan.json"))
-        if not policy_result.get("allowed"):
+        if not effective_policy["allowed"]:
+            result["action_results"] = [
+                {
+                    "action_type": item["action_type"],
+                    "executed": False,
+                    "status": "rejected",
+                    "reason": "; ".join(item["reasons"]),
+                }
+                for item in contract_decisions
+                if not item["allowed"]
+            ]
             write_json(repair_dir / "repair_rejected.json", result)
             result["artifacts"].append(str(repair_dir / "repair_rejected.json"))
             write_json(repair_dir / "repair_apply_result.json", result)
@@ -48,10 +65,10 @@ class RepairApplier:
         install_commands: List[List[str]] = []
         required_env: List[str] = []
         verify_hints: List[Dict] = []
-        for action in self.normalizer.normalize_many(plan.get("actions", [])):
+        for action in normalized_actions:
             action_type = action.get("type")
             payload = action.get("payload") or {}
-            if action_type in ("install_package", "install_pip_package") and payload.get("package"):
+            if action_type in ("install_package", "install_pip_package", "pin_dependency") and payload.get("package"):
                 command = install_package_command(str(payload["package"]), env_context=env_context)
                 if command["status"] == "ready":
                     install_commands.append(command["cmd"])

@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from auto_harness.models.base import write_json
+from auto_harness.memory.lifecycle import SkillCandidateLifecycle
 from auto_harness.utils.time import utc_now_iso
 
 
@@ -41,6 +42,9 @@ class ShadowSkillEvaluator:
     # Default shadow promotion thresholds
     DEFAULT_HELPED_THRESHOLD = 2
     DEFAULT_HARMFUL_THRESHOLD = 0
+
+    def __init__(self) -> None:
+        self.lifecycle = SkillCandidateLifecycle()
 
     def evaluate_candidate_decision(
         self,
@@ -375,6 +379,13 @@ class ShadowSkillEvaluator:
             return {"status": "failed", "error": "candidate file not found"}
 
         candidate = json.loads(candidate_path.read_text(encoding="utf-8"))
+        current_status = self.lifecycle.normalize_status(candidate.get("status"))
+        if current_status not in ("regression_passed", "shadow_passed", "shadow_failed"):
+            return {
+                "status": "blocked",
+                "error": "shadow evaluation requires regression_passed candidate",
+                "candidate_status": current_status,
+            }
         shadow = candidate.get("shadow", {})
 
         # Initialize shadow if needed
@@ -384,6 +395,19 @@ class ShadowSkillEvaluator:
                 "helped_count": 0,
                 "harmful_count": 0,
                 "evaluations": [],
+            }
+        run_id = str(result.get("run_id") or "")
+        if run_id and any(
+            str(item.get("run_id") or "") == run_id
+            for item in shadow.get("evaluations", [])
+            if isinstance(item, dict)
+        ):
+            return {
+                "status": "duplicate",
+                "run_id": run_id,
+                "helped_count": shadow.get("helped_count", 0),
+                "harmful_count": shadow.get("harmful_count", 0),
+                "error": "shadow run_id already recorded",
             }
 
         # Update counts
@@ -395,7 +419,7 @@ class ShadowSkillEvaluator:
         # Append evaluation record
         evaluations = shadow.get("evaluations", [])
         evaluations.append({
-            "run_id": result.get("run_id", ""),
+            "run_id": run_id,
             "matched": result.get("matched", False),
             "would_help": result.get("would_help", False),
             "would_harm": result.get("would_harm", False),
@@ -411,11 +435,26 @@ class ShadowSkillEvaluator:
         helped = shadow["helped_count"]
         harmful = shadow["harmful_count"]
         if helped >= self.DEFAULT_HELPED_THRESHOLD and harmful <= self.DEFAULT_HARMFUL_THRESHOLD:
-            candidate["status"] = "shadow_passed"
+            target_status = "shadow_passed"
         elif harmful > self.DEFAULT_HARMFUL_THRESHOLD:
-            candidate["status"] = "shadow_failed"
+            target_status = "shadow_failed"
+        else:
+            target_status = ""
 
         write_json(candidate_path, candidate)
+        if target_status:
+            transition = self.lifecycle.transition(
+                candidate_path,
+                target_status,
+                "shadow_gate",
+                evidence={
+                    "helped_count": helped,
+                    "harmful_count": harmful,
+                    "run_id": run_id,
+                },
+            )
+            if transition.get("status") == "failed":
+                return transition
 
         # Also write shadow artifact alongside candidate
         shadow_artifact_path = candidate_path.with_suffix(".shadow.json")

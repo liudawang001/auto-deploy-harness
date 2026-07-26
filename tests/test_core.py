@@ -1246,15 +1246,14 @@ class CoreTests(unittest.TestCase):
             promoter = MemoryPromoter(memory_dir, skills_dir)
             proposal_path = memory_dir / "promotions" / ("%s.json" % proposal["proposal_id"])
             rejected = promoter.apply(proposal_path)
-            self.assertEqual(rejected["status"], "approval_required")
+            self.assertEqual(rejected["status"], "failed")
+            self.assertTrue(rejected["deprecated"])
             approved = promoter.approve(proposal_path, reviewer="tester", note="fixture passed")
             self.assertEqual(approved["status"], "approved")
             apply_result = promoter.apply(proposal_path)
-            self.assertEqual(apply_result["status"], "applied")
-            self.assertIn("regression_binding", apply_result)
-            self.assertEqual(apply_result["regression"]["status"], "passed")
-            self.assertTrue((memory_dir / "promotions" / ("%s.regression.json" % proposal["proposal_id"])).exists())
-            self.assertIn("Memory Promotion: verify / trace_not_observed", skill_path.read_text(encoding="utf-8"))
+            self.assertEqual(apply_result["status"], "failed")
+            self.assertTrue(apply_result["deprecated"])
+            self.assertNotIn("Memory Promotion: verify / trace_not_observed", skill_path.read_text(encoding="utf-8"))
 
     def test_memory_promotion_requires_verified_agent_success(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2444,7 +2443,8 @@ class CoreTests(unittest.TestCase):
             operator_approval={"approved": True, "approved_action_types": ["change_cache_dir"]},
         )
         self.assertFalse(rejected["allowed"])
-        self.assertTrue(approved["allowed"])
+        self.assertFalse(approved["allowed"])
+        self.assertIn("unsupported repair action type", approved["decisions"][0]["reasons"])
 
     def test_repair_loop_limits_attempts_and_safely_falls_back(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -3817,6 +3817,10 @@ class CoreTests(unittest.TestCase):
             )
             self.assertTrue(result["executed"])
             self.assertEqual(captured["cmd"][:5], ["conda", "install", "-y", "-p", ".conda/envs/demo"])
+            self.assertEqual(
+                captured["cmd"][5:9],
+                ["-c", "pytorch", "-c", "nvidia"],
+            )
             self.assertIn("pytorch-cuda=12.1", captured["cmd"])
 
     def test_deterministic_environment_yml_selects_conda_without_llm(self):

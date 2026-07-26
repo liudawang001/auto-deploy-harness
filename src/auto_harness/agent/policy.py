@@ -19,6 +19,7 @@ class AgentActionPolicy:
     TIER0_ALLOWED = {
         "update_verify_hint",
         "request_env_var_name_only",
+        "set_env_var_name_only",
         "rerun_from_stage",
     }
     TIER1_ALLOWED = {
