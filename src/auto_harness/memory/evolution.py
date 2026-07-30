@@ -34,12 +34,23 @@ class MemoryEvolutionManager:
       reject(): Mark a candidate as rejected
     """
 
-    def __init__(self, memory_dir: Path, skills_dir: Path, provider=None):
+    def __init__(
+        self,
+        memory_dir: Path,
+        skills_dir: Path,
+        provider=None,
+        config=None,
+        call_executor=None,
+    ):
         self.memory_dir = ensure_dir(Path(memory_dir))
         self.skills_dir = Path(skills_dir)
         self.provider = provider
         self.quality_gate = MemoryQualityGate()
-        self.curator = MemoryCurator(provider=provider)
+        self.curator = MemoryCurator(
+            provider=provider,
+            config=config,
+            call_executor=call_executor,
+        )
         self.patch_validator = SkillPatchValidator()
         self.patch_applier = SkillPatchApplier()
         self.lifecycle = SkillCandidateLifecycle()

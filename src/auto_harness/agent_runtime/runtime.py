@@ -115,7 +115,7 @@ class AgentRuntime:
         run_dir = Path(run_dir)
         state = AgentVerifyState(trace_id=trace_id, initial_status="uncertain")
         writer = AgentStepWriter(run_dir)
-        planner = VerifyPlanner(provider=provider)
+        planner = VerifyPlanner(provider=provider, config=config)
         policy = ToolPolicy(
             registry=self.registry,
             allowed_hosts=allowed_hosts or ["127.0.0.1", "localhost"],

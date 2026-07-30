@@ -389,12 +389,23 @@ class AgentDecisionGate:
         )
     """
 
-    def __init__(self, provider=None, registry=None, critic: GateCritic = None, policy: StagePolicyValidator = None, executor: Callable = None) -> None:
+    def __init__(
+        self,
+        provider=None,
+        registry=None,
+        critic: GateCritic = None,
+        policy: StagePolicyValidator = None,
+        executor: Callable = None,
+        config=None,
+        call_executor=None,
+    ) -> None:
         self.provider = provider
         self.registry = registry
         self.critic = critic or GateCritic()
         self.policy = policy or StagePolicyValidator()
         self.executor = executor  # Optional callable for executing approved tool calls
+        self.config = config
+        self.call_executor = call_executor
 
     def decide(
         self,
@@ -428,6 +439,7 @@ class AgentDecisionGate:
         for step_index in range(max_steps):
             # 1. Call LLM planner
             decision = planner.plan(observation, provider=self.provider, allowed_tools=allowed_tools)
+            result.context = decision.context
 
             # 2. Schema validation (done in parse_gate_decision)
             if decision.status == "invalid":
@@ -437,6 +449,7 @@ class AgentDecisionGate:
                     "step_index": step_index + 1,
                     "decision": {"status": decision.status, "stop_reason": decision.stop_reason},
                     "reason": "invalid_llm_output",
+                    "context": decision.context,
                 })
                 break
 
@@ -448,6 +461,7 @@ class AgentDecisionGate:
                     "step_index": step_index + 1,
                     "decision": {"status": "no_action", "hypothesis": decision.hypothesis, "stop_reason": decision.stop_reason},
                     "reason": "no_action",
+                    "context": decision.context,
                 })
                 break
 
@@ -465,6 +479,7 @@ class AgentDecisionGate:
                     "decision": {"status": "ok", "tool_call": decision.tool_call, "hypothesis": decision.hypothesis},
                     "critic": critic_result,
                     "reason": "critic_rejected: %s" % critic_result.get("reason", ""),
+                    "context": decision.context,
                 })
                 # Continue loop so LLM can try a different tool
                 continue
@@ -479,6 +494,7 @@ class AgentDecisionGate:
                     "critic": critic_result,
                     "policy": policy_result,
                     "reason": "policy_rejected: %s" % policy_result.get("reason", ""),
+                    "context": decision.context,
                 })
                 # Continue loop so LLM can try a different tool
                 continue
@@ -493,6 +509,7 @@ class AgentDecisionGate:
                     "policy": policy_result,
                     "execution": result.execution,
                     "reason": "planner_mode_would_execute",
+                    "context": decision.context,
                 })
                 break
 
@@ -510,6 +527,7 @@ class AgentDecisionGate:
                 "policy": policy_result,
                 "execution": exec_result,
                 "state_delta": result.state_delta,
+                "context": decision.context,
             })
 
             # If execution succeeded, break
@@ -582,7 +600,10 @@ class AgentDecisionGate:
                 def plan(self, observation, provider=None, allowed_tools=None):
                     return GateDecision(stage=stage, status="no_action", stop_reason="no_provider_for_stage_%s" % stage, raw_response="")
             return NoOpPlanner()
-        return planner_cls()
+        return planner_cls(
+            config=self.config,
+            call_executor=self.call_executor,
+        )
 
     def _execute_or_apply(
         self,

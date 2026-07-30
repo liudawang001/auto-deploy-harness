@@ -80,6 +80,7 @@ class GateDecision:
     expected_observation: str = ""
     stop_reason: Optional[str] = None
     raw_response: str = ""
+    context: Dict = field(default_factory=dict)
 
 
 @dataclass
@@ -99,6 +100,7 @@ class GateResult:
     state_delta: Dict = field(default_factory=dict)
     llm_helped: bool = False
     error: Optional[str] = None
+    context: Dict = field(default_factory=dict)
 
 
 # ------------------------------------------------------------------

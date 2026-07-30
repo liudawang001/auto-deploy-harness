@@ -16,10 +16,16 @@ class LLMResult:
     latency_ms: int = 0
     protocol: str = "json_action"
     tool_calls: List[Dict[str, Any]] = field(default_factory=list)
+    context: Dict[str, Any] = field(default_factory=dict)
 
 
 class LLMProvider(Protocol):
-    def complete(self, messages: List[Message], temperature: float = 0.2) -> LLMResult:
+    def complete(
+        self,
+        messages: List[Message],
+        temperature: float = 0.2,
+        max_output_tokens: int = None,
+    ) -> LLMResult:
         ...
 
 
@@ -42,4 +48,3 @@ class ToolCallingLLMProvider(Protocol):
         tool_choice: str = "auto",
     ) -> LLMResult:
         ...
-

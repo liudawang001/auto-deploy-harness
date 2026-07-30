@@ -115,6 +115,9 @@ class _FakeBrowserBackend:
 
 
 class _FakeLLMProvider:
+    context_window_tokens = 65536
+    max_tokens = 4096
+
     def __init__(self, text: str):
         self.text = text
         self.messages = []
@@ -2087,11 +2090,14 @@ class BenchmarkRunner:
                 task_id="bench-prompt-injection",
             ).analyze(repo)
             trace_text = "\n".join(path.read_text(encoding="utf-8") for path in trace_dir.glob("analyze_*.json"))
+            sent_prompt = "\n".join(
+                message.content for message in provider.messages[0]
+            )
             ok = (
-                secret not in provider.messages[0][0].content
+                secret not in sent_prompt
                 and secret not in trace_text
-                and "[REDACTED_SECRET]" in provider.messages[0][0].content
-                and "prompt_injection" in provider.messages[0][0].content
+                and "[REDACTED_SECRET]" in sent_prompt
+                and "prompt_injection" in sent_prompt
                 and result.data.get("agent_decision", {}).get("merged", {}).get("run_candidates_added") == 0
                 and len(result.data.get("agent_decision", {}).get("rejected_actions", [])) == 1
             )

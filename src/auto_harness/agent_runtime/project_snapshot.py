@@ -51,9 +51,12 @@ class ProjectSnapshotBuilder:
         self,
         max_files: int = 80,
         max_file_chars: int = 6000,
+        max_tree_entries: int = 20000,
     ) -> None:
         self.max_files = max_files
         self.max_file_chars = max_file_chars
+        self.max_tree_entries = max_tree_entries
+        self._last_total_file_count = 0
 
     def build(
         self,
@@ -108,6 +111,13 @@ class ProjectSnapshotBuilder:
             "task_id": task_id,
             "repo_dir": str(repo_dir),
             "file_tree": file_tree,
+            "file_tree_summary": {
+                "total_file_count": self._last_total_file_count,
+                "omitted_file_count": max(
+                    0, self._last_total_file_count - len(file_tree)
+                ),
+                "truncated": self._last_total_file_count > len(file_tree),
+            },
             "selected_files": selected_with_meta,
             "detected_signals": detected_signals,
             "memory_hits": memory_hits,
@@ -120,6 +130,13 @@ class ProjectSnapshotBuilder:
     def _collect_file_tree(self, repo_dir: Path) -> List[str]:
         """Collect the full file tree, skipping .git and binary dirs."""
         result: List[str] = []
+        seen = set()
+        self._last_total_file_count = 0
+        for name in PRIORITY_FILES:
+            path = repo_dir / name
+            if path.is_file() and path.suffix.lower() not in SKIP_EXTENSIONS:
+                result.append(name)
+                seen.add(name)
         for path in sorted(repo_dir.rglob("*")):
             if path.is_dir():
                 continue
@@ -133,7 +150,15 @@ class ProjectSnapshotBuilder:
                 rel = str(path.relative_to(repo_dir))
             except ValueError:
                 continue
-            result.append(rel)
+            if rel in seen:
+                continue
+            self._last_total_file_count += 1
+            if len(result) < self.max_tree_entries:
+                result.append(rel)
+                seen.add(rel)
+        self._last_total_file_count += len(
+            [name for name in result if name in PRIORITY_FILES]
+        )
         return result
 
     def _select_files(self, repo_dir: Path, file_tree: List[str]) -> Dict[str, str]:
@@ -143,7 +168,7 @@ class ProjectSnapshotBuilder:
 
         # Read priority files first
         for name in PRIORITY_FILES:
-            if name in file_set and len(selected) < self.max_files:
+            if (name in file_set or (repo_dir / name).is_file()) and len(selected) < self.max_files:
                 path = repo_dir / name
                 content = self._read_file(path)
                 if content is not None:

@@ -24,13 +24,23 @@ class XunfeiSparkProvider:
         self.api_url = os.environ.get("XUNFEI_API_URL", "")
         self.timeout_seconds = int(os.environ.get("XUNFEI_TIMEOUT_SECONDS", "60"))
         self.max_tokens = int(os.environ.get("XUNFEI_MAX_TOKENS", "2048"))
+        self.context_window_tokens = int(
+            os.environ.get("XUNFEI_CONTEXT_WINDOW_TOKENS", "0")
+        )
         self.anthropic_version = os.environ.get("XUNFEI_ANTHROPIC_VERSION", "2023-06-01")
         self.urlopen = urlopen or urllib.request.urlopen
 
-    def complete(self, messages: List[Message], temperature: float = 0.2) -> LLMResult:
+    def complete(
+        self,
+        messages: List[Message],
+        temperature: float = 0.2,
+        max_output_tokens: int = None,
+    ) -> LLMResult:
         url = self._resolve_url()
         started = time.time()
-        payload = self._build_anthropic_payload(messages, temperature)
+        payload = self._build_anthropic_payload(
+            messages, temperature, max_output_tokens=max_output_tokens
+        )
         body = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(url, data=body, method="POST")
         for name, value in self._headers().items():
@@ -68,7 +78,12 @@ class XunfeiSparkProvider:
             headers["X-App-Id"] = self.app_id
         return headers
 
-    def _build_anthropic_payload(self, messages: List[Message], temperature: float) -> Dict:
+    def _build_anthropic_payload(
+        self,
+        messages: List[Message],
+        temperature: float,
+        max_output_tokens: int = None,
+    ) -> Dict:
         system_parts: List[str] = []
         user_messages: List[Dict[str, str]] = []
         for msg in messages:
@@ -79,7 +94,9 @@ class XunfeiSparkProvider:
                 user_messages.append({"role": role, "content": msg.content})
         payload: Dict = {
             "model": self.model,
-            "max_tokens": self.max_tokens,
+            "max_tokens": min(self.max_tokens, int(max_output_tokens))
+            if max_output_tokens
+            else self.max_tokens,
             "temperature": temperature,
             "messages": user_messages,
         }

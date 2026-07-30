@@ -104,6 +104,7 @@ class DeploymentGraphState(TypedDict, total=False):
     llm_required: bool
     llm_provider: str
     llm_error: str
+    llm_context: Dict[str, Any]
     previous_plan_path: str
 
     # ── Memory/Skill fields (Task 8) ───────────────────────────────────

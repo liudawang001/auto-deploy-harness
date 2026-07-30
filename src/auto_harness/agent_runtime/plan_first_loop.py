@@ -15,7 +15,22 @@ from auto_harness.agent_runtime.plan_artifacts import PlanArtifactWriter
 from auto_harness.agent_runtime.plan_compiler import PlanCompiler
 from auto_harness.agent_runtime.plan_policy import PlanPolicyGate
 from auto_harness.agent_runtime.project_snapshot import ProjectSnapshotBuilder
+from auto_harness.context import (
+    ContextPriority,
+    ContextSection,
+    LLMCallExecutor,
+    PromptEnvelope,
+    TrustLevel,
+    compact_project_snapshot,
+    compact_value,
+    get_context_profile,
+    safe_context_telemetry,
+)
+from auto_harness.context.replan import build_replan_delta
+from auto_harness.context.assembler import fit_items_to_budget, fit_value_to_budget
+from auto_harness.context.memory import compact_memory_hits
 from auto_harness.models.base import write_json
+from auto_harness.providers.base import Message
 
 
 # System prompt for the deployment planner
@@ -76,7 +91,9 @@ Failure context:
 Project snapshot:
 {snapshot_json}
 
-Revise the deployment plan.
+Revise the deployment plan using this JSON schema:
+{schema_json}
+
 Keep safe commands only.
 Do not repeat failed command unless you explain why it should now work.
 Use failure-specific selected_skills to revise the plan.
@@ -128,29 +145,94 @@ DEPLOYMENT_PLAN_SCHEMA = {
 class LLMDeploymentPlanner:
     """Calls LLM to generate or revise deployment plans."""
 
-    def __init__(self, provider: Any, max_tokens: int = 4000) -> None:
+    def __init__(
+        self,
+        provider: Any,
+        max_tokens: int = 4000,
+        config: Any = None,
+        call_executor: LLMCallExecutor = None,
+    ) -> None:
         self.provider = provider
         self.max_tokens = max_tokens
+        self.config = config
+        self.call_executor = call_executor or LLMCallExecutor(config=config)
 
     def plan(self, snapshot: Dict, mode: str = "planner", skill_context: Optional[Dict] = None) -> Any:
         """Ask LLM to generate a deployment plan from project snapshot."""
-        from auto_harness.providers.base import Message
-
-        # Build skill context section for user prompt
-        skill_context_section = ""
-        if skill_context and skill_context.get("selected_skills"):
-            skill_context_section = "Skill context:\n%s" % json.dumps(skill_context, ensure_ascii=False, indent=2)[:3000]
-
-        system_msg = Message(role="system", content=PLANNER_SYSTEM_PROMPT)
-        user_msg = Message(
-            role="user",
-            content=PLANNER_USER_TEMPLATE.format(
-                snapshot_json=json.dumps(snapshot, ensure_ascii=False, indent=2)[:8000],
-                schema_json=json.dumps(DEPLOYMENT_PLAN_SCHEMA, ensure_ascii=False, indent=2),
-                skill_context_section=skill_context_section,
-            ),
+        skill_budget = self._context_budget("agent_context_skill_budget_tokens", 2000)
+        memory_budget = self._context_budget("agent_context_memory_budget_tokens", 2000)
+        prompt_snapshot = self._without_embedded_skill_context(
+            snapshot,
+            memory_budget,
         )
-        return self.provider.complete(messages=[system_msg, user_msg])
+        bounded_skill_context = fit_value_to_budget(
+            skill_context or {},
+            skill_budget,
+        )
+        original = self._plan_messages(
+            prompt_snapshot,
+            bounded_skill_context,
+        )
+        candidate_snapshot = compact_project_snapshot(
+            snapshot,
+            skill_budget_tokens=skill_budget,
+            memory_budget_tokens=memory_budget,
+        )
+        candidate_skill_context = fit_value_to_budget(
+            skill_context or {},
+            skill_budget,
+        )
+        candidate = self._plan_messages(
+            candidate_snapshot,
+            candidate_skill_context,
+        )
+        retry_snapshot = compact_project_snapshot(
+            snapshot,
+            aggressive=True,
+            skill_budget_tokens=skill_budget,
+            memory_budget_tokens=memory_budget,
+        )
+        retry_skill_context = fit_value_to_budget(
+            skill_context or {},
+            max(1, skill_budget // 2),
+        )
+        retry = self._plan_messages(
+            retry_snapshot,
+            retry_skill_context,
+        )
+        call = self.call_executor.execute(
+            call_site="plan_first.plan",
+            stage="plan",
+            provider=self.provider,
+            envelope=PromptEnvelope(
+                messages=original,
+                candidate_messages=candidate,
+                retry_messages=retry,
+                required_fragments=[
+                    json.dumps(
+                        DEPLOYMENT_PLAN_SCHEMA,
+                        ensure_ascii=False,
+                        indent=2,
+                    )
+                ],
+                sections=self._context_sections(
+                    prompt_snapshot,
+                    bounded_skill_context,
+                ),
+                candidate_sections=self._context_sections(
+                    candidate_snapshot,
+                    candidate_skill_context,
+                ),
+                retry_sections=self._context_sections(
+                    retry_snapshot,
+                    retry_skill_context,
+                ),
+                requested_output_tokens=self.max_tokens,
+            ),
+            profile=get_context_profile("plan", self.max_tokens),
+            temperature=0.0,
+        )
+        return call.provider_result
 
     def replan(
         self,
@@ -160,24 +242,224 @@ class LLMDeploymentPlanner:
         skill_context: Optional[Dict] = None,
     ) -> Any:
         """Ask LLM to revise the deployment plan based on failure context."""
-        from auto_harness.providers.base import Message
+        skill_budget = self._context_budget("agent_context_skill_budget_tokens", 2000)
+        memory_budget = self._context_budget("agent_context_memory_budget_tokens", 2000)
+        prompt_snapshot = self._without_embedded_skill_context(
+            snapshot,
+            memory_budget,
+        )
+        original = self._replan_messages(
+            prompt_snapshot,
+            previous_plan,
+            failure_context,
+            fit_value_to_budget(skill_context or {}, skill_budget),
+        )
+        delta = build_replan_delta(
+            previous_plan,
+            failure_context.get("stage_results", {})
+            if isinstance(failure_context, dict)
+            else {},
+            failure_context if isinstance(failure_context, dict) else {},
+        )
+        candidate_snapshot = compact_project_snapshot(
+            snapshot,
+            skill_budget_tokens=skill_budget,
+            memory_budget_tokens=memory_budget,
+        )
+        candidate_skill_context = fit_value_to_budget(
+            skill_context or {},
+            skill_budget,
+        )
+        candidate = self._replan_messages(
+            candidate_snapshot,
+            compact_value(delta, max_text_chars=1200, max_items=20),
+            compact_value(failure_context, max_text_chars=1500, max_items=20),
+            candidate_skill_context,
+        )
+        retry_snapshot = compact_project_snapshot(
+            snapshot,
+            aggressive=True,
+            skill_budget_tokens=skill_budget,
+            memory_budget_tokens=memory_budget,
+        )
+        retry_skill_context = fit_value_to_budget(
+            skill_context or {},
+            max(1, skill_budget // 2),
+        )
+        retry = self._replan_messages(
+            retry_snapshot,
+            compact_value(delta, max_text_chars=700, max_items=10),
+            compact_value(failure_context, max_text_chars=800, max_items=10),
+            retry_skill_context,
+        )
+        call = self.call_executor.execute(
+            call_site="plan_first.replan",
+            stage="replan",
+            provider=self.provider,
+            envelope=PromptEnvelope(
+                messages=original,
+                candidate_messages=candidate,
+                retry_messages=retry,
+                required_fragments=[
+                    json.dumps(
+                        DEPLOYMENT_PLAN_SCHEMA,
+                        ensure_ascii=False,
+                        indent=2,
+                    )
+                ],
+                sections=self._context_sections(
+                    prompt_snapshot,
+                    fit_value_to_budget(
+                        skill_context or {},
+                        skill_budget,
+                    ),
+                ),
+                candidate_sections=self._context_sections(
+                    candidate_snapshot,
+                    candidate_skill_context,
+                ),
+                retry_sections=self._context_sections(
+                    retry_snapshot,
+                    retry_skill_context,
+                ),
+                requested_output_tokens=self.max_tokens,
+            ),
+            profile=get_context_profile("replan", self.max_tokens),
+            temperature=0.0,
+        )
+        return call.provider_result
 
-        # Build skill context section for replan prompt
+    def _plan_messages(self, snapshot, skill_context):
         skill_context_section = ""
         if skill_context and skill_context.get("selected_skills"):
-            skill_context_section = "Skill context (failure-specific):\n%s" % json.dumps(skill_context, ensure_ascii=False, indent=2)[:3000]
-
-        system_msg = Message(role="system", content=PLANNER_SYSTEM_PROMPT)
-        replan_msg = Message(
-            role="user",
-            content=REPLAN_TEMPLATE.format(
-                previous_plan_json=json.dumps(previous_plan, ensure_ascii=False, indent=2)[:4000],
-                failure_context_json=json.dumps(failure_context, ensure_ascii=False, indent=2)[:4000],
-                snapshot_json=json.dumps(snapshot, ensure_ascii=False, indent=2)[:8000],
-                skill_context_section=skill_context_section,
+            skill_context_section = "Skill context:\n%s" % json.dumps(
+                skill_context, ensure_ascii=False, indent=2
+            )
+        return [
+            Message(role="system", content=PLANNER_SYSTEM_PROMPT),
+            Message(
+                role="user",
+                content=PLANNER_USER_TEMPLATE.format(
+                    snapshot_json=json.dumps(
+                        snapshot, ensure_ascii=False, indent=2
+                    ),
+                    schema_json=json.dumps(
+                        DEPLOYMENT_PLAN_SCHEMA, ensure_ascii=False, indent=2
+                    ),
+                    skill_context_section=skill_context_section,
+                ),
             ),
+        ]
+
+    def _context_budget(self, name: str, default: int) -> int:
+        if isinstance(self.config, dict):
+            return int(self.config.get(name, default))
+        return int(getattr(self.config, name, default))
+
+    @staticmethod
+    def _context_sections(snapshot, skill_context):
+        selected_files = snapshot.get("selected_files") or {}
+        memories = snapshot.get("memory_hits") or []
+        selected_skills = skill_context.get("selected_skills") or []
+        schema_text = json.dumps(
+            DEPLOYMENT_PLAN_SCHEMA,
+            ensure_ascii=False,
+            indent=2,
         )
-        return self.provider.complete(messages=[system_msg, replan_msg])
+        return [
+            ContextSection(
+                name="instructions",
+                content=PLANNER_SYSTEM_PROMPT,
+                priority=ContextPriority.REQUIRED,
+                trust_level=TrustLevel.TRUSTED_INSTRUCTION,
+                content_type="instruction",
+                required=True,
+                source="plan_first",
+            ),
+            ContextSection(
+                name="output_contract",
+                content=schema_text,
+                priority=ContextPriority.REQUIRED,
+                trust_level=TrustLevel.TRUSTED_INSTRUCTION,
+                content_type="schema",
+                required=True,
+                source="deployment_plan_schema",
+            ),
+            ContextSection(
+                name="repository_files",
+                content=selected_files,
+                priority=ContextPriority.RELEVANT_EVIDENCE,
+                trust_level=TrustLevel.UNTRUSTED_REPOSITORY,
+                content_type="repository_snippets",
+                source="project_snapshot",
+                metadata={"included_files": list(selected_files)},
+            ),
+            ContextSection(
+                name="memory",
+                content=memories,
+                priority=ContextPriority.EXPERIENCE,
+                trust_level=TrustLevel.UNTRUSTED_MEMORY,
+                content_type="verified_memory",
+                source="memory_store",
+                metadata={"memory_count": len(memories)},
+            ),
+            ContextSection(
+                name="skills",
+                content=selected_skills,
+                priority=ContextPriority.EXPERIENCE,
+                trust_level=TrustLevel.RUNTIME_FACT,
+                content_type="skill_context",
+                source="skill_router",
+                metadata={"skill_count": len(selected_skills)},
+            ),
+        ]
+
+    @staticmethod
+    def _without_embedded_skill_context(snapshot, memory_budget_tokens=2000):
+        result = dict(snapshot or {})
+        result.pop("skill_context", None)
+        result.pop("selected_skills", None)
+        result["memory_hits"] = fit_items_to_budget(
+            compact_memory_hits(
+                result.get("memory_hits") or [],
+                limit=5,
+                max_text_chars=1000,
+            ),
+            memory_budget_tokens,
+        )
+        return result
+
+    def _replan_messages(
+        self, snapshot, previous_plan, failure_context, skill_context
+    ):
+        skill_context_section = ""
+        if skill_context and skill_context.get("selected_skills"):
+            skill_context_section = "Skill context (failure-specific):\n%s" % json.dumps(
+                skill_context, ensure_ascii=False, indent=2
+            )
+        return [
+            Message(role="system", content=PLANNER_SYSTEM_PROMPT),
+            Message(
+                role="user",
+                content=REPLAN_TEMPLATE.format(
+                    previous_plan_json=json.dumps(
+                        previous_plan, ensure_ascii=False, indent=2
+                    ),
+                    failure_context_json=json.dumps(
+                        failure_context, ensure_ascii=False, indent=2
+                    ),
+                    snapshot_json=json.dumps(
+                        snapshot, ensure_ascii=False, indent=2
+                    ),
+                    schema_json=json.dumps(
+                        DEPLOYMENT_PLAN_SCHEMA,
+                        ensure_ascii=False,
+                        indent=2,
+                    ),
+                    skill_context_section=skill_context_section,
+                ),
+            ),
+        ]
 
 
 class PlanFirstDeploymentLoop:
@@ -218,7 +500,7 @@ class PlanFirstDeploymentLoop:
         self.stage_executor = stage_executor
         self.runtime_policy = runtime_policy or {}
         self.max_replans = max_replans
-        self.planner = LLMDeploymentPlanner(provider)
+        self.planner = LLMDeploymentPlanner(provider, config=config)
         self.parser = DeploymentPlanParser()
         self.policy_gate = PlanPolicyGate()
         self.compiler = PlanCompiler()
@@ -258,7 +540,10 @@ class PlanFirstDeploymentLoop:
 
         # 2. LLM generates deployment plan (with skill context)
         raw_result = self.planner.plan(snapshot, skill_context=skill_context)
-        artifacts.write_raw_plan({"raw_text": raw_result.text[:10000]})
+        artifacts.write_raw_plan({
+            "raw_text": raw_result.text[:10000],
+            "context": safe_context_telemetry(getattr(raw_result, "context", {})),
+        })
 
         # 3. Parse the plan
         try:

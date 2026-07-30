@@ -16,10 +16,18 @@ class MockLLMProvider:
     - replan: returns revised DeploymentPlan JSON
     """
 
+    context_window_tokens = 65536
+    max_tokens = 4096
+
     def __init__(self) -> None:
         self._call_count = 0
 
-    def complete(self, messages: List[Message], temperature: float = 0.2) -> LLMResult:
+    def complete(
+        self,
+        messages: List[Message],
+        temperature: float = 0.2,
+        max_output_tokens: int = None,
+    ) -> LLMResult:
         self._call_count += 1
         # Extract stage context from messages to make stage-specific decisions
         stage_hint = self._extract_stage_hint(messages)

@@ -36,6 +36,18 @@ class HarnessConfig:
     agent_provider: str = "mock"
     agent_max_input_chars: int = 20000
     agent_max_file_chars: int = 6000
+    agent_context_mode: str = "enforce"
+    agent_context_window_tokens: Optional[int] = None
+    agent_context_reserved_output_tokens: int = 4096
+    agent_context_safety_margin_tokens: int = 2048
+    agent_context_warn_ratio: float = 0.70
+    agent_context_compact_ratio: float = 0.85
+    agent_context_tokenizer: str = "auto"
+    agent_context_unknown_model_fallback_tokens: int = 8192
+    agent_context_max_overflow_retries: int = 1
+    agent_context_trace_section_details: bool = True
+    agent_context_skill_budget_tokens: int = 2000
+    agent_context_memory_budget_tokens: int = 2000
     agent_decision_timeout_seconds: int = 60
     agent_enable_analyze_planner: bool = False
     agent_enable_log_diagnosis: bool = False
@@ -164,6 +176,33 @@ class HarnessConfig:
             raise ValueError(
                 "langgraph_planner_mode must be 'llm' or 'deterministic', got: %s" % self.langgraph_planner_mode
             )
+        if self.agent_context_mode not in {"observe", "shadow", "enforce"}:
+            raise ValueError(
+                "agent_context_mode must be observe, shadow or enforce, got: %s"
+                % self.agent_context_mode
+            )
+        if self.agent_context_window_tokens is not None and self.agent_context_window_tokens <= 0:
+            raise ValueError("agent_context_window_tokens must be positive")
+        if self.agent_context_reserved_output_tokens <= 0:
+            raise ValueError("agent_context_reserved_output_tokens must be positive")
+        if self.agent_context_safety_margin_tokens < 0:
+            raise ValueError("agent_context_safety_margin_tokens must be non-negative")
+        if not (
+            0 < self.agent_context_warn_ratio < self.agent_context_compact_ratio <= 1
+        ):
+            raise ValueError(
+                "context ratios must satisfy 0 < warn < compact <= 1"
+            )
+        if self.agent_context_unknown_model_fallback_tokens <= 0:
+            raise ValueError(
+                "agent_context_unknown_model_fallback_tokens must be positive"
+            )
+        if self.agent_context_max_overflow_retries not in {0, 1}:
+            raise ValueError("agent_context_max_overflow_retries must be 0 or 1")
+        if self.agent_context_skill_budget_tokens <= 0:
+            raise ValueError("agent_context_skill_budget_tokens must be positive")
+        if self.agent_context_memory_budget_tokens <= 0:
+            raise ValueError("agent_context_memory_budget_tokens must be positive")
         valid_fault_windows = {
             "before_side_effect",
             "after_side_effect_before_commit",
@@ -205,6 +244,12 @@ class HarnessConfig:
             known["agent_mode"] = os.environ["AUTO_HARNESS_AGENT_MODE"]
         if os.environ.get("AUTO_HARNESS_AGENT_PROVIDER"):
             known["agent_provider"] = os.environ["AUTO_HARNESS_AGENT_PROVIDER"]
+        if os.environ.get("AUTO_HARNESS_AGENT_CONTEXT_MODE"):
+            known["agent_context_mode"] = os.environ["AUTO_HARNESS_AGENT_CONTEXT_MODE"]
+        if os.environ.get("AUTO_HARNESS_AGENT_CONTEXT_WINDOW_TOKENS"):
+            known["agent_context_window_tokens"] = int(
+                os.environ["AUTO_HARNESS_AGENT_CONTEXT_WINDOW_TOKENS"]
+            )
         if os.environ.get("AUTO_HARNESS_ENABLE_ANALYZE_PLANNER"):
             known["agent_enable_analyze_planner"] = os.environ.get("AUTO_HARNESS_ENABLE_ANALYZE_PLANNER") == "1"
         if os.environ.get("AUTO_HARNESS_ENABLE_LOG_DIAGNOSIS"):

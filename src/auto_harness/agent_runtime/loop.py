@@ -123,7 +123,10 @@ class DeploymentAgentLoop:
         artifacts = AgentArtifactWriter(run_dir)
 
         # Initialize decision gate (for uncertain stages)
-        gate = AgentDecisionGate(provider=self.provider)
+        gate = AgentDecisionGate(
+            provider=self.provider,
+            config=self.config,
+        )
 
         # Load existing plan if any
         state.plan = self._load_existing_plan(run_dir)

@@ -220,7 +220,10 @@ class AgentLoopController:
         if not provider:
             return {}
 
-        gate = AgentDecisionGate(provider=provider)
+        gate = AgentDecisionGate(
+            provider=provider,
+            config=self.config,
+        )
         gate_result = gate.decide(
             stage="repair",
             observation=observation,

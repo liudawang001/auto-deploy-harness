@@ -13,6 +13,14 @@ from pathlib import Path
 from typing import Any
 
 from auto_harness.agent_runtime.deployment_plan import DeploymentPlan
+from auto_harness.context import (
+    compact_value,
+    safe_context_telemetry,
+    summarize_stage_results,
+)
+from auto_harness.context.assembler import compact_failure_context
+from auto_harness.context.memory import compact_memory_hits
+from auto_harness.context.repository import RepoEvidenceSelector
 from auto_harness.graph.failure import FailureObserver
 from auto_harness.models.base import read_json, write_json
 from auto_harness.utils.time import utc_now_iso
@@ -338,8 +346,19 @@ class DeploymentGraphNodes:
         try:
             raw = self.deps.planner.plan(snapshot, skill_context=snapshot.get("skill_context", {}))
         except Exception as exc:
-            return {"llm_error": _sanitize_error(exc), "stop_reason": "llm_plan_failed", "raw_plan_path": "", "current_stage": "plan"}
-        path = self._artifacts(state).write_raw_plan({"raw_text": raw.text[:10000]})
+            return {
+                "llm_error": _sanitize_error(exc),
+                "llm_context": safe_context_telemetry(
+                    getattr(exc, "context", {})
+                ),
+                "stop_reason": "llm_plan_failed",
+                "raw_plan_path": "",
+                "current_stage": "plan",
+            }
+        path = self._artifacts(state).write_raw_plan({
+            "raw_text": raw.text[:10000],
+            "context": safe_context_telemetry(getattr(raw, "context", {})),
+        })
         return {"raw_plan_path": str(path), "current_stage": "plan"}
 
     def parse(self, state):
@@ -420,14 +439,27 @@ class DeploymentGraphNodes:
                 skill_context=skill_context,
             )
         except Exception as exc:
-            return {"llm_error": _sanitize_error(exc), "stop_reason": "llm_replan_failed", "raw_plan_path": "", "previous_plan_path": "", "replan_count": int(state.get("replan_count", 0)) + 1}
+            return {
+                "llm_error": _sanitize_error(exc),
+                "llm_context": safe_context_telemetry(
+                    getattr(exc, "context", {})
+                ),
+                "stop_reason": "llm_replan_failed",
+                "raw_plan_path": "",
+                "previous_plan_path": "",
+                "replan_count": int(state.get("replan_count", 0)) + 1,
+            }
         revision = int(state.get("replan_count", 0)) + 1
         replans_dir = Path(state["run_dir"]) / "reports" / "replans"
         replans_dir.mkdir(parents=True, exist_ok=True)
         path = replans_dir / ("replan_%s.raw.json" % revision)
         previous_path = replans_dir / ("replan_%s.previous.json" % revision)
         write_json(previous_path, previous_plan)
-        write_json(path, {"raw_text": raw.text[:10000], "revision": revision})
+        write_json(path, {
+            "raw_text": raw.text[:10000],
+            "revision": revision,
+            "context": safe_context_telemetry(getattr(raw, "context", {})),
+        })
         update = {
             "raw_plan_path": str(path),
             "previous_plan_path": str(previous_path),
@@ -480,15 +512,35 @@ class DeploymentGraphNodes:
                 snapshot = read_json(Path(snapshot_path))
             except (OSError, ValueError):
                 pass
+        failure_context = compact_failure_context(
+            state.get("failure_context", {}), max_chars=4000
+        )
+        relevant_files = RepoEvidenceSelector().select(
+            snapshot.get("selected_files", {}),
+            failure_context,
+            max_files=4,
+            max_chars=2500,
+        )
         observation = AgentObservation(
             task_id=state["task_id"], stage=state.get("failed_stage", ""),
-            repo_dir=state.get("repo_dir", ""), file_tree=snapshot.get("file_tree", []),
-            selected_files=snapshot.get("selected_files", {}),
-            deterministic_result=state.get("failure_context", {}),
-            previous_results=state.get("stage_results", {}),
-            memory_hits=snapshot.get("memory_hits", []),
-            selected_skills=snapshot.get("selected_skills", []),
-            runtime_policy=state.get("runtime_policy", {}),
+            repo_dir=state.get("repo_dir", ""), file_tree=[],
+            selected_files=relevant_files,
+            deterministic_result=failure_context,
+            previous_results=summarize_stage_results(
+                state.get("stage_results", {})
+            ),
+            memory_hits=compact_memory_hits(
+                snapshot.get("memory_hits", []), limit=3
+            ),
+            selected_skills=[
+                compact_value(item, max_text_chars=1200, max_items=8)
+                for item in snapshot.get("selected_skills", [])[:2]
+            ],
+            runtime_policy=compact_value(
+                state.get("runtime_policy", {}),
+                max_text_chars=1000,
+                max_items=20,
+            ),
             allowed_action_types=[
                 "install_package",
                 "install_pip_package",
@@ -498,7 +550,15 @@ class DeploymentGraphNodes:
                 "rerun_from_stage",
                 "set_env_var_name_only",
             ],
-            extra={"compiled_analysis": state.get("compiled_analysis", {}), "replan_count": state.get("replan_count", 0), "repair_count": state.get("repair_count", 0)},
+            extra={
+                "compiled_analysis": compact_value(
+                    state.get("compiled_analysis", {}),
+                    max_text_chars=1200,
+                    max_items=20,
+                ),
+                "replan_count": state.get("replan_count", 0),
+                "repair_count": state.get("repair_count", 0),
+            },
         )
         try:
             diagnoser = self.deps.diagnoser_factory(state)

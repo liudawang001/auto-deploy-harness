@@ -57,6 +57,7 @@ class AgentDecision:
     fallback_tool_call: Optional[ToolCall] = None
     stop_reason: Optional[str] = None
     raw_response: str = ""
+    context: Dict = field(default_factory=dict)
 
 
 @dataclass

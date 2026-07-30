@@ -371,8 +371,8 @@ class TaskRunner:
     def _create_plan_first_provider(self):
         """Create the LLM provider for plan-first mode."""
         if self.config.agent_plan_first_provider == "xunfei":
-            return XunfeiSparkProvider()
-        return MockLLMProvider()
+            return self._configure_provider_context(XunfeiSparkProvider())
+        return self._configure_provider_context(MockLLMProvider())
 
     def _run_agent_runtime_loop(self, task_id: str, dry_run: bool = True) -> None:
         """Run the unified DeploymentAgentLoop as primary controller."""
@@ -932,8 +932,18 @@ class TaskRunner:
 
     def _agent_provider(self):
         if self.config.agent_provider == "xunfei":
-            return XunfeiSparkProvider()
-        return MockLLMProvider()
+            return self._configure_provider_context(XunfeiSparkProvider())
+        return self._configure_provider_context(MockLLMProvider())
+
+    def _configure_provider_context(self, provider):
+        configured = getattr(self.config, "agent_context_window_tokens", None)
+        current = getattr(provider, "context_window_tokens", None)
+        if configured:
+            if isinstance(current, int) and current > 0:
+                provider.context_window_tokens = min(current, int(configured))
+            else:
+                provider.context_window_tokens = int(configured)
+        return provider
 
     def _create_agent_provider(self):
         """Create LLM provider for the agent runtime loop."""
@@ -980,6 +990,14 @@ class TaskRunner:
             "agent_verify_max_steps": self.config.agent_verify_max_steps,
             "agent_allowed_hosts": self.config.agent_allowed_hosts,
             "provider": self._agent_provider(),
+            "agent_context_mode": self.config.agent_context_mode,
+            "agent_context_window_tokens": self.config.agent_context_window_tokens,
+            "agent_context_reserved_output_tokens": self.config.agent_context_reserved_output_tokens,
+            "agent_context_safety_margin_tokens": self.config.agent_context_safety_margin_tokens,
+            "agent_context_unknown_model_fallback_tokens": self.config.agent_context_unknown_model_fallback_tokens,
+            "agent_context_max_overflow_retries": self.config.agent_context_max_overflow_retries,
+            "agent_context_skill_budget_tokens": self.config.agent_context_skill_budget_tokens,
+            "agent_context_memory_budget_tokens": self.config.agent_context_memory_budget_tokens,
         }
 
     def _agent_repair_execute_enabled(self, runtime: RuntimePolicy) -> bool:
@@ -1020,7 +1038,10 @@ class TaskRunner:
         # Build observation for runner gate
         observation = self._build_runner_observation(analysis, repo_dir)
 
-        gate = AgentDecisionGate(provider=self._agent_provider())
+        gate = AgentDecisionGate(
+            provider=self._agent_provider(),
+            config=self.config,
+        )
         gate_result = gate.decide(
             stage="runner",
             observation=observation,
@@ -1130,7 +1151,10 @@ class TaskRunner:
             ],
         }
 
-        gate = AgentDecisionGate(provider=self._agent_provider())
+        gate = AgentDecisionGate(
+            provider=self._agent_provider(),
+            config=self.config,
+        )
         gate_result = gate.decide(
             stage="model_prepare",
             observation=observation,
@@ -1224,7 +1248,7 @@ class TaskRunner:
         if not provider:
             return
 
-        planner = PlanPlanner()
+        planner = PlanPlanner(config=self.config)
         decision = planner.plan(observation, provider=provider)
 
         # Write plan artifact
@@ -1362,7 +1386,10 @@ class TaskRunner:
             ],
         }
 
-        gate = AgentDecisionGate(provider=self._agent_provider())
+        gate = AgentDecisionGate(
+            provider=self._agent_provider(),
+            config=self.config,
+        )
         gate_result = gate.decide(
             stage="env_solve",
             observation=observation,

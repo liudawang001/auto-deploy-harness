@@ -570,6 +570,7 @@ def main(argv=None) -> int:
             memory_dir=config.memory_path,
             skills_dir=config.skills_path,
             provider=provider,
+            config=config,
         )
 
         if args.propose:

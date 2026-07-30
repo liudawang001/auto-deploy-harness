@@ -129,6 +129,7 @@ export XUNFEI_API_KEY="..."
 export XUNFEI_API_SECRET="..."
 export XUNFEI_MODEL="..."
 export XUNFEI_API_BASE="..."
+export XUNFEI_CONTEXT_WINDOW_TOKENS="32768"
 # 或者 export XUNFEI_API_URL="..."
 ```
 
@@ -141,6 +142,35 @@ Provider smoke test：
 ```bash
 PYTHONPATH=src python3 -m auto_harness.cli llm-test --provider xunfei --prompt "Return JSON only: {\"status\":\"ok\"}"
 ```
+
+## LLM Context Governance
+
+生产 LLM 调用统一经过 `LLMCallExecutor`。请求预算覆盖 messages、tool schema、output schema、输出预留和安全余量；Plan、Replan、Diagnose、Repair、Runner、Verify、Memory Curate 使用独立输入上限。默认配置启用 `enforce`：
+
+```json
+{
+  "agent_context_mode": "enforce",
+  "agent_context_window_tokens": null,
+  "agent_context_reserved_output_tokens": 4096,
+  "agent_context_safety_margin_tokens": 2048,
+  "agent_context_warn_ratio": 0.7,
+  "agent_context_compact_ratio": 0.85,
+  "agent_context_skill_budget_tokens": 2000,
+  "agent_context_memory_budget_tokens": 2000,
+  "agent_context_max_overflow_retries": 1
+}
+```
+
+`agent_context_window_tokens=null` 表示从 Provider 能力读取，不表示无限制。讯飞 Provider 需通过 `XUNFEI_CONTEXT_WINDOW_TOKENS` 声明当前模型的实际窗口；也可在确认模型规格后显式配置该值。
+
+- `observe`：发送原请求，只记录原始和压缩候选的估算值。
+- `shadow`：发送原请求，同时构建压缩候选，用于上线前对比。
+- `enforce`：低于压缩阈值时保留完整原请求；超过阈值后选用更小的阶段候选，超出硬预算时再使用更激进的 retry 候选，仍超限则在调用 Provider 前停止。
+- Provider/Model 上下文能力未知且未显式配置时，`enforce` 会 fail closed。
+- Provider 返回 context overflow 时最多使用更小请求重试一次，不进行第三次调用。
+- System guardrail 与结构化输出契约不允许在压缩请求中丢失；仓库、日志和 Memory 始终按不可信数据处理。
+
+仓库路径、源码片段、日志、阶段历史、Skill 和 Memory 均先确定性筛选或压缩，Skill 与 Memory 还具有互相独立的硬预算。Agent trace 只保存 Prompt Hash、预算、估算 Token、Provider Usage、裁剪事件和实际请求所纳入的文件、Skill、Memory 数量等结构化遥测，不保存完整 Prompt。当前无官方 tokenizer 时使用 UTF-8 字节上界保守估算，因此可能过度压缩；真实 Token 成本与决策质量仍需使用实际 Provider API 做外部验证。
 
 ## 可选 Claude Code Analyzer Advisor
 

@@ -24,6 +24,7 @@ class AgentTraceWriter:
         parsed_decision,
         policy_result: Dict = None,
         latency_ms: int = 0,
+        context: Dict = None,
     ) -> str:
         if not self.trace_dir:
             return ""
@@ -39,6 +40,7 @@ class AgentTraceWriter:
             "parsed_decision": sanitizer.redact_value(to_plain(parsed_decision)),
             "policy_result": sanitizer.redact_value(policy_result or {}),
             "latency_ms": latency_ms,
+            "context": sanitizer.redact_value(context or {}),
             "created_at_ms": int(time.time() * 1000),
         }
         path = self.trace_dir / ("%s_%s.json" % (stage, compact_timestamp()))

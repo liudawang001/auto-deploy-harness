@@ -70,7 +70,7 @@ class LangGraphControllerDependencies:
             planner = DeterministicDeploymentPlanner()
         else:
             provider = self.runner._create_plan_first_provider()
-            planner = LLMDeploymentPlanner(provider)
+            planner = LLMDeploymentPlanner(provider, config=self.runner.config)
         parser = DeploymentPlanParser()
         policy_gate = PlanPolicyGate()
         compiler = PlanCompiler()
@@ -246,6 +246,14 @@ class LangGraphControllerDependencies:
                 "agent_verify_max_steps": getattr(config, "agent_verify_max_steps", 5),
                 "agent_allowed_hosts": getattr(config, "agent_allowed_hosts", ["localhost", "127.0.0.1"]),
                 "provider": self.runner._create_plan_first_provider(),
+                "agent_context_mode": getattr(config, "agent_context_mode", "enforce"),
+                "agent_context_window_tokens": getattr(config, "agent_context_window_tokens", None),
+                "agent_context_reserved_output_tokens": getattr(config, "agent_context_reserved_output_tokens", 4096),
+                "agent_context_safety_margin_tokens": getattr(config, "agent_context_safety_margin_tokens", 2048),
+                "agent_context_unknown_model_fallback_tokens": getattr(config, "agent_context_unknown_model_fallback_tokens", 8192),
+                "agent_context_max_overflow_retries": getattr(config, "agent_context_max_overflow_retries", 1),
+                "agent_context_skill_budget_tokens": getattr(config, "agent_context_skill_budget_tokens", 2000),
+                "agent_context_memory_budget_tokens": getattr(config, "agent_context_memory_budget_tokens", 2000),
             }
         return factory
 
