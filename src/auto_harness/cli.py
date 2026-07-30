@@ -14,6 +14,8 @@ from auto_harness.memory.outcomes import SkillOutcomeRecorder
 from auto_harness.skills.rollback import SkillRollbackManager
 from auto_harness.live_smoke import LiveAgentSmokeRunner
 from auto_harness.orchestrator import TaskRunner
+from auto_harness.models.base import to_plain, write_json
+from auto_harness.modules import HostPreflightModule, ProjectAnalyzer, ResourcePlanner
 from auto_harness.providers import Message, MockLLMProvider, XunfeiSparkProvider
 from auto_harness.queue import DeploymentQueue
 from auto_harness.readiness import ReadinessAuditor
@@ -43,7 +45,10 @@ def build_parser() -> argparse.ArgumentParser:
     deploy.add_argument("--agent-mode", choices=["off", "audit", "planner", "gated_actor"], default=None)
     deploy.add_argument("--agent-enable-verify", action="store_true", default=False)
     deploy.add_argument("--agent-verify-max-steps", type=int, default=None)
-    deploy.add_argument("--env-backend", choices=["auto", "venv", "conda", "mamba"], default=None)
+    deploy.add_argument("--env-backend", choices=["auto", "venv", "conda", "mamba", "micromamba"], default=None)
+    deploy.add_argument("--require-gpu", action="store_true", default=False)
+    deploy.add_argument("--min-gpu-memory-mb", type=int, default=None)
+    deploy.add_argument("--allow-cpu-fallback", action="store_true", default=False)
     deploy.add_argument("--prefer-mamba", action="store_true", default=False)
     deploy.add_argument("--docker-image", default=None)
     deploy.add_argument("--docker-network", default=None)
@@ -73,7 +78,10 @@ def build_parser() -> argparse.ArgumentParser:
     resume.add_argument("--download-retry-backoff", type=float, default=None)
     resume.add_argument("--execution-backend", choices=["local", "docker"], default=None)
     resume.add_argument("--agent-self-heal", action="store_true", default=False)
-    resume.add_argument("--env-backend", choices=["auto", "venv", "conda", "mamba"], default=None)
+    resume.add_argument("--env-backend", choices=["auto", "venv", "conda", "mamba", "micromamba"], default=None)
+    resume.add_argument("--require-gpu", action="store_true", default=False)
+    resume.add_argument("--min-gpu-memory-mb", type=int, default=None)
+    resume.add_argument("--allow-cpu-fallback", action="store_true", default=False)
     resume.add_argument("--prefer-mamba", action="store_true", default=False)
     resume.add_argument("--docker-image", default=None)
     resume.add_argument("--docker-network", default=None)
@@ -86,6 +94,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     report = sub.add_parser("report", help="print report path")
     report.add_argument("--task-id", required=True)
+
+    preflight = sub.add_parser("preflight", help="probe GPU and Conda compatibility without mutation")
+    preflight.add_argument("--repo", required=True)
+    preflight.add_argument("--env-backend", choices=["auto", "venv", "conda", "mamba", "micromamba"], default=None)
+    preflight.add_argument("--require-gpu", action="store_true", default=False)
+    preflight.add_argument("--min-gpu-memory-mb", type=int, default=None)
+    preflight.add_argument("--allow-cpu-fallback", action="store_true", default=False)
+    preflight.add_argument("--output", default="")
 
     package = sub.add_parser("package", help="export a deployment audit package for one task")
     package.add_argument("--task-id", required=True)
@@ -271,6 +287,12 @@ def _apply_cli_overrides(config: HarnessConfig, args) -> None:
         config.env_backend = args.env_backend
     if getattr(args, "prefer_mamba", False):
         config.conda_prefer_mamba = True
+    if getattr(args, "require_gpu", False):
+        config.preflight_require_gpu = True
+    if getattr(args, "min_gpu_memory_mb", None) is not None:
+        config.min_gpu_memory_mb = max(0, args.min_gpu_memory_mb)
+    if getattr(args, "allow_cpu_fallback", False):
+        config.conda_allow_cpu_fallback = True
     # Decision gate CLI overrides
     if getattr(args, "agent_enable_plan_gate", False):
         config.agent_enable_plan_gate = True
@@ -317,12 +339,32 @@ def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
     config = HarnessConfig.load()
     _apply_cli_overrides(config, args)
-    runner = TaskRunner(config)
 
     if args.command == "init":
         config.runs_path.mkdir(parents=True, exist_ok=True)
         print("initialized: %s" % config.runs_path)
         return 0
+
+    if args.command == "preflight":
+        repo_dir = Path(args.repo).resolve()
+        if not repo_dir.is_dir():
+            print(json.dumps({"status": "failed", "error": "repo directory does not exist"}, indent=2))
+            return 2
+        analysis_result = ProjectAnalyzer(use_agent=False).analyze(repo_dir)
+        resource_result = ResourcePlanner().plan(repo_dir, analysis_result.data)
+        result = HostPreflightModule(config).run(
+            repo_dir,
+            analysis_result.data,
+            resource_result.data,
+            allow_mutation=False,
+        )
+        payload = to_plain(result)
+        if args.output:
+            write_json(Path(args.output), payload)
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0 if result.status == "passed" else 2
+
+    runner = TaskRunner(config)
 
     if args.command == "deploy":
         dry_run = args.dry_run or not args.execute

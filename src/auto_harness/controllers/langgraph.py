@@ -42,7 +42,7 @@ from auto_harness.models.base import write_json
 
 # Pipeline stages in execution order
 STAGES = (
-    "analyze", "resource_plan", "env_solve", "env_deploy",
+    "analyze", "resource_plan", "host_preflight", "env_solve", "env_deploy",
     "model_prepare", "runner", "verify",
 )
 
@@ -261,6 +261,7 @@ def build_graph(deps, checkpointer):
         {
             "analyze": "analyze",
             "resource_plan": "resource_plan",
+            "host_preflight": "host_preflight",
             "env_solve": "env_solve",
             "env_deploy": "recover_env_deploy",
             "model_prepare": "recover_model_prepare",
@@ -269,10 +270,12 @@ def build_graph(deps, checkpointer):
         },
     )
 
-    # Non-side-effect stages: analyze -> resource_plan -> env_solve
+    # Non-side-effect stages: analyze -> resource_plan -> host_preflight -> env_solve
     builder.add_conditional_edges("analyze", route_after_stage,
         {"continue": "resource_plan", "observe_failure": "observe_failure"})
     builder.add_conditional_edges("resource_plan", route_after_stage,
+        {"continue": "host_preflight", "observe_failure": "observe_failure"})
+    builder.add_conditional_edges("host_preflight", route_after_stage,
         {"continue": "env_solve", "observe_failure": "observe_failure"})
 
     # env_solve -> recover_env_deploy -> env_deploy
@@ -346,6 +349,7 @@ def build_graph(deps, checkpointer):
         {
             "analyze": "analyze",
             "resource_plan": "resource_plan",
+            "host_preflight": "host_preflight",
             "env_solve": "env_solve",
             "env_deploy": "recover_env_deploy",
             "model_prepare": "recover_model_prepare",

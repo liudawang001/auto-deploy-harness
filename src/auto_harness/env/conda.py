@@ -41,7 +41,8 @@ class CondaEnvironmentParser:
         data = self._load_yaml(raw)
         parser = data.pop("_parser", "pyyaml")
         name = safe_name(str(data.get("name") or path.parent.name or "auto-harness"))
-        channels = self._safe_channels(data.get("channels") or [])
+        raw_channels = [str(item).strip() for item in (data.get("channels") or []) if str(item).strip()]
+        channels = self._safe_channels(raw_channels)
         conda_deps, pip_deps, python = self._dependencies(data.get("dependencies") or [], default_python)
         torch = self._torch_from_deps(conda_deps + pip_deps)
         return {
@@ -50,6 +51,7 @@ class CondaEnvironmentParser:
             "path": str(path),
             "name": name,
             "channels": channels,
+            "rejected_channels": [item for item in raw_channels if item not in channels],
             "python": python,
             "conda_dependencies": conda_deps,
             "pip_dependencies": pip_deps,
@@ -155,13 +157,14 @@ class CondaBackend:
     def build_spec(self, repo_dir: Path, env_solution: Dict, conda_file: Dict = None) -> EnvironmentSpec:
         conda_file = conda_file or {}
         strategy = env_solution.get("environment_strategy") or {}
+        decision = env_solution.get("compatibility_decision") or {}
         name = safe_name(str(conda_file.get("name") or strategy.get("name") or Path(repo_dir).name or "auto-harness"))
         python = str(strategy.get("python") or conda_file.get("python") or env_solution.get("python") or self.default_python)
-        backend = str(env_solution.get("backend") or strategy.get("backend") or self.backend)
+        backend = str(decision.get("backend") or env_solution.get("backend") or strategy.get("backend") or self.backend)
         if backend == "auto":
             backend = "conda"
         channels = self._channels(strategy.get("channels") or conda_file.get("channels") or [])
-        prefix = str(Path(self.envs_dir) / name)
+        prefix = str(decision.get("target_prefix") or (Path(self.envs_dir) / name))
         return EnvironmentSpec(
             backend=backend,
             name=name,
@@ -172,10 +175,25 @@ class CondaBackend:
             pip_dependencies=list(conda_file.get("pip_dependencies") or []),
             torch=dict(env_solution.get("torch_solution") or {}),
             source_files=[conda_file.get("path")] if conda_file.get("path") else [],
+            tool_path=str(decision.get("tool") or ""),
+            action=str(decision.get("action") or "create"),
+            spec_hash=str(decision.get("spec_hash") or ""),
+            project_id=str(decision.get("project_id") or ""),
+            repo_fingerprint=str(decision.get("repo_fingerprint") or ""),
         )
 
     def command_plan(self, spec: EnvironmentSpec, pip_plan: List[List[str]] = None) -> Dict:
-        tool = self._tool(spec.backend)
+        tool = spec.tool_path or self._tool(spec.backend)
+        if spec.action == "reuse":
+            return {
+                "environment_backend": spec.backend,
+                "environment_prefix": spec.prefix,
+                "environment_python": str(Path(spec.prefix) / "bin" / "python"),
+                "tool": tool,
+                "action": "reuse",
+                "commands": [],
+                "spec": self._spec_dict(spec),
+            }
         create = [tool, "create", "-y", "-p", spec.prefix, "python=%s" % spec.python]
         channels = self._channel_args(spec.channels)
         conda_install = self._conda_install(tool, spec, channels)
@@ -189,12 +207,13 @@ class CondaBackend:
             "environment_prefix": spec.prefix,
             "environment_python": str(Path(spec.prefix) / "bin" / "python"),
             "tool": tool,
+            "action": spec.action,
             "commands": commands,
             "spec": self._spec_dict(spec),
         }
 
     def run_cmd(self, spec: EnvironmentSpec, cmd: List[str]) -> List[str]:
-        tool = self._tool(spec.backend)
+        tool = spec.tool_path or self._tool(spec.backend)
         raw = list(cmd)
         if raw and raw[0].endswith("/python"):
             raw = ["python"] + raw[1:]
@@ -252,13 +271,37 @@ class CondaBackend:
 
     def _pip_commands(self, tool: str, spec: EnvironmentSpec, pip_plan: List[List[str]]) -> List[List[str]]:
         commands = []
-        if spec.pip_dependencies:
-            commands.append([tool, "run", "-p", spec.prefix, "python", "-m", "pip", "install"] + spec.pip_dependencies)
+        selected_torch = bool((spec.torch.get("selected") or {}).get("packages"))
+        pip_dependencies = [
+            dep for dep in spec.pip_dependencies
+            if not (selected_torch and self._is_torch_package(dep))
+        ]
+        if pip_dependencies:
+            commands.append(
+                [tool, "run", "-p", spec.prefix, "python", "-m", "pip", "install"]
+                + pip_dependencies
+            )
         for cmd in pip_plan:
             if "-m" in cmd and "pip" in cmd:
                 index = cmd.index("pip")
-                commands.append([tool, "run", "-p", spec.prefix, "python", "-m", "pip"] + cmd[index + 1:])
+                pip_args = cmd[index + 1:]
+                if selected_torch and any(
+                    self._is_torch_package(item) for item in pip_args
+                    if not str(item).startswith("-")
+                ):
+                    continue
+                commands.append(
+                    [tool, "run", "-p", spec.prefix, "python", "-m", "pip"]
+                    + pip_args
+                )
         return commands
+
+    @staticmethod
+    def _is_torch_package(spec: str) -> bool:
+        name = re.split(
+            r"[<>=~!;\[]", str(spec).strip(), maxsplit=1,
+        )[0].lower().replace("_", "-")
+        return name in {"torch", "pytorch", "torchvision", "torchaudio"}
 
     def _spec_dict(self, spec: EnvironmentSpec) -> Dict:
         return json.loads(json.dumps(spec.__dict__, ensure_ascii=False))

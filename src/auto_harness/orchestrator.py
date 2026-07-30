@@ -21,6 +21,7 @@ from auto_harness.memory.success import VerifiedMemoryRecorder
 from auto_harness.modules import (
     EnvDeployModule,
     EnvSolveModule,
+    HostPreflightModule,
     ModelPrepareModule,
     ProjectAnalyzer,
     ReportGenerator,
@@ -37,8 +38,8 @@ from auto_harness.utils.time import compact_timestamp, utc_now_iso
 
 
 class TaskRunner:
-    PIPELINE_STAGES = ("analyze", "resource_plan", "env_solve", "env_deploy", "model_prepare", "runner", "verify", "report")
-    RERUN_STAGES = ("analyze", "resource_plan", "env_solve", "env_deploy", "model_prepare", "runner", "verify")
+    PIPELINE_STAGES = ("analyze", "resource_plan", "host_preflight", "env_solve", "env_deploy", "model_prepare", "runner", "verify", "report")
+    RERUN_STAGES = ("analyze", "resource_plan", "host_preflight", "env_solve", "env_deploy", "model_prepare", "runner", "verify")
 
     def __init__(self, config: HarnessConfig) -> None:
         self.config = config
@@ -498,6 +499,35 @@ class TaskRunner:
         else:
             resource_data = results["resource_plan"]["data"]
 
+        if should_run("host_preflight"):
+            preflight_context = self._stage_context("host_preflight", effective_analysis)
+            preflight_result = HostPreflightModule(self.config).run(
+                repo_dir,
+                effective_analysis,
+                resource_data,
+                run_dir=run_dir,
+                allow_mutation=not dry_run and task.runtime.allow_dependency_install,
+            )
+            self._attach_context(preflight_result, preflight_context)
+            results["host_preflight"] = to_plain(preflight_result)
+            self._save_stage(task_id, "host_preflight", preflight_result)
+            self._remember(task_id, "host_preflight", preflight_result, effective_analysis, results)
+            preflight_data = preflight_result.data
+            if preflight_result.status in ("failed", "uncertain") and self.config.preflight_fail_closed:
+                task_data = read_json(run_dir / "task.json")
+                report_result = ReportGenerator().generate(
+                    run_dir, task_data, results, execution_audit=execution_audit,
+                )
+                results["report"] = to_plain(report_result)
+                self._save_stage(task_id, "report", report_result)
+                write_json(run_dir / "reports" / "pipeline_results.json", results)
+                state = self.store.load_state(task_id)
+                state.report_path = report_result.data.get("report_path")
+                self.store.save_state(state)
+                return task_id
+        else:
+            preflight_data = results["host_preflight"]["data"]
+
         if should_run("env_solve"):
             env_solve_context = self._stage_context("env_solve", effective_analysis)
             env_solve_hints = plan_hints.get("stage_hints", {}).get("env_solve", {})
@@ -508,7 +538,13 @@ class TaskRunner:
                 conda_allowed_channels=self.config.conda_allowed_channels,
                 conda_python_default=self.config.conda_python_default,
                 torch_cuda_preference=self.config.torch_cuda_preference,
-            ).solve(repo_dir, effective_analysis, resource_data, stage_hints=env_solve_hints)
+            ).solve(
+                repo_dir,
+                effective_analysis,
+                resource_data,
+                stage_hints=env_solve_hints,
+                preflight=preflight_data,
+            )
             self._attach_context(env_solve_result, env_solve_context)
             results["env_solve"] = to_plain(env_solve_result)
             self._save_stage(task_id, "env_solve", env_solve_result)
@@ -530,6 +566,9 @@ class TaskRunner:
                 docker_gpus=self.config.docker_gpus,
                 docker_model_cache_dir=self._docker_model_cache_dir(),
                 docker_security_options=self._docker_security_options(),
+                config=self.config,
+                run_dir=run_dir,
+                task_id=task_id,
             )
             self._attach_context(env_result, env_context)
             self._attach_repair_overlay(env_result, repair_overlay)

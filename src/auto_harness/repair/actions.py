@@ -14,7 +14,10 @@ class RepairActionRegistry:
         "update_verify_hint": {"kind": "metadata", "required_payload": ("verify_hint",)},
         "rerun_from_stage": {"kind": "control", "required_payload": ("stage",)},
     }
-    SAFE_RERUN_STAGES = {"env_deploy", "model_prepare", "runner", "verify"}
+    SAFE_RERUN_STAGES = {
+        "host_preflight", "env_solve", "env_deploy",
+        "model_prepare", "runner", "verify",
+    }
     ENV_NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,127}$")
 
     def supported_types(self) -> List[str]:

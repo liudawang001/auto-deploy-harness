@@ -7,7 +7,7 @@ from auto_harness.repair.schema import RepairAction, RepairPlan
 
 
 class RepairPlanner:
-    RERUN_STAGES = ("analyze", "resource_plan", "env_solve", "env_deploy", "model_prepare", "runner", "verify")
+    RERUN_STAGES = ("analyze", "resource_plan", "host_preflight", "env_solve", "env_deploy", "model_prepare", "runner", "verify")
 
     def __init__(self) -> None:
         self.normalizer = RepairActionNormalizer()

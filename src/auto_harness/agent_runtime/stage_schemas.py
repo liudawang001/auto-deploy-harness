@@ -54,12 +54,15 @@ ALL_STAGE_TOOLS = RUNNER_TOOLS + ENV_TOOLS + MODEL_TOOLS + REPAIR_TOOLS + PLAN_T
 
 # Pipeline stages that the plan gate can reference
 PIPELINE_STAGES = (
-    "analyze", "resource_plan", "env_solve", "env_deploy",
+    "analyze", "resource_plan", "host_preflight", "env_solve", "env_deploy",
     "model_prepare", "runner", "verify", "report",
 )
 
 # Stages where repair can rerun from
-SAFE_RERUN_STAGES = ("env_deploy", "model_prepare", "runner", "verify")
+SAFE_RERUN_STAGES = (
+    "host_preflight", "env_solve", "env_deploy",
+    "model_prepare", "runner", "verify",
+)
 
 
 # ------------------------------------------------------------------

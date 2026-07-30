@@ -54,6 +54,11 @@ class ReadinessAuditor:
         "src/auto_harness/modules/env_solve.py",
         "src/auto_harness/runtime/docker_smoke.py",
         "src/auto_harness/runtime/gpu.py",
+        "src/auto_harness/preflight/service.py",
+        "src/auto_harness/preflight/compatibility.py",
+        "src/auto_harness/preflight/policy.py",
+        "src/auto_harness/env/ownership.py",
+        "src/auto_harness/env/postcheck.py",
         "src/auto_harness/queue.py",
         "src/auto_harness/dashboard.py",
         "src/auto_harness/artifacts.py",
@@ -91,6 +96,9 @@ class ReadinessAuditor:
         "langgraph_fault_injection_idempotency",
         "docker_phase_security_profiles",
         "unified_metrics_consistency",
+        "gpu_conda_preflight_decision",
+        "conda_environment_policy",
+        "conda_postcheck_recovery",
     ]
 
     EXTERNAL_GATES = [

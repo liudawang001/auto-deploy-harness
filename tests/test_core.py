@@ -2758,7 +2758,7 @@ class CoreTests(unittest.TestCase):
     def test_benchmark_runner_executes_all_fixture_cases(self):
         report = BenchmarkRunner().run(Path("tests/fixtures/benchmarks/manifest.json"))
         self.assertIn(report["status"], ("passed", "partial"))
-        self.assertEqual(len(report["cases"]), 73)
+        self.assertEqual(len(report["cases"]), 76)
         self.assertFalse(any(case["status"] == "failed" for case in report["cases"]))
         if report["status"] == "partial":
             blocked = [case for case in report["cases"] if case["status"] == "not_run"]
@@ -3618,7 +3618,7 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(audit["rerun_stages"], ["verify", "report"])
             report = (run_dir / "reports" / "report.md").read_text(encoding="utf-8")
             self.assertIn("## Execution Audit", report)
-            self.assertIn("- Reused stages: `analyze`, `resource_plan`, `env_solve`, `env_deploy`, `model_prepare`, `runner`", report)
+            self.assertIn("- Reused stages: `analyze`, `resource_plan`, `host_preflight`, `env_solve`, `env_deploy`, `model_prepare`, `runner`", report)
             self.assertIn("- Rerun stages: `verify`, `report`", report)
 
     def test_resume_falls_back_when_previous_stage_results_are_missing(self):

@@ -8,6 +8,8 @@ from auto_harness.utils.time import utc_now_iso
 class RepairLoopController:
     # Safe stages for repair resume (document Phase 7.4)
     SAFE_RERUN_STAGES = (
+        "host_preflight",
+        "env_solve",
         "env_deploy",
         "model_prepare",
         "runner",

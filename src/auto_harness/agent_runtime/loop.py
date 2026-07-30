@@ -36,6 +36,7 @@ from auto_harness.utils.time import utc_now_iso
 STAGE_TOOLS = {
     "analyze": PLAN_TOOLS,
     "resource_plan": PLAN_TOOLS,
+    "host_preflight": (),
     "env_solve": ENV_TOOLS,
     "env_deploy": ENV_TOOLS,
     "model_prepare": MODEL_TOOLS,
@@ -148,7 +149,11 @@ class DeploymentAgentLoop:
             current_status = self._get_stage_status(stage, state)
             gate_decision_applied = False
 
-            if current_status in ("uncertain", "failed", "") and self.provider:
+            if (
+                current_status in ("uncertain", "failed", "")
+                and self.provider
+                and stage != "host_preflight"
+            ):
                 allowed_tools = list(STAGE_TOOLS.get(stage, ()))
                 gate_result = gate.decide(
                     stage=stage,

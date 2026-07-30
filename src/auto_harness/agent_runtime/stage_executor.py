@@ -120,10 +120,24 @@ class AgentStageExecutor:
                 return self._execute_analyze(task_id, run_dir, repo_dir, state, before_status, dry_run)
             elif stage == "resource_plan":
                 return self._execute_resource_plan(task_id, run_dir, repo_dir, analysis, before_status)
+            elif stage == "host_preflight":
+                return self._execute_host_preflight(
+                    task_id, run_dir, repo_dir, analysis, resource_data,
+                    before_status, dry_run,
+                )
             elif stage == "env_solve":
-                return self._execute_env_solve(task_id, run_dir, repo_dir, analysis, resource_data, before_status, stage_hints)
+                preflight = (
+                    (state.get("stage_results") or {}).get("host_preflight") or {}
+                ).get("data") or {}
+                return self._execute_env_solve(
+                    task_id, run_dir, repo_dir, analysis, resource_data,
+                    before_status, stage_hints, preflight,
+                )
             elif stage == "env_deploy":
-                return self._execute_env_deploy(task_id, run_dir, repo_dir, deploy_analysis, before_status, dry_run, repair_overlay)
+                return self._execute_env_deploy(
+                    task_id, run_dir, repo_dir, deploy_analysis,
+                    before_status, dry_run, repair_overlay, state,
+                )
             elif stage == "model_prepare":
                 return self._execute_model_prepare(task_id, run_dir, repo_dir, resource_data, before_status, dry_run)
             elif stage == "runner":
@@ -194,7 +208,35 @@ class AgentStageExecutor:
             changed=before_status != result.status,
         )
 
-    def _execute_env_solve(self, task_id, run_dir, repo_dir, analysis, resource_data, before_status, stage_hints):
+    def _execute_host_preflight(
+        self, task_id, run_dir, repo_dir, analysis, resource_data,
+        before_status, dry_run,
+    ):
+        from auto_harness.modules.host_preflight import HostPreflightModule
+        allow_install = self.runtime_policy.get(
+            "allow_dependency_install",
+            self.config.allow_dependency_install if self.config else False,
+        )
+        result = HostPreflightModule(self.config).run(
+            repo_dir,
+            analysis,
+            resource_data,
+            run_dir=run_dir,
+            allow_mutation=not dry_run and allow_install,
+        )
+        return StageExecutionResult(
+            stage="host_preflight",
+            before_status=before_status,
+            after_status=result.status,
+            result=to_plain(result),
+            changed=before_status != result.status,
+            evidence_paths=list(result.evidence),
+        )
+
+    def _execute_env_solve(
+        self, task_id, run_dir, repo_dir, analysis, resource_data,
+        before_status, stage_hints, preflight,
+    ):
         from auto_harness.modules.env_solve import EnvSolveModule
         env_backend = self.config.env_backend if self.config else "auto"
         conda_envs_dir = self.config.conda_envs_dir if self.config else ".conda/envs"
@@ -209,7 +251,13 @@ class AgentStageExecutor:
             conda_allowed_channels=conda_allowed_channels,
             conda_python_default=conda_python_default,
             torch_cuda_preference=torch_cuda_preference,
-        ).solve(repo_dir, analysis, resource_data, stage_hints=stage_hints)
+        ).solve(
+            repo_dir,
+            analysis,
+            resource_data,
+            stage_hints=stage_hints,
+            preflight=preflight,
+        )
         return StageExecutionResult(
             stage="env_solve",
             before_status=before_status,
@@ -218,7 +266,10 @@ class AgentStageExecutor:
             changed=before_status != result.status,
         )
 
-    def _execute_env_deploy(self, task_id, run_dir, repo_dir, deploy_analysis, before_status, dry_run, repair_overlay):
+    def _execute_env_deploy(
+        self, task_id, run_dir, repo_dir, deploy_analysis,
+        before_status, dry_run, repair_overlay, state,
+    ):
         from auto_harness.modules.env_deploy import EnvDeployModule
         # Merge repair overlay constraints into analysis
         effective_analysis = dict(deploy_analysis)
@@ -243,6 +294,15 @@ class AgentStageExecutor:
             docker_gpus=self.config.docker_gpus if self.config else "none",
             docker_model_cache_dir=self.config.docker_model_cache_dir if self.config else "",
             docker_security_options=self._docker_security_options(),
+            config=self.config,
+            run_dir=run_dir,
+            task_id=task_id,
+            operation_id=str(state.get("pending_operation_id") or ""),
+            operation_prepared=bool(
+                state.get("recovery_stage") == "env_deploy"
+                and state.get("recovery_decision") in {"execute", "continue", "retry"}
+                and state.get("pending_operation_id")
+            ),
         )
         return StageExecutionResult(
             stage="env_deploy",

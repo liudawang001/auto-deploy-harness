@@ -376,7 +376,7 @@ class DeploymentGraphNodes:
         previous = read_json(Path(previous_path))
         current = read_json(Path(state["parsed_plan_path"]))
         requested = self.deps.determine_resume_stage(previous, current)
-        allowed = {"analyze", "resource_plan", "env_solve", "env_deploy", "model_prepare", "runner", "verify"}
+        allowed = {"analyze", "resource_plan", "host_preflight", "env_solve", "env_deploy", "model_prepare", "runner", "verify"}
         selected = requested if requested in allowed else "analyze"
         revision = int(state.get("replan_count", 0))
         revision_path = Path(state["run_dir"]) / "reports" / "replans" / ("replan_%s.revision.json" % revision)

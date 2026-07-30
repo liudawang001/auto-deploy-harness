@@ -587,6 +587,30 @@
       "case_id": "unified_metrics_consistency",
       "test_level": "module_integration",
       "requires": []
+    },
+    {
+      "id": "gpu_conda_preflight_decision",
+      "purpose": "验证 GPU 选择、Conda runtime 与目标 prefix 的确定性兼容决策",
+      "expected_signal": "选择满足显存要求的 GPU，并生成绝对 Conda prefix",
+      "case_id": "gpu_conda_preflight_decision",
+      "test_level": "module_integration",
+      "requires": []
+    },
+    {
+      "id": "conda_environment_policy",
+      "purpose": "验证 Conda 工具、前缀、channel 与包来源的细粒度策略",
+      "expected_signal": "安全命令通过，URL/VCS 包来源被拒绝",
+      "case_id": "conda_environment_policy",
+      "test_level": "unit_simulation",
+      "requires": []
+    },
+    {
+      "id": "conda_postcheck_recovery",
+      "purpose": "验证崩溃恢复仅复用所有权和 spec 一致且 postcheck 通过的环境",
+      "expected_signal": "owned matching environment reconciles to reuse",
+      "case_id": "conda_postcheck_recovery",
+      "test_level": "module_integration",
+      "requires": []
     }
   ]
 }

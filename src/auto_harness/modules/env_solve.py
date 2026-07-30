@@ -85,12 +85,43 @@ class EnvSolveModule:
         self.conda_python_default = conda_python_default
         self.torch_cuda_preference = torch_cuda_preference
 
-    def solve(self, repo_dir: Path, analysis: Dict, resource_plan: Dict, stage_hints: Dict = None) -> StageResult:
+    def solve(
+        self,
+        repo_dir: Path,
+        analysis: Dict,
+        resource_plan: Dict,
+        stage_hints: Dict = None,
+        preflight: Dict = None,
+    ) -> StageResult:
         requirements = self._read_requirements(repo_dir)
         frameworks = set(analysis.get("frameworks") or [])
         base_plan = [list(cmd) for cmd in analysis.get("install_plan") or []]
-        local_environment = dict(self.local_environment or self.probe.probe())
-        conda_file = CondaEnvironmentParser().parse_repo(repo_dir, default_python=self.conda_python_default)
+        preflight = preflight or {}
+        decision = dict(preflight.get("compatibility_decision") or {})
+        policy = dict(preflight.get("policy") or {})
+        if decision and (decision.get("status") == "blocked" or not policy.get("allowed", True)):
+            return StageResult(
+                "env_solve",
+                "failed",
+                "preflight blocked environment solve",
+                {
+                    "compatibility_decision": decision,
+                    "policy": policy,
+                },
+                error="; ".join(policy.get("reasons") or decision.get("reasons") or ["preflight blocked"]),
+            )
+        capabilities = preflight.get("capabilities") or {}
+        local_environment = dict(
+            self.local_environment
+            or (
+                self._preflight_local_environment(capabilities, decision)
+                if capabilities else self.probe.probe()
+            )
+        )
+        conda_file = dict(
+            preflight.get("conda_file")
+            or CondaEnvironmentParser().parse_repo(repo_dir, default_python=self.conda_python_default)
+        )
         if (conda_file.get("torch") or {}).get("requires_torch"):
             frameworks.add("torch")
             requirements = requirements + [dep for dep in (conda_file.get("conda_dependencies") or []) if str(dep).startswith(("pytorch", "torch", "torchvision", "torchaudio"))]
@@ -106,30 +137,56 @@ class EnvSolveModule:
                     constraints.append(hint_constraint)
                     reasons.append("plan hint: %s" % hint_constraint)
         environment_strategy = self._environment_strategy(analysis, conda_file)
-        torch_solution = self._torch_solution(requirements, frameworks, resource_plan, local_environment, base_plan)
-        gpu_package_matrix = self._gpu_package_matrix(requirements, frameworks, resource_plan, local_environment, torch_solution)
+        effective_resource_plan = dict(resource_plan)
+        if decision.get("fallback") == "cpu":
+            effective_resource_plan["gpu_required"] = False
+            effective_resource_plan["torch_variant"] = "cpu"
+        elif decision.get("torch_variant") in ("cpu", "cu118", "cu121"):
+            effective_resource_plan["torch_variant"] = decision["torch_variant"]
+        torch_solution = self._torch_solution(
+            requirements, frameworks, effective_resource_plan,
+            local_environment, base_plan,
+        )
+        gpu_package_matrix = self._gpu_package_matrix(
+            requirements, frameworks, effective_resource_plan,
+            local_environment, torch_solution,
+        )
         install_plan = self._apply_constraints(base_plan, constraints)
         install_plan = self._apply_torch_solution(install_plan, torch_solution)
-        risk_reasons = self._risk_reasons(requirements, frameworks, resource_plan, torch_solution, gpu_package_matrix)
+        risk_reasons = self._risk_reasons(
+            requirements, frameworks, effective_resource_plan,
+            torch_solution, gpu_package_matrix,
+        )
         solved_analysis = dict(analysis)
         solved_analysis["install_plan"] = install_plan
-        backend = self._selected_backend(environment_strategy, conda_file)
+        backend = str(decision.get("backend") or self._selected_backend(environment_strategy, conda_file))
+        if decision:
+            environment_strategy.update({
+                "backend": backend,
+                "python": decision.get("python") or environment_strategy.get("python"),
+                "preferred_tool": decision.get("tool") or "",
+                "source": "host_preflight",
+            })
         env_solution = {
             "backend": backend,
             "python": environment_strategy.get("python") or conda_file.get("python") or self._python_choice(resource_plan),
-            "python_range": resource_plan.get("python_range", "unknown"),
+            "python_range": effective_resource_plan.get("python_range", "unknown"),
             "local_environment": local_environment,
             "constraints": constraints,
             "constraint_reasons": reasons,
-            "torch_variant": torch_solution.get("selected", {}).get("variant") or resource_plan.get("torch_variant", ""),
+            "torch_variant": torch_solution.get("selected", {}).get("variant") or effective_resource_plan.get("torch_variant", ""),
             "torch_solution": torch_solution,
             "gpu_package_matrix": gpu_package_matrix,
-            "gpu_required": bool(resource_plan.get("gpu_required")),
+            "gpu_required": bool(effective_resource_plan.get("gpu_required")),
+            "gpu_requested": bool(resource_plan.get("gpu_required")),
+            "selected_gpu_index": int(decision.get("selected_gpu_index", -1)),
             "risk_reasons": risk_reasons,
             "environment_strategy": environment_strategy,
             "conda_file": conda_file,
+            "compatibility_decision": decision,
+            "preflight_policy": policy,
         }
-        if backend in ("conda", "mamba"):
+        if backend in ("conda", "mamba", "micromamba"):
             conda_plan = CondaBackend(
                 backend=backend,
                 envs_dir=self.conda_envs_dir,
@@ -148,7 +205,7 @@ class EnvSolveModule:
         solved_analysis["env_solution"] = {
             **env_solution,
         }
-        status = "passed" if install_plan or backend in ("conda", "mamba") else "uncertain"
+        status = "passed" if install_plan or backend in ("conda", "mamba", "micromamba") else "uncertain"
         summary = "environment solution generated" if status == "passed" else "no install plan to solve"
         return StageResult(
             "env_solve",
@@ -167,9 +224,28 @@ class EnvSolveModule:
                 "torch_solution": torch_solution,
                 "gpu_package_matrix": gpu_package_matrix,
                 "risk_reasons": risk_reasons,
+                "compatibility_decision": decision,
+                "preflight_policy": policy,
                 "analysis": solved_analysis,
             },
         )
+
+    def _preflight_local_environment(self, capabilities: Dict, decision: Dict) -> Dict:
+        host = capabilities.get("host") or {}
+        gpu = capabilities.get("gpu") or {}
+        cuda_version = str(gpu.get("driver_cuda_version") or "")
+        return {
+            "python_version": str(decision.get("python") or self.conda_python_default),
+            "platform": str(host.get("platform") or ""),
+            "machine": str(host.get("machine") or ""),
+            "executables": {},
+            "cuda": {
+                "available": gpu.get("status") == "detected",
+                "version": cuda_version,
+                "source": gpu.get("source") or "host_preflight",
+            },
+            "gpu": gpu,
+        }
 
     def _environment_strategy(self, analysis: Dict, conda_file: Dict) -> Dict:
         strategy = dict(analysis.get("environment_strategy") or {})

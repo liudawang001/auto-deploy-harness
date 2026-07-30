@@ -54,6 +54,18 @@ class HarnessConfig:
     conda_allowed_channels: List[str] = None
     conda_python_default: str = "3.10"
     torch_cuda_preference: str = "auto"
+    preflight_enabled: bool = True
+    preflight_fail_closed: bool = True
+    preflight_require_gpu: bool = False
+    gpu_probe_timeout_seconds: int = 5
+    conda_probe_timeout_seconds: int = 10
+    conda_inventory_timeout_seconds: int = 30
+    conda_inventory_max_envs: int = 50
+    conda_allow_venv_fallback: bool = False
+    conda_allow_cpu_fallback: bool = False
+    conda_reuse_owned_env: bool = True
+    conda_reuse_external_env: bool = False
+    min_gpu_memory_mb: int = 0
     skills_dir: str = "skills"
     memory_dir: str = "memory"
     model_cache_dir: str = "model_cache"
@@ -124,13 +136,22 @@ class HarnessConfig:
         if self.model_cache_cleanup_keep_repo_ids is None:
             self.model_cache_cleanup_keep_repo_ids = []
         if self.agent_auto_resume_stages is None:
-            self.agent_auto_resume_stages = ["env_deploy", "model_prepare", "runner", "verify"]
+            self.agent_auto_resume_stages = [
+                "host_preflight", "env_solve", "env_deploy",
+                "model_prepare", "runner", "verify",
+            ]
         if self.agent_allowed_hosts is None:
             self.agent_allowed_hosts = ["127.0.0.1", "localhost", "::1"]
         if self.conda_allowed_channels is None:
             self.conda_allowed_channels = ["defaults", "conda-forge", "pytorch", "nvidia", "fastai"]
         if self.langgraph_fault_injection_points is None:
             self.langgraph_fault_injection_points = []
+        if self.gpu_probe_timeout_seconds <= 0:
+            raise ValueError("gpu_probe_timeout_seconds must be positive")
+        if self.conda_probe_timeout_seconds <= 0 or self.conda_inventory_timeout_seconds <= 0:
+            raise ValueError("Conda probe timeouts must be positive")
+        if self.conda_inventory_max_envs <= 0:
+            raise ValueError("conda_inventory_max_envs must be positive")
         if self.default_controller not in {"legacy", "langgraph"}:
             raise ValueError("default_controller must be 'legacy' or 'langgraph', got: %s" % self.default_controller)
         if self.langgraph_max_diagnoses < 0:

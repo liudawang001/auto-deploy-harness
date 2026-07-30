@@ -20,6 +20,10 @@ from auto_harness.config import HarnessConfig
 from auto_harness.dashboard import DashboardGenerator, DashboardServer
 from auto_harness.diagnostics import LogClassifier
 from auto_harness.env import CondaBackend, CondaEnvironmentParser
+from auto_harness.env.ownership import EnvironmentOwnership
+from auto_harness.preflight.compatibility import EnvironmentCompatibilityResolver
+from auto_harness.preflight.policy import EnvironmentPreflightPolicy
+from auto_harness.recovery.dependency import DependencyReconciler
 from auto_harness.agent_runtime import AgentContributionAnalyzer, AgentGoal, AgentRuntime
 from auto_harness.evals import AgentComparisonReporter
 from auto_harness.memory import MemoryPromoter, VerifiedMemoryRecorder
@@ -373,6 +377,12 @@ class BenchmarkRunner:
                 return self._case_agent_comparison_report(case)
             if case_id == "langgraph_self_repair_controller_e2e":
                 return self._case_langgraph_self_repair_controller_e2e(case)
+            if case_id == "gpu_conda_preflight_decision":
+                return self._case_gpu_conda_preflight_decision(case)
+            if case_id == "conda_environment_policy":
+                return self._case_conda_environment_policy(case)
+            if case_id == "conda_postcheck_recovery":
+                return self._case_conda_postcheck_recovery(case)
             return self._result(case, "skipped", "unknown benchmark case")
         except PermissionError as exc:
             return self._environment_blocked(case, "permission_denied", str(exc))
@@ -1459,7 +1469,7 @@ class BenchmarkRunner:
             ok = (
                 after.get("verify", 0) > before.get("verify", 0)
                 and after.get("report", 0) > before.get("report", 0)
-                and all(after.get(stage, 0) == before.get(stage, 0) for stage in ("analyze", "resource_plan", "env_solve", "env_deploy", "model_prepare", "runner"))
+                and all(after.get(stage, 0) == before.get(stage, 0) for stage in ("analyze", "resource_plan", "host_preflight", "env_solve", "env_deploy", "model_prepare", "runner"))
             )
         return self._result(case, "passed" if ok else "failed", "repair resume stage jump verified")
 
@@ -1491,7 +1501,7 @@ class BenchmarkRunner:
             report = (run_dir / "reports" / "report.md").read_text(encoding="utf-8")
             ok = (
                 audit.get("effective_start_stage") == "verify"
-                and audit.get("reused_stages") == ["analyze", "resource_plan", "env_solve", "env_deploy", "model_prepare", "runner"]
+                and audit.get("reused_stages") == ["analyze", "resource_plan", "host_preflight", "env_solve", "env_deploy", "model_prepare", "runner"]
                 and audit.get("rerun_stages") == ["verify", "report"]
                 and "## Execution Audit" in report
                 and "- Rerun stages: `verify`, `report`" in report
@@ -2512,6 +2522,98 @@ class BenchmarkRunner:
             if event.get("type") == "stage_update":
                 counts[event["stage"]] = counts.get(event["stage"], 0) + 1
         return counts
+
+    def _case_gpu_conda_preflight_decision(self, case: Dict) -> Dict:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            config = HarnessConfig(
+                env_backend="conda",
+                conda_envs_dir=str(repo / ".conda" / "envs"),
+            )
+            decision = EnvironmentCompatibilityResolver().resolve(
+                repo,
+                {},
+                {"gpu_required": True, "min_gpu_memory_mb": 8000},
+                {
+                    "found": True,
+                    "name": "benchmark",
+                    "python": "3.10",
+                    "channels": ["conda-forge"],
+                    "conda_dependencies": ["python=3.10"],
+                    "pip_dependencies": [],
+                },
+                {
+                    "gpu": {
+                        "status": "detected",
+                        "devices": [
+                            {"index": 0, "memory_free_mb": 4000, "memory_total_mb": 8000},
+                            {"index": 1, "memory_free_mb": 12000, "memory_total_mb": 16000},
+                        ],
+                    },
+                    "environment_runtimes": {
+                        "conda": {"available": True, "path": "/opt/conda/bin/conda"},
+                    },
+                },
+                {"environments": []},
+                config,
+            )
+            ok = (
+                decision.get("status") == "allowed"
+                and decision.get("selected_gpu_index") == 1
+                and decision.get("backend") == "conda"
+                and Path(decision.get("target_prefix", "")).is_absolute()
+            )
+        return self._result(case, "passed" if ok else "failed", "preflight compatibility decision verified")
+
+    def _case_conda_environment_policy(self, case: Dict) -> Dict:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            prefix = (repo / ".conda" / "envs" / "benchmark").resolve()
+            config = HarnessConfig(conda_envs_dir=str(prefix.parent))
+            decision = {"tool": "/opt/conda/bin/conda", "target_prefix": str(prefix)}
+            policy = EnvironmentPreflightPolicy()
+            allowed = policy.validate_mutation_command(
+                [decision["tool"], "create", "-y", "-p", str(prefix), "-c", "conda-forge", "python=3.10"],
+                decision, repo, config,
+            )
+            denied = policy.validate_mutation_command(
+                [decision["tool"], "install", "-y", "-p", str(prefix), "git+https://invalid/pkg"],
+                decision, repo, config,
+            )
+            ok = allowed.get("allowed") and not denied.get("allowed")
+        return self._result(case, "passed" if ok else "failed", "typed Conda policy verified")
+
+    def _case_conda_postcheck_recovery(self, case: Dict) -> Dict:
+        with tempfile.TemporaryDirectory() as tmp:
+            prefix = Path(tmp) / "env"
+            prefix.mkdir()
+            ownership = EnvironmentOwnership()
+            ownership.write(prefix, "project", "sha256:repo", "operation", "sha256:spec", "3.10")
+
+            class PassingPostcheck:
+                def check(self, *args, **kwargs):
+                    return {"status": "passed"}
+
+            reconciler = DependencyReconciler(
+                python_checker=lambda path, version: (True, "3.10.14"),
+                package_checker=lambda path, specs: (True, {"numpy": "1.26.4"}),
+                ownership=ownership,
+                postchecker=PassingPostcheck(),
+            )
+            result = reconciler.reconcile({
+                "resource_identity": {
+                    "environment_path": str(prefix),
+                    "backend": "conda",
+                    "tool": "/opt/conda/bin/conda",
+                    "python_version": "3.10",
+                    "project_id": "project",
+                    "spec_hash": "sha256:spec",
+                    "gpu_required": False,
+                },
+                "normalized_input": {"package_specs": ["numpy>=1.26"]},
+            })
+            ok = result.get("decision") == "reuse"
+        return self._result(case, "passed" if ok else "failed", "owned environment recovery reuse verified")
 
     def _result(self, case: Dict, status: str, reason: str) -> Dict:
         return {

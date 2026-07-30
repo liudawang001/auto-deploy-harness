@@ -373,10 +373,15 @@ class GraphRecoveryAdapter:
         Never includes: tokens, PIDs, container IDs, timestamps.
         """
         if stage == "env_deploy":
-            compiled = state.get("compiled_analysis", {})
+            solution = self._environment_solution(state)
+            conda = solution.get("conda") or {}
+            spec = conda.get("spec") or {}
             return {
-                "backend": state.get("runtime_policy", {}).get("env_backend", "auto"),
-                "install_plan": [str(cmd)[:200] for cmd in compiled.get("install_plan", [])[:20]],
+                "backend": solution.get("backend") or state.get("runtime_policy", {}).get("env_backend", "auto"),
+                "action": conda.get("action") or (solution.get("compatibility_decision") or {}).get("action", ""),
+                "package_specs": list(spec.get("conda_dependencies") or []) + list(spec.get("pip_dependencies") or []),
+                "python_version": str(spec.get("python") or solution.get("python") or ""),
+                "spec_hash": str(spec.get("spec_hash") or (solution.get("compatibility_decision") or {}).get("spec_hash", "")),
             }
         elif stage == "model_prepare":
             compiled = state.get("compiled_analysis", {})
@@ -407,8 +412,23 @@ class GraphRecoveryAdapter:
         Stable identifiers that won't change across replans.
         """
         if stage == "env_deploy":
+            solution = self._environment_solution(state)
+            conda = solution.get("conda") or {}
+            decision = solution.get("compatibility_decision") or {}
             return {
-                "environment_prefix": str(Path(state["run_dir"]) / "workspace"),
+                "environment_path": str(
+                    decision.get("target_prefix")
+                    or conda.get("environment_prefix")
+                    or solution.get("environment_prefix")
+                    or (Path(state["run_dir"]) / "workspace")
+                ),
+                "backend": solution.get("backend", "venv"),
+                "tool": decision.get("tool") or conda.get("tool", ""),
+                "python_version": str(decision.get("python") or solution.get("python") or ""),
+                "project_id": decision.get("project_id", ""),
+                "repo_fingerprint": decision.get("repo_fingerprint", ""),
+                "spec_hash": decision.get("spec_hash", ""),
+                "gpu_required": bool(solution.get("gpu_required")),
                 "repo_path": state.get("repo_dir", ""),
             }
         elif stage == "model_prepare":
@@ -424,6 +444,16 @@ class GraphRecoveryAdapter:
                 "expected_port": str(state.get("compiled_analysis", {}).get("expected_port", "7860")),
             }
         return {}
+
+    @staticmethod
+    def _environment_solution(state: dict) -> dict:
+        result = (state.get("stage_results") or {}).get("env_solve") or {}
+        data = result.get("data") or {}
+        analysis = data.get("analysis") or {}
+        solution = analysis.get("env_solution") or {}
+        if solution:
+            return solution
+        return (state.get("compiled_analysis") or {}).get("env_solution") or {}
 
     def _get_reconciler(self, resource_type: str):
         """Get reconciler for a resource type."""

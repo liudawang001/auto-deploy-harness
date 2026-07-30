@@ -33,6 +33,24 @@ class ReportGenerator:
                 "- Memory hits: %s" % (", ".join("`%s`" % item for item in memory_ids if item) or "`none`"),
                 "",
             ])
+        preflight = results.get("host_preflight", {}).get("data", {})
+        if isinstance(preflight, dict) and preflight:
+            capability = preflight.get("capabilities") or {}
+            gpu = capability.get("gpu") or {}
+            decision = preflight.get("compatibility_decision") or {}
+            policy = preflight.get("policy") or {}
+            lines.extend([
+                "## Host Preflight",
+                "",
+                "- GPU probe status: `%s`" % gpu.get("status", ""),
+                "- GPU devices: `%s`" % len(gpu.get("devices") or []),
+                "- Environment backend: `%s`" % decision.get("backend", ""),
+                "- Environment action: `%s`" % decision.get("action", ""),
+                "- Target prefix: `%s`" % decision.get("target_prefix", ""),
+                "- Compatibility status: `%s`" % decision.get("status", ""),
+                "- Mutation authorized: `%s`" % str(bool(policy.get("mutation_authorized"))).lower(),
+                "",
+            ])
         verify = results.get("verify", {}).get("data", {})
         run_selection = self._run_candidate_selection(results)
         if run_selection:

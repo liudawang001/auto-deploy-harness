@@ -28,7 +28,7 @@ auto-deploy-harness 是一个基于 LangGraph 编排、由 LLM 负责不确定�
 - Claude Code executor wrapper。
 - Policy-constrained LLM Agent：`agent_mode=planner` 时 LLM 可通过 schema 化 action 影响 analyze plan；`agent_mode=gated_actor` 且显式开关打开时，LLM repair action 可在 policy gate 后执行安全动作；LLM 永远不能直接执行 shell、修改源码或判定成功。
 - Provider protocol：当前 Mock 与讯飞 Provider 使用 `json_action`（模型输出 Schema 化 JSON，再由 Python 校验和执行），不是 provider-native function/tool calling；运行证据会显式记录 `provider_protocol`，避免把 JSON Action 包装成原生 Tool Calling。
-- Self-healing 主流程：`deploy/resume --agent-self-heal` 会打开 bounded repair/resume loop，普通 `TaskRunner.run_existing()` 能在 policy-approved repair 后自动从 `env_deploy` / `model_prepare` / `runner` / `verify` 安全阶段恢复，最终仍由 verify trace 判定成功。
+- Self-healing 主流程：`deploy/resume --agent-self-heal` 会打开 bounded repair/resume loop，普通 `TaskRunner.run_existing()` 能在 policy-approved repair 后自动从 `host_preflight` / `env_solve` / `env_deploy` / `model_prepare` / `runner` / `verify` 安全阶段恢复，最终仍由 verify trace 判定成功。
 - Agent runtime 证据：每个 run 会生成 `agent_steps.jsonl`、`agent_state.json`、`agent_plan.json`、`agent_plan_revisions.jsonl` 和 `reports/agent_contribution.json`，记录 observe / plan / policy gate / tool call / observe / critique 的受控探索过程。
 - Tool registry：LLM 只能请求命名 tool，Python runtime 根据 `risk_level`、`side_effects`、`requires_policy` 和 `allowed_modes` 进行执行控制；side-effect tool 默认需要 policy gate。
 - HTTP trace evidence：`verify` 支持 GET 和 POST JSON；响应必须证明当前 trace 被处理，HTTP 200 本身不算成功；文件产物证据必须可读、非空并记录 size/sha256。
@@ -38,7 +38,10 @@ auto-deploy-harness 是一个基于 LangGraph 编排、由 LLM 负责不确定�
 - 结构化问题记忆：位于 `memory/deployment_issues.jsonl`，用于检索历史相似失败。
 - Memory evolution：`memory-evolve` 将 verified memory 生成 Skill candidate，并强制经过 `proposed -> approved -> regression_passed -> shadow_passed -> active -> rolled_back/rejected` 生命周期；每次迁移写入哈希链审计。旧 `memory-promote --apply` 已禁用，避免绕过主状态机修改 Skill。
 - `resource_plan` 阶段：识别模型资产、GPU/CUDA 信号、磁盘风险和外部 token 需求。
-- `env_solve` 阶段：在安装前生成更稳定的依赖方案，识别老 Gradio 与 `numpy<2` / `pydantic<2` 兼容风险、headless OpenCV 替换建议，解析 `environment.yml` 并选择 `venv` / `conda` / `mamba` backend；根据本机 CUDA/Python 生成 PyTorch pip wheel 或 conda `pytorch-cuda` 方案、fallback 和 `xformers` / `flash-attn` / `bitsandbytes` / `triton` / `deepspeed` / `accelerate` GPU 包兼容矩阵。
+- `host_preflight` 阶段：在模型下载和环境变更前，确定性探测 GPU 型号/显存、NVIDIA 驱动支持的 CUDA 上限、Conda/Mamba/Micromamba 可用性和已有环境；生成 `continue`、`fallback_cpu`、`block` 或 `request_approval` 裁决。探测失败不会被静默解释为“没有 GPU”。
+- `env_solve` 阶段：消费同一份 preflight 能力与裁决，在安装前生成稳定的依赖方案；识别老 Gradio 与 `numpy<2` / `pydantic<2` 兼容风险、headless OpenCV 替换建议，解析 `environment.yml` 并选择 `venv` / `conda` / `mamba` backend；根据驱动兼容性与 Python 版本选择 PyTorch `cu121` / `cu118` / `cpu` 方案，并在 CPU fallback 后清除 GPU 硬约束。
+- `env_deploy` 阶段：只有显式执行和 preflight mutation authorization 同时满足时，才允许在仓库受控目录创建或修改环境。Conda channel、目标 prefix、包规格、Pip requirements 和 wheel index 均由 Policy Gate 校验；完成后再校验 Python、依赖和 GPU runtime，并写入 ownership marker。
+- 环境恢复：Legacy、Plan-first 和 LangGraph 共用环境 operation identity。Checkpoint 只恢复图状态；Operation Journal、DependencyReconciler、环境 ownership marker 和 Postcheck 共同决定复用、重试、阻断或人工介入，避免崩溃恢复时重复创建环境。
 - Verified long-term memory：自修复后只有最终 verify pass、repair policy 通过、repair action 有效且存在 trace id 时，才会写入 `memory_type=verified_success` 的长期记忆；report 会展示 memory id、repair action hash 和 verification trace id。
 - Docker backend：`env_deploy` 和 `runner` 支持把安装/启动命令包装为 `docker run` 计划，包含 GPU 参数、模型缓存挂载、容器日志命令和清理命令元数据；默认仍是本地 backend，真实执行仍受 `--execute` 和命令白名单保护。
 - Git LFS / submodule 检测：识别 `.gitattributes`、LFS pointer 文件和 `.gitmodules`，估算 pointer size，缺工具时给出诊断，并生成 `git lfs` / `git submodule` 准备命令。
@@ -95,6 +98,18 @@ PYTHONPATH=src python3 -m auto_harness.cli deploy \
   --agent-self-heal \
   --env-backend auto
 ```
+
+只做 GPU/Conda 部署前预检、不修改主机环境：
+
+```bash
+PYTHONPATH=src python3 -m auto_harness.cli preflight \
+  --repo ./demo \
+  --env-backend auto \
+  --require-gpu \
+  --min-gpu-memory-mb 8192
+```
+
+如果项目明确支持 CPU 降级，可增加 `--allow-cpu-fallback`。默认 `preflight_fail_closed=true`、`conda_allow_cpu_fallback=false`、`conda_reuse_external_env=false`；环境只允许创建在仓库的 `.conda/envs/` 下，且不会执行 `conda init`、修改全局 Conda 配置或自动更新 Conda。
 
 生成 baseline vs agent 对照报告结构：
 
@@ -709,8 +724,11 @@ PYTHONPATH=src python3 -m auto_harness.cli agent-live-smoke --provider xunfei --
 - 历史 artifact 不能作为本次 verify 的新鲜证据。
 - 本次 trace 后产生的新文件产物必须可读、非空并记录 sha256 后，才能作为 artifact 强证据。
 - Git LFS pointer 和 `.gitattributes` 会被识别；缺 `git-lfs` 时 resource plan 进入诊断态，并输出 LFS 准备命令；执行阶段仍受命令白名单控制。
+- `host_preflight` 会统一探测 GPU、驱动 CUDA 上限、Conda runtime 和环境清单，并在能力不满足时阻断或按显式配置降级。
 - 老 Gradio / 未 pin 依赖项目会在 `env_solve` 中生成 `numpy<2`、`pydantic<2`、`opencv-python-headless` 等兼容约束，真正安装仍由 `env_deploy` 受控执行。
-- PyTorch 项目会在 `env_solve` 中根据本机 CUDA 版本选择 `cu121` / `cu118` / `cpu` wheel index，并保留 CPU fallback 方案。
+- PyTorch 项目会在 `env_solve` 中根据 NVIDIA 驱动兼容性选择 `cu121` / `cu118` / `cpu` wheel index，并保留受控 CPU fallback 方案。
+- Conda/Pip 安装命令会校验目标 prefix、channel、包规格、requirements 文件和 wheel index，非法路径、URL 或 channel-qualified package 会被拒绝。
+- 环境操作会验证 Legacy/LangGraph operation identity，并通过 Journal、Reconciler、ownership marker 与严格 Postcheck 防止重复副作用和假成功。
 - `xformers`、`flash-attn`、`bitsandbytes`、`triton` 会按 Python/CUDA/Torch/平台生成兼容矩阵，阻塞不兼容组合并给出建议动作。
 - Docker backend 会记录 GPU 参数、模型缓存挂载、容器日志命令和清理命令元数据。
 - Memory promotion 必须先审批，并绑定 apply 后建议运行的 benchmark case。

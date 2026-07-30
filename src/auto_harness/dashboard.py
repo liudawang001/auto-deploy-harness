@@ -14,6 +14,7 @@ class DashboardGenerator:
     STAGE_ORDER = [
         "analyze",
         "resource_plan",
+        "host_preflight",
         "env_solve",
         "env_deploy",
         "model_prepare",

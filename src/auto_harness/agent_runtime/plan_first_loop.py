@@ -196,13 +196,13 @@ class PlanFirstDeploymentLoop:
 
     # Pipeline stages to execute (in order)
     EXECUTION_STAGES = (
-        "analyze", "resource_plan", "env_solve", "env_deploy",
+        "analyze", "resource_plan", "host_preflight", "env_solve", "env_deploy",
         "model_prepare", "runner", "verify",
     )
 
     # Safe stages to resume from after replan
     SAFE_RESUME_STAGES = frozenset({
-        "env_deploy", "model_prepare", "runner", "verify",
+        "host_preflight", "env_solve", "env_deploy", "model_prepare", "runner", "verify",
     })
 
     def __init__(

@@ -49,7 +49,7 @@ def route_resume_stage(state):
     """
     requested = state.get("resume_from_stage", "analyze")
     allowed = {
-        "analyze", "resource_plan", "env_solve", "env_deploy",
+        "analyze", "resource_plan", "host_preflight", "env_solve", "env_deploy",
         "model_prepare", "runner", "verify",
     }
     return requested if requested in allowed else "analyze"
@@ -136,7 +136,7 @@ def route_repair_resume_stage(state):
     """
     requested = state.get("resume_from_stage", "verify")
     allowed = {
-        "analyze", "resource_plan", "env_solve", "env_deploy",
+        "analyze", "resource_plan", "host_preflight", "env_solve", "env_deploy",
         "model_prepare", "runner", "verify",
     }
     return requested if requested in allowed else "analyze"

@@ -16,7 +16,7 @@ from typing import Dict, List, Optional, Tuple
 
 # Pipeline stages that skill stages must belong to
 VALID_STAGES = frozenset({
-    "analyze", "resource_plan", "env_solve", "env_deploy",
+    "analyze", "resource_plan", "host_preflight", "env_solve", "env_deploy",
     "model_prepare", "runner", "verify", "report",
     "plan_first", "replan", "repair",
 })

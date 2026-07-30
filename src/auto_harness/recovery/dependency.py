@@ -16,6 +16,8 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
 from auto_harness.recovery.download import reconcile_result
+from auto_harness.env.ownership import EnvironmentOwnership
+from auto_harness.env.postcheck import EnvironmentPostchecker
 
 
 def sha256_text(text: str) -> str:
@@ -71,15 +73,15 @@ def check_package_versions(env_path, package_specs):
     except (OSError, subprocess.SubprocessError, ValueError):
         return False, {}
 
-    # Check each spec (simple name-only check; version constraints
-    # would need a proper package version resolver)
-    all_satisfied = True
-    for spec in package_specs:
-        # Extract package name (before any version specifier)
-        name = spec.split(">=")[0].split("==")[0].split("<")[0].split(">")[0].split("[")[0].strip().lower()
-        if name not in installed:
-            all_satisfied = False
-            break
+    checker = EnvironmentPostchecker()
+    normalized = {
+        checker._canonical_name(name): version
+        for name, version in installed.items()
+    }
+    all_satisfied = all(
+        checker._package_satisfied(spec, normalized)
+        for spec in package_specs
+    )
     return all_satisfied, installed
 
 
@@ -95,9 +97,13 @@ class DependencyReconciler:
         self,
         python_checker=None,
         package_checker=None,
+        ownership=None,
+        postchecker=None,
     ) -> None:
         self.python_checker = python_checker or check_python_version
         self.package_checker = package_checker or check_package_versions
+        self.ownership = ownership or EnvironmentOwnership()
+        self.postchecker = postchecker
 
     def reconcile(self, operation):
         """Reconcile a dependency installation operation.
@@ -113,10 +119,23 @@ class DependencyReconciler:
         env_path = identity.get("environment_path", "")
         expected_python = identity.get("python_version", "")
         package_specs = operation.get("normalized_input", {}).get("package_specs", [])
+        backend = identity.get("backend", "")
+        project_id = identity.get("project_id", "")
+        spec_hash = identity.get("spec_hash", "")
 
         # 1. Environment doesn't exist
         if not env_path or not Path(env_path).exists():
             return reconcile_result("retry", "environment path does not exist")
+
+        if backend in ("conda", "mamba", "micromamba") and (project_id or spec_hash):
+            marker = self.ownership.read(Path(env_path))
+            if not self.ownership.is_valid(marker):
+                return reconcile_result("conflict", "Conda prefix is not owned by auto-harness")
+            if marker.get("project_id") != project_id or marker.get("spec_hash") != spec_hash:
+                return reconcile_result(
+                    "conflict",
+                    "Conda ownership marker does not match operation identity",
+                )
 
         # 2. Check Python version
         if expected_python:
@@ -132,12 +151,26 @@ class DependencyReconciler:
         if package_specs:
             all_satisfied, installed = self.package_checker(env_path, package_specs)
             if not all_satisfied:
-                missing = [s for s in package_specs
-                           if s.split(">=")[0].split("==")[0].split("<")[0].split(">")[0].split("[")[0].strip().lower()
-                           not in installed]
                 return reconcile_result(
                     "retry", "packages not satisfied",
-                    missing_packages=missing,
+                    package_specs=package_specs,
+                )
+
+        if backend in ("conda", "mamba", "micromamba") and identity.get("tool"):
+            checker = self.postchecker or EnvironmentPostchecker()
+            postcheck = checker.check(
+                identity["tool"],
+                Path(env_path),
+                expected_python,
+                package_specs,
+                bool(identity.get("gpu_required")),
+                spec_hash,
+            )
+            if postcheck.get("status") != "passed":
+                return reconcile_result(
+                    "retry",
+                    "environment postcheck failed",
+                    postcheck=postcheck,
                 )
 
         # 4. All match

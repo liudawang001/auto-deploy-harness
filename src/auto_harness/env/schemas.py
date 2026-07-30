@@ -13,3 +13,8 @@ class EnvironmentSpec:
     pip_dependencies: List[str] = field(default_factory=list)
     torch: Dict = field(default_factory=dict)
     source_files: List[str] = field(default_factory=list)
+    tool_path: str = ""
+    action: str = "create"
+    spec_hash: str = ""
+    project_id: str = ""
+    repo_fingerprint: str = ""
