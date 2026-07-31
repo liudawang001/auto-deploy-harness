@@ -15,7 +15,9 @@ class XunfeiSparkProvider:
     keys into repository files, prompts, reports, or progress logs.
     """
 
-    def __init__(self, urlopen=None) -> None:
+    provider_name = "xunfei"
+
+    def __init__(self, urlopen=None, config=None) -> None:
         self.app_id = os.environ.get("XUNFEI_APP_ID", "")
         self.api_key = os.environ.get("XUNFEI_API_KEY", "")
         self.api_secret = os.environ.get("XUNFEI_API_SECRET", "")
@@ -25,10 +27,24 @@ class XunfeiSparkProvider:
         self.timeout_seconds = int(os.environ.get("XUNFEI_TIMEOUT_SECONDS", "60"))
         self.max_tokens = int(os.environ.get("XUNFEI_MAX_TOKENS", "2048"))
         self.context_window_tokens = int(
-            os.environ.get("XUNFEI_CONTEXT_WINDOW_TOKENS", "0")
+            os.environ.get("XUNFEI_CONTEXT_WINDOW_TOKENS")
+            or getattr(config, "agent_context_window_tokens", None)
+            or 0
         )
         self.anthropic_version = os.environ.get("XUNFEI_ANTHROPIC_VERSION", "2023-06-01")
         self.urlopen = urlopen or urllib.request.urlopen
+
+    def missing_configuration(self) -> List[str]:
+        missing = []
+        if not (self.api_url or self.api_base):
+            missing.append("XUNFEI_API_URL or XUNFEI_API_BASE")
+        if not self.api_key:
+            missing.append("XUNFEI_API_KEY")
+        if not self.model:
+            missing.append("XUNFEI_MODEL")
+        if not self.context_window_tokens:
+            missing.append("XUNFEI_CONTEXT_WINDOW_TOKENS")
+        return missing
 
     def complete(
         self,

@@ -15,6 +15,7 @@
   "agent_timeout_seconds": 900,
   "agent_mode": "off",
   "agent_provider": "mock",
+  "provider_configs": {},
   "agent_max_input_chars": 20000,
   "agent_max_file_chars": 6000,
   "agent_context_mode": "enforce",

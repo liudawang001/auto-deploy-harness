@@ -20,6 +20,8 @@ class MemoryEvolutionMockProvider:
     reusable_rule, skill_patch, regression_proposal, and risk fields.
     """
 
+    provider_name = "mock"
+
     def complete(self, messages: List[Message], temperature: float = 0.2) -> LLMResult:
         content = {
             "status": "ok",

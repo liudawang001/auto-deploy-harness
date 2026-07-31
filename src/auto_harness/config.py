@@ -34,6 +34,7 @@ class HarnessConfig:
     agent_timeout_seconds: int = 900
     agent_mode: str = "off"
     agent_provider: str = "mock"
+    provider_configs: Dict[str, Dict[str, Any]] = None
     agent_max_input_chars: int = 20000
     agent_max_file_chars: int = 6000
     agent_context_mode: str = "enforce"
@@ -158,6 +159,8 @@ class HarnessConfig:
             self.conda_allowed_channels = ["defaults", "conda-forge", "pytorch", "nvidia", "fastai"]
         if self.langgraph_fault_injection_points is None:
             self.langgraph_fault_injection_points = []
+        if self.provider_configs is None:
+            self.provider_configs = {}
         if self.gpu_probe_timeout_seconds <= 0:
             raise ValueError("gpu_probe_timeout_seconds must be positive")
         if self.conda_probe_timeout_seconds <= 0 or self.conda_inventory_timeout_seconds <= 0:
@@ -203,6 +206,44 @@ class HarnessConfig:
             raise ValueError("agent_context_skill_budget_tokens must be positive")
         if self.agent_context_memory_budget_tokens <= 0:
             raise ValueError("agent_context_memory_budget_tokens must be positive")
+        if not isinstance(self.provider_configs, dict):
+            raise ValueError("provider_configs must be an object")
+        forbidden_provider_keys = {
+            "api_key",
+            "token",
+            "secret",
+            "password",
+            "authorization",
+        }
+        for provider_name, settings in self.provider_configs.items():
+            if not str(provider_name).strip():
+                raise ValueError("provider_configs contains an empty provider name")
+            if not isinstance(settings, dict):
+                raise ValueError(
+                    "provider_configs.%s must be an object" % provider_name
+                )
+            forbidden = forbidden_provider_keys.intersection(
+                str(key).lower() for key in settings
+            )
+            if forbidden:
+                raise ValueError(
+                    "provider_configs.%s must not contain secret values: %s"
+                    % (provider_name, ", ".join(sorted(forbidden)))
+                )
+            for key in (
+                "timeout_seconds",
+                "max_tokens",
+                "context_window_tokens",
+            ):
+                if key in settings and (
+                    isinstance(settings[key], bool)
+                    or not isinstance(settings[key], (int, float))
+                    or settings[key] <= 0
+                ):
+                    raise ValueError(
+                        "provider_configs.%s.%s must be positive"
+                        % (provider_name, key)
+                    )
         valid_fault_windows = {
             "before_side_effect",
             "after_side_effect_before_commit",

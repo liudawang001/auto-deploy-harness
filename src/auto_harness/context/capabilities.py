@@ -5,7 +5,10 @@ from auto_harness.context.models import ProviderCapabilities
 
 
 def resolve_provider_capabilities(provider: Any, config: Any = None) -> ProviderCapabilities:
-    provider_name = provider.__class__.__name__ if provider is not None else ""
+    provider_class = provider.__class__.__name__ if provider is not None else ""
+    provider_name = str(
+        getattr(provider, "provider_name", "") or provider_class
+    )
     model = str(
         getattr(provider, "model", "")
         or getattr(provider, "model_name", "")
@@ -19,13 +22,13 @@ def resolve_provider_capabilities(provider: Any, config: Any = None) -> Provider
     )
 
     source = "provider"
-    if provider_window is None and provider_name in {
+    if provider_window is None and provider_class in {
         "MockLLMProvider",
         "MemoryEvolutionMockProvider",
     }:
         provider_window = 65536
         source = "registry"
-    if provider_window is None and provider_name == "XunfeiSparkProvider":
+    if provider_window is None and provider_class == "XunfeiSparkProvider":
         env_window = _positive_int(os.environ.get("XUNFEI_CONTEXT_WINDOW_TOKENS"))
         if env_window:
             provider_window = env_window

@@ -29,7 +29,7 @@ from auto_harness.modules import (
     RunnerModule,
     VerifyModule,
 )
-from auto_harness.providers import MockLLMProvider, XunfeiSparkProvider
+from auto_harness.providers import DEFAULT_PROVIDER_REGISTRY
 from auto_harness.skills import SkillRegistry
 from auto_harness.repair import RepairApplier, RepairLoopController, RepairOverlay, RepairPlanner, RepairPolicy
 from auto_harness.state import StateStore
@@ -41,8 +41,11 @@ class TaskRunner:
     PIPELINE_STAGES = ("analyze", "resource_plan", "host_preflight", "env_solve", "env_deploy", "model_prepare", "runner", "verify", "report")
     RERUN_STAGES = ("analyze", "resource_plan", "host_preflight", "env_solve", "env_deploy", "model_prepare", "runner", "verify")
 
-    def __init__(self, config: HarnessConfig) -> None:
+    def __init__(self, config: HarnessConfig, provider_registry=None) -> None:
         self.config = config
+        self.provider_registry = (
+            provider_registry or DEFAULT_PROVIDER_REGISTRY
+        )
         self.store = StateStore(config.runs_path)
         self.skills = SkillRegistry(config.skills_path, max_chars=config.max_skill_chars)
         self.memory = MemoryStore(config.memory_path)
@@ -370,9 +373,12 @@ class TaskRunner:
 
     def _create_plan_first_provider(self):
         """Create the LLM provider for plan-first mode."""
-        if self.config.agent_plan_first_provider == "xunfei":
-            return self._configure_provider_context(XunfeiSparkProvider())
-        return self._configure_provider_context(MockLLMProvider())
+        provider = self.provider_registry.create(
+            self.config.agent_plan_first_provider,
+            config=self.config,
+            purpose="plan_first",
+        )
+        return self._configure_provider_context(provider)
 
     def _run_agent_runtime_loop(self, task_id: str, dry_run: bool = True) -> None:
         """Run the unified DeploymentAgentLoop as primary controller."""
@@ -931,9 +937,12 @@ class TaskRunner:
         }
 
     def _agent_provider(self):
-        if self.config.agent_provider == "xunfei":
-            return self._configure_provider_context(XunfeiSparkProvider())
-        return self._configure_provider_context(MockLLMProvider())
+        provider = self.provider_registry.create(
+            self.config.agent_provider,
+            config=self.config,
+            purpose="agent",
+        )
+        return self._configure_provider_context(provider)
 
     def _configure_provider_context(self, provider):
         configured = getattr(self.config, "agent_context_window_tokens", None)

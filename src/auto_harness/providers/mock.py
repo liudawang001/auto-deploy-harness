@@ -16,6 +16,7 @@ class MockLLMProvider:
     - replan: returns revised DeploymentPlan JSON
     """
 
+    provider_name = "mock"
     context_window_tokens = 65536
     max_tokens = 4096
 

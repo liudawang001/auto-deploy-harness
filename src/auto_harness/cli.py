@@ -16,7 +16,11 @@ from auto_harness.live_smoke import LiveAgentSmokeRunner
 from auto_harness.orchestrator import TaskRunner
 from auto_harness.models.base import to_plain, write_json
 from auto_harness.modules import HostPreflightModule, ProjectAnalyzer, ResourcePlanner
-from auto_harness.providers import Message, MockLLMProvider, XunfeiSparkProvider
+from auto_harness.providers import (
+    DEFAULT_PROVIDER_REGISTRY,
+    InteractiveProviderConfigurator,
+    Message,
+)
 from auto_harness.queue import DeploymentQueue
 from auto_harness.readiness import ReadinessAuditor
 from auto_harness.runtime import DockerSmokeChecker
@@ -43,6 +47,8 @@ def build_parser() -> argparse.ArgumentParser:
     deploy.add_argument("--execution-backend", choices=["local", "docker"], default=None)
     deploy.add_argument("--agent-self-heal", action="store_true", default=False)
     deploy.add_argument("--agent-mode", choices=["off", "audit", "planner", "gated_actor"], default=None)
+    deploy.add_argument("--agent-provider", default=None)
+    deploy.add_argument("--interactive-provider", action="store_true", default=False, help="securely prompt for a temporary custom LLM endpoint and API key")
     deploy.add_argument("--agent-enable-verify", action="store_true", default=False)
     deploy.add_argument("--agent-verify-max-steps", type=int, default=None)
     deploy.add_argument("--env-backend", choices=["auto", "venv", "conda", "mamba", "micromamba"], default=None)
@@ -64,7 +70,7 @@ def build_parser() -> argparse.ArgumentParser:
     deploy.add_argument("--agent-runtime-loop-max-iterations", type=int, default=None)
     deploy.add_argument("--agent-runtime-loop-position", choices=["primary", "post_pipeline"], default=None)
     deploy.add_argument("--agent-plan-first", action="store_true", default=False)
-    deploy.add_argument("--agent-plan-first-provider", choices=["mock", "xunfei"], default=None)
+    deploy.add_argument("--agent-plan-first-provider", default=None)
     deploy.add_argument("--agent-plan-first-mode", choices=["planner", "gated_actor"], default=None)
     deploy.add_argument("--agent-plan-first-max-replans", type=int, default=None)
     deploy.add_argument("--controller", choices=["legacy", "langgraph"], default=None)
@@ -78,6 +84,8 @@ def build_parser() -> argparse.ArgumentParser:
     resume.add_argument("--download-retry-backoff", type=float, default=None)
     resume.add_argument("--execution-backend", choices=["local", "docker"], default=None)
     resume.add_argument("--agent-self-heal", action="store_true", default=False)
+    resume.add_argument("--agent-provider", default=None)
+    resume.add_argument("--interactive-provider", action="store_true", default=False, help="securely prompt for a temporary custom LLM endpoint and API key")
     resume.add_argument("--env-backend", choices=["auto", "venv", "conda", "mamba", "micromamba"], default=None)
     resume.add_argument("--require-gpu", action="store_true", default=False)
     resume.add_argument("--min-gpu-memory-mb", type=int, default=None)
@@ -136,7 +144,8 @@ def build_parser() -> argparse.ArgumentParser:
     memory_evolve.add_argument("--stage", default=None)
     memory_evolve.add_argument("--category", default=None)
     memory_evolve.add_argument("--output-dir", default="")
-    memory_evolve.add_argument("--provider", choices=["mock", "xunfei"], default=None)
+    memory_evolve.add_argument("--provider", default=None)
+    memory_evolve.add_argument("--interactive-provider", action="store_true", default=False, help="securely prompt for a temporary custom LLM endpoint and API key")
     memory_evolve.add_argument("--run-dir", default="")
     memory_evolve.add_argument("--no-require-shadow", action="store_true", default=False)
     memory_evolve.add_argument("--reason", default="")
@@ -161,7 +170,8 @@ def build_parser() -> argparse.ArgumentParser:
     evidence_package.add_argument("--run-dir", default="", help="explicit run directory for --task-id")
 
     llm = sub.add_parser("llm-test", help="test LLM provider")
-    llm.add_argument("--provider", choices=["mock", "xunfei"], default="mock")
+    llm.add_argument("--provider", default="mock")
+    llm.add_argument("--interactive-provider", action="store_true", default=False, help="securely prompt for a temporary custom LLM endpoint and API key")
     llm.add_argument("--prompt", default="Return a JSON object with status ok.")
 
     benchmark = sub.add_parser("benchmark", help="run local benchmark fixtures")
@@ -218,7 +228,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     agent_live_smoke = sub.add_parser("agent-live-smoke", help="run optional live LLM agent smoke and write redacted manifest")
     agent_live_smoke.add_argument("--repo", default="tests/fixtures/live/llm_repair_missing_dependency")
-    agent_live_smoke.add_argument("--provider", choices=["mock", "xunfei"], default="xunfei")
+    agent_live_smoke.add_argument("--provider", default="xunfei")
+    agent_live_smoke.add_argument("--interactive-provider", action="store_true", default=False, help="securely prompt for a temporary custom LLM endpoint and API key")
     agent_live_smoke.add_argument("--execute", action="store_true", default=False)
     agent_live_smoke.add_argument("--output", default="")
     agent_live_smoke.add_argument("--disable-analyze-planner", action="store_true", default=False)
@@ -279,6 +290,8 @@ def _apply_cli_overrides(config: HarnessConfig, args) -> None:
         config.agent_auto_resume_after_repair = True
     if getattr(args, "agent_mode", None):
         config.agent_mode = args.agent_mode
+    if getattr(args, "agent_provider", None):
+        config.agent_provider = args.agent_provider
     if getattr(args, "agent_enable_verify", False):
         config.agent_enable_verify = True
     if getattr(args, "agent_verify_max_steps", None) is not None:
@@ -335,6 +348,59 @@ def _apply_cli_overrides(config: HarnessConfig, args) -> None:
     # Controller selection is handled at deploy/resume time, not stored in config
 
 
+def _interactive_default_name(args, config: HarnessConfig) -> str:
+    if args.command in {"llm-test", "memory-evolve", "agent-live-smoke"}:
+        current = getattr(args, "provider", "")
+    else:
+        current = getattr(args, "agent_provider", "")
+    if not current or current in {"mock", "xunfei"}:
+        return "custom"
+    return str(current)
+
+
+def _apply_interactive_session(
+    config: HarnessConfig,
+    args,
+    provider_name: str,
+) -> None:
+    if args.command in {"deploy", "resume"}:
+        config.agent_provider = provider_name
+        config.agent_plan_first_provider = provider_name
+        args.agent_provider = provider_name
+        if hasattr(args, "agent_plan_first_provider"):
+            args.agent_plan_first_provider = provider_name
+        return
+    if args.command == "memory-evolve":
+        config.memory_evolution_provider = provider_name
+        args.provider = provider_name
+        return
+    if args.command == "agent-live-smoke":
+        config.agent_provider = provider_name
+        args.provider = provider_name
+        return
+    args.provider = provider_name
+
+
+def _providers_for_command(config: HarnessConfig, args):
+    if args.command in {"deploy", "resume"}:
+        return [
+            (config.agent_provider, "agent"),
+            (config.agent_plan_first_provider, "plan_first"),
+        ]
+    if args.command == "llm-test":
+        return [(args.provider, "llm_test")]
+    if args.command == "memory-evolve":
+        return [
+            (
+                args.provider or config.memory_evolution_provider,
+                "memory_evolution",
+            )
+        ]
+    if args.command == "agent-live-smoke":
+        return [(args.provider, "live_smoke")]
+    return []
+
+
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
     config = HarnessConfig.load()
@@ -363,6 +429,58 @@ def main(argv=None) -> int:
             write_json(Path(args.output), payload)
         print(json.dumps(payload, ensure_ascii=False, indent=2))
         return 0 if result.status == "passed" else 2
+
+    if getattr(args, "interactive_provider", False):
+        try:
+            session = InteractiveProviderConfigurator(
+                DEFAULT_PROVIDER_REGISTRY
+            ).configure(
+                config=config,
+                default_name=_interactive_default_name(args, config),
+            )
+        except (EOFError, KeyboardInterrupt, ValueError) as exc:
+            print(
+                json.dumps(
+                    {
+                        "status": "failed",
+                        "error": str(exc) or "interactive input cancelled",
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
+            return 2
+        _apply_interactive_session(config, args, session.provider_name)
+        print(
+            json.dumps(
+                {
+                    "status": "provider_configured",
+                    "provider": session.safe_summary(),
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+
+    try:
+        for provider_name, purpose in _providers_for_command(config, args):
+            DEFAULT_PROVIDER_REGISTRY.create(
+                provider_name,
+                config=config,
+                purpose=purpose,
+            )
+    except (TypeError, ValueError) as exc:
+        print(
+            json.dumps(
+                {
+                    "status": "failed",
+                    "error": str(exc),
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return 2
 
     runner = TaskRunner(config)
 
@@ -439,7 +557,11 @@ def main(argv=None) -> int:
         return 0 if result.get("status") not in ("failed",) and regression.get("status") not in ("failed",) else 2
 
     if args.command == "llm-test":
-        provider = MockLLMProvider() if args.provider == "mock" else XunfeiSparkProvider()
+        provider = DEFAULT_PROVIDER_REGISTRY.create(
+            args.provider,
+            config=config,
+            purpose="llm_test",
+        )
         result = provider.complete([Message(role="user", content=args.prompt)])
         print(result.text)
         return 0
@@ -555,16 +677,12 @@ def main(argv=None) -> int:
         return 0 if result.get("status") in ("planned", "passed") else 2
 
     if args.command == "memory-evolve":
-        provider = None
         provider_name = args.provider or config.memory_evolution_provider
-        if provider_name == "xunfei":
-            from auto_harness.providers import XunfeiSparkProvider
-            provider = XunfeiSparkProvider()
-        else:
-            # Use MemoryEvolutionMockProvider (not generic MockLLMProvider)
-            # so memory-evolve --provider mock returns valid curator JSON
-            from auto_harness.providers.memory_evolution_mock import MemoryEvolutionMockProvider
-            provider = MemoryEvolutionMockProvider()
+        provider = DEFAULT_PROVIDER_REGISTRY.create(
+            provider_name,
+            config=config,
+            purpose="memory_evolution",
+        )
 
         manager = MemoryEvolutionManager(
             memory_dir=config.memory_path,

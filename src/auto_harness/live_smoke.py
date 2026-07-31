@@ -1,17 +1,22 @@
 import hashlib
 import json
-import os
 from pathlib import Path
 from typing import Dict, List
 
 from auto_harness.config import HarnessConfig
 from auto_harness.models.base import read_json, write_json
 from auto_harness.orchestrator import TaskRunner
+from auto_harness.providers import DEFAULT_PROVIDER_REGISTRY
 from auto_harness.utils.time import compact_timestamp
 
 
 class LiveAgentSmokeRunner:
     """Runs optional live agent smoke and writes a redacted manifest."""
+
+    def __init__(self, provider_registry=None) -> None:
+        self.provider_registry = (
+            provider_registry or DEFAULT_PROVIDER_REGISTRY
+        )
 
     def run(
         self,
@@ -25,7 +30,8 @@ class LiveAgentSmokeRunner:
     ) -> Dict:
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
-        missing = self._missing_provider_env(provider)
+        config = config or HarnessConfig.load()
+        missing = self._missing_provider_env(provider, config)
         if missing:
             manifest_path = output_dir / "live-agent-smoke-manifest.json"
             manifest = self._skipped_manifest(provider, missing, manifest_path)
@@ -36,7 +42,6 @@ class LiveAgentSmokeRunner:
                 "manifest_path": str(manifest_path),
                 "manifest": manifest,
             }
-        config = config or HarnessConfig.load()
         config.runs_dir = str(output_dir / "runs")
         config.agent_mode = "gated_actor"
         config.agent_provider = provider
@@ -45,7 +50,10 @@ class LiveAgentSmokeRunner:
         config.agent_enable_verify_planner = True
         config.agent_enable_repair_actions = True
         config.agent_auto_resume_after_repair = True
-        runner = TaskRunner(config)
+        runner = TaskRunner(
+            config,
+            provider_registry=self.provider_registry,
+        )
         task_id = runner.deploy(
             str(repo),
             "live-agent-smoke",
@@ -68,16 +76,18 @@ class LiveAgentSmokeRunner:
         write_json(manifest_path, manifest)
         return {"status": "completed", "task_id": task_id, "run_dir": str(run_dir), "manifest_path": str(manifest_path), "manifest": manifest}
 
-    def _missing_provider_env(self, provider: str) -> List[str]:
-        if provider != "xunfei":
-            return []
-        missing = []
-        if not (os.environ.get("XUNFEI_API_URL") or os.environ.get("XUNFEI_API_BASE")):
-            missing.append("XUNFEI_API_URL or XUNFEI_API_BASE")
-        for name in ("XUNFEI_API_KEY", "XUNFEI_MODEL"):
-            if not os.environ.get(name):
-                missing.append(name)
-        return missing
+    def _missing_provider_env(
+        self,
+        provider: str,
+        config: HarnessConfig = None,
+    ) -> List[str]:
+        instance = self.provider_registry.create(
+            provider,
+            config=config,
+            purpose="live_smoke",
+        )
+        checker = getattr(instance, "missing_configuration", None)
+        return list(checker()) if callable(checker) else []
 
     def _skipped_manifest(self, provider_name: str, missing_env: List[str], output_path: Path) -> Dict:
         manifest = {

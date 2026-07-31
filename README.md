@@ -24,10 +24,10 @@ auto-deploy-harness 是一个基于 LangGraph 编排、由 LLM 负责不确定�
 - 任务状态存储：`task.json`、`state.json`、`events.jsonl`。
 - 确定性项目分析器。
 - 安全默认的 `env_solve`、`env_deploy`、`runner`、`verify`、report 模块。
-- Mock LLM provider 和讯飞 Anthropic-compatible provider。
+- 可扩展 Provider Registry、Mock/讯飞 Provider，以及通用 OpenAI-compatible Provider。
 - Claude Code executor wrapper。
 - Policy-constrained LLM Agent：`agent_mode=planner` 时 LLM 可通过 schema 化 action 影响 analyze plan；`agent_mode=gated_actor` 且显式开关打开时，LLM repair action 可在 policy gate 后执行安全动作；LLM 永远不能直接执行 shell、修改源码或判定成功。
-- Provider protocol：当前 Mock 与讯飞 Provider 使用 `json_action`（模型输出 Schema 化 JSON，再由 Python 校验和执行），不是 provider-native function/tool calling；运行证据会显式记录 `provider_protocol`，避免把 JSON Action 包装成原生 Tool Calling。
+- Provider protocol：当前 Mock、讯飞与 OpenAI-compatible Provider 使用 `json_action`（模型输出 Schema 化 JSON，再由 Python 校验和执行），不是 provider-native function/tool calling；运行证据会显式记录 `provider_protocol`，避免把 JSON Action 包装成原生 Tool Calling。
 - Self-healing 主流程：`deploy/resume --agent-self-heal` 会打开 bounded repair/resume loop，普通 `TaskRunner.run_existing()` 能在 policy-approved repair 后自动从 `host_preflight` / `env_solve` / `env_deploy` / `model_prepare` / `runner` / `verify` 安全阶段恢复，最终仍由 verify trace 判定成功。
 - Agent runtime 证据：每个 run 会生成 `agent_steps.jsonl`、`agent_state.json`、`agent_plan.json`、`agent_plan_revisions.jsonl` 和 `reports/agent_contribution.json`，记录 observe / plan / policy gate / tool call / observe / critique 的受控探索过程。
 - Tool registry：LLM 只能请求命名 tool，Python runtime 根据 `risk_level`、`side_effects`、`requires_policy` 和 `allowed_modes` 进行执行控制；side-effect tool 默认需要 policy gate。
@@ -118,6 +118,131 @@ PYTHONPATH=src python3 -m auto_harness.cli eval-compare \
   --manifest eval_targets/manifest.json \
   --output-dir runs/evals/local-fixture-eval
 ```
+
+## 多厂商 Provider Registry
+
+所有 Provider 统一由 `ProviderRegistry` 创建，Agent、Plan-first、Memory Evolution、`llm-test` 和 Live Smoke 不再分别硬编码厂商判断。内置名称：
+
+```text
+mock
+xunfei
+openai_compatible
+openai
+deepseek
+qwen / dashscope
+volcengine
+zhipu
+vllm
+ollama
+```
+
+除 `mock` 和 `xunfei` 外，其余名称均使用可配置的 OpenAI-compatible `chat/completions` 适配器。厂商名称只是配置和审计标识，目标 API 必须真实兼容该协议。
+
+配置示例：
+
+```json
+{
+  "agent_provider": "deepseek",
+  "agent_plan_first_provider": "deepseek",
+  "memory_evolution_provider": "deepseek",
+  "provider_configs": {
+    "deepseek": {
+      "api_base": "https://your-provider.example/v1",
+      "model": "your-model",
+      "api_key_env": "DEEPSEEK_API_KEY",
+      "context_window_tokens": 32768,
+      "max_tokens": 4096,
+      "timeout_seconds": 60
+    }
+  }
+}
+```
+
+然后仅通过环境变量注入密钥：
+
+```bash
+export DEEPSEEK_API_KEY="..."
+PYTHONPATH=src python3 -m auto_harness.cli llm-test \
+  --provider deepseek \
+  --prompt 'Return JSON only: {"status":"ok"}'
+```
+
+也可以完全通过通用环境变量配置兼容端点：
+
+```bash
+export AUTO_HARNESS_AGENT_PROVIDER="openai_compatible"
+export AUTO_HARNESS_LLM_API_BASE="https://your-provider.example/v1"
+export AUTO_HARNESS_LLM_MODEL="your-model"
+export AUTO_HARNESS_LLM_API_KEY="..."
+export AUTO_HARNESS_LLM_CONTEXT_WINDOW_TOKENS="32768"
+```
+
+部署时也可以直接覆盖 Provider：
+
+```bash
+PYTHONPATH=src python3 -m auto_harness.cli deploy \
+  --repo ./demo \
+  --name demo \
+  --agent-provider deepseek \
+  --agent-plan-first \
+  --agent-plan-first-provider deepseek \
+  --dry-run
+```
+
+本地 vLLM/Ollama 等无需鉴权的兼容接口可以设置 `"require_api_key": false`。配置文件禁止出现 `api_key`、`token`、`secret`、`password` 或 `authorization` 明文值，只允许保存 `api_key_env`。
+
+业务外自定义 Provider 可以在启动阶段注册，不需要修改 Orchestrator：
+
+```python
+from auto_harness.providers import DEFAULT_PROVIDER_REGISTRY
+
+DEFAULT_PROVIDER_REGISTRY.register(
+    "my_provider",
+    lambda config, purpose, provider_name: MyProvider(config),
+)
+```
+
+Provider 只负责模型请求。Schema 校验、Context Governance、Policy Gate、Tool Executor 和 Evidence Gate 不随厂商改变。
+
+### 终端交互式配置
+
+不修改配置文件也可以直接在终端输入自定义厂商：
+
+```bash
+PYTHONPATH=src python3 -m auto_harness.cli llm-test \
+  --interactive-provider
+```
+
+终端会依次询问：
+
+```text
+自定义厂商名称
+API 调用地址
+API Key（getpass隐藏输入，本地免鉴权接口可直接回车）
+模型名称
+Context Window
+最大输出Token
+```
+
+直接用于部署：
+
+```bash
+PYTHONPATH=src python3 -m auto_harness.cli deploy \
+  --repo ./demo \
+  --name demo \
+  --agent-plan-first \
+  --interactive-provider \
+  --dry-run
+```
+
+也可以用于 `resume`、`memory-evolve` 和 `agent-live-smoke`。交互输入的密钥只保存在当前 Python 进程内存中：
+
+- 不写入 JSON、`.env`、Trace 或日志；
+- 不出现在命令行参数和进程列表；
+- 不注入 `os.environ`，因此不会自动传给被部署项目的子进程；
+- 命令结束后失效，下次运行需要重新输入。
+
+在 `provider_configs` 中声明任意名称（如 `my_company_llm`）即可长期保存非敏感连接配置；密钥仍通过 `api_key_env` 指向环境变量。
 
 ## 讯飞配置
 
