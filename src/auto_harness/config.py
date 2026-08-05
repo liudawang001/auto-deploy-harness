@@ -188,6 +188,8 @@ class HarnessConfig:
             raise ValueError("agent_context_window_tokens must be positive")
         if self.agent_context_reserved_output_tokens <= 0:
             raise ValueError("agent_context_reserved_output_tokens must be positive")
+        if self.agent_decision_timeout_seconds <= 0:
+            raise ValueError("agent_decision_timeout_seconds must be positive")
         if self.agent_context_safety_margin_tokens < 0:
             raise ValueError("agent_context_safety_margin_tokens must be non-negative")
         if not (
@@ -244,6 +246,19 @@ class HarnessConfig:
                         "provider_configs.%s.%s must be positive"
                         % (provider_name, key)
                     )
+            # DeepSeek-specific validation
+            _validate_deepseek_config(provider_name, settings)
+            if (
+                str(provider_name).strip().lower().replace("-", "_")
+                == "deepseek"
+                and settings.get("timeout_seconds") is not None
+                and float(settings["timeout_seconds"])
+                > float(self.agent_decision_timeout_seconds)
+            ):
+                raise ValueError(
+                    "provider_configs.deepseek.timeout_seconds must not exceed "
+                    "agent_decision_timeout_seconds"
+                )
         valid_fault_windows = {
             "before_side_effect",
             "after_side_effect_before_commit",
@@ -351,3 +366,240 @@ class HarnessConfig:
     @property
     def task_queue_path(self) -> Path:
         return Path(self.task_queue_dir)
+
+
+# ------------------------------------------------------------------
+# DeepSeek configuration validation
+# ------------------------------------------------------------------
+
+_RETIRED_DEEPSEEK_MODELS = frozenset({
+    "deepseek-chat",
+    "deepseek-reasoner",
+    "deepseek-chat-v1",
+    "deepseek-coder",
+    "deepseek-coder-v1",
+})
+
+_VALID_THINKING_VALUES = frozenset({"enabled", "disabled"})
+_VALID_REASONING_EFFORT_VALUES = frozenset({"high", "max"})
+_VALID_DEEPSEEK_PURPOSES = frozenset({
+    "agent", "plan_first", "memory_evolution", "llm_test", "live_smoke",
+})
+
+
+def _validate_deepseek_config(provider_name: str, settings: dict) -> None:
+    """Validate DeepSeek-specific provider configuration.
+
+    Only runs when provider_name is 'deepseek' (normalized).
+    """
+    normalized = str(provider_name).strip().lower().replace("-", "_")
+    if normalized != "deepseek":
+        return
+
+    # Both endpoint forms must be absolute HTTPS URLs. The Provider repeats
+    # this validation after environment overrides have been resolved.
+    from urllib.parse import urlparse
+
+    for endpoint_key in ("api_base", "api_url"):
+        endpoint = settings.get(endpoint_key, "")
+        if not endpoint:
+            continue
+        parsed = urlparse(str(endpoint))
+        if parsed.scheme.lower() != "https" or not parsed.netloc:
+            raise ValueError(
+                "provider_configs.deepseek.%s must be an absolute HTTPS URL, got: %s"
+                % (endpoint_key, endpoint)
+            )
+
+    # /beta requires allow_beta=true
+    effective_endpoint = settings.get("api_url") or settings.get("api_base", "")
+    if effective_endpoint:
+        endpoint_host = (urlparse(str(effective_endpoint)).hostname or "").lower()
+        if (
+            endpoint_host != "api.deepseek.com"
+            and not settings.get("allow_custom_endpoint", False)
+        ):
+            raise ValueError(
+                "provider_configs.deepseek custom endpoint requires "
+                "allow_custom_endpoint=true"
+            )
+    if "/beta" in str(effective_endpoint):
+        if not settings.get("allow_beta", False):
+            raise ValueError(
+                "provider_configs.deepseek.api_base contains /beta "
+                "but allow_beta is not true"
+            )
+
+    # models validation
+    models = settings.get("models")
+    if "models" in settings and not isinstance(models, dict):
+        raise ValueError("provider_configs.deepseek.models must be an object")
+    if isinstance(models, dict):
+        for purpose, model_name in models.items():
+            if purpose not in _VALID_DEEPSEEK_PURPOSES:
+                raise ValueError(
+                    "provider_configs.deepseek.models has unsupported purpose '%s'"
+                    % purpose
+                )
+            if not model_name or not str(model_name).strip():
+                raise ValueError(
+                    "provider_configs.deepseek.models.%s must be a "
+                    "non-empty string" % purpose
+                )
+            if str(model_name).strip().lower() in _RETIRED_DEEPSEEK_MODELS:
+                raise ValueError(
+                    "provider_configs.deepseek.models.%s uses retired "
+                    "model '%s'; use deepseek-v4-flash or deepseek-v4-pro"
+                    % (purpose, model_name)
+                )
+
+    # Single model field validation
+    single_model = settings.get("model")
+    if single_model and str(single_model).strip().lower() in _RETIRED_DEEPSEEK_MODELS:
+        raise ValueError(
+            "provider_configs.deepseek.model uses retired model '%s'; "
+            "use deepseek-v4-flash or deepseek-v4-pro" % single_model
+        )
+
+    configured_models = list(models.values()) if isinstance(models, dict) else []
+    if single_model:
+        configured_models.append(single_model)
+    has_unknown_model = any(
+        str(model).strip().lower()
+        not in {"deepseek-v4-flash", "deepseek-v4-pro"}
+        and str(model).strip().lower() not in _RETIRED_DEEPSEEK_MODELS
+        for model in configured_models
+    )
+    if has_unknown_model:
+        if settings.get("allow_unknown_model") is not True:
+            raise ValueError(
+                "provider_configs.deepseek unknown models require "
+                "allow_unknown_model=true"
+            )
+        if not settings.get("context_window_tokens") or not settings.get(
+            "max_tokens"
+        ):
+            raise ValueError(
+                "provider_configs.deepseek unknown models require explicit "
+                "context_window_tokens and max_tokens"
+            )
+
+    # thinking validation
+    thinking = settings.get("thinking")
+    if "thinking" in settings and not isinstance(thinking, dict):
+        raise ValueError("provider_configs.deepseek.thinking must be an object")
+    if isinstance(thinking, dict):
+        for purpose, value in thinking.items():
+            if purpose not in _VALID_DEEPSEEK_PURPOSES:
+                raise ValueError(
+                    "provider_configs.deepseek.thinking has unsupported purpose '%s'"
+                    % purpose
+                )
+            if str(value) not in _VALID_THINKING_VALUES:
+                raise ValueError(
+                    "provider_configs.deepseek.thinking.%s must be "
+                    "'enabled' or 'disabled', got: %s" % (purpose, value)
+                )
+
+    # reasoning_effort validation
+    reasoning_effort = settings.get("reasoning_effort")
+    if "reasoning_effort" in settings and not isinstance(
+        reasoning_effort, dict
+    ):
+        raise ValueError(
+            "provider_configs.deepseek.reasoning_effort must be an object"
+        )
+    if isinstance(reasoning_effort, dict):
+        for purpose, value in reasoning_effort.items():
+            if purpose not in _VALID_DEEPSEEK_PURPOSES:
+                raise ValueError(
+                    "provider_configs.deepseek.reasoning_effort has unsupported "
+                    "purpose '%s'" % purpose
+                )
+            if str(value) not in _VALID_REASONING_EFFORT_VALUES:
+                raise ValueError(
+                    "provider_configs.deepseek.reasoning_effort.%s "
+                    "must be 'high' or 'max', got: %s" % (purpose, value)
+                )
+
+    # json_mode must be boolean
+    json_mode = settings.get("json_mode")
+    if "json_mode" in settings and not isinstance(json_mode, dict):
+        raise ValueError("provider_configs.deepseek.json_mode must be an object")
+    if isinstance(json_mode, dict):
+        for purpose, value in json_mode.items():
+            if purpose not in _VALID_DEEPSEEK_PURPOSES:
+                raise ValueError(
+                    "provider_configs.deepseek.json_mode has unsupported purpose '%s'"
+                    % purpose
+                )
+            if not isinstance(value, bool):
+                raise ValueError(
+                    "provider_configs.deepseek.json_mode.%s must be "
+                    "boolean, got: %s" % (purpose, type(value).__name__)
+                )
+
+    # native_tool_calling must be boolean
+    if "native_tool_calling" in settings and not isinstance(
+        settings["native_tool_calling"], bool
+    ):
+        raise ValueError(
+            "provider_configs.deepseek.native_tool_calling must be boolean"
+        )
+    if settings.get("native_tool_calling") is True:
+        raise ValueError(
+            "provider_configs.deepseek.native_tool_calling is not implemented; "
+            "keep it false and use json_action"
+        )
+
+    # allow_beta must be boolean
+    if "allow_beta" in settings and not isinstance(
+        settings["allow_beta"], bool
+    ):
+        raise ValueError(
+            "provider_configs.deepseek.allow_beta must be boolean"
+        )
+
+    if "allow_custom_endpoint" in settings and not isinstance(
+        settings["allow_custom_endpoint"], bool
+    ):
+        raise ValueError(
+            "provider_configs.deepseek.allow_custom_endpoint must be boolean"
+        )
+
+    for key in ("allow_unknown_model", "require_api_key"):
+        if key in settings and not isinstance(settings[key], bool):
+            raise ValueError(
+                "provider_configs.deepseek.%s must be boolean" % key
+            )
+
+    # Retry config validation
+    for key in ("max_retries",):
+        if key in settings and (
+            isinstance(settings[key], bool)
+            or not isinstance(settings[key], int)
+            or settings[key] < 0
+        ):
+            raise ValueError(
+                "provider_configs.deepseek.%s must be non-negative" % key
+            )
+
+    for key in ("retry_base_seconds", "retry_max_seconds"):
+        if key in settings and (
+            isinstance(settings[key], bool)
+            or not isinstance(settings[key], (int, float))
+            or settings[key] <= 0
+        ):
+            raise ValueError(
+                "provider_configs.deepseek.%s must be positive" % key
+            )
+    if (
+        settings.get("retry_base_seconds") is not None
+        and settings.get("retry_max_seconds") is not None
+        and float(settings["retry_max_seconds"])
+        < float(settings["retry_base_seconds"])
+    ):
+        raise ValueError(
+            "provider_configs.deepseek.retry_max_seconds must be greater than "
+            "or equal to retry_base_seconds"
+        )

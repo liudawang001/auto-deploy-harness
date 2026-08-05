@@ -120,9 +120,35 @@ class TestCapabilityMatrix:
                 "self_repair_closure",
                 "docker_sandbox_policy",
                 "evidence_provenance",
+                "deepseek_provider",
             ]
             for cap in expected:
                 assert cap in matrix["capabilities"], "missing capability: %s" % cap
+
+    def test_deepseek_registration_is_not_reported_as_configuration(
+        self, monkeypatch
+    ):
+        for name in (
+            "DEEPSEEK_API_KEY",
+            "DEEPSEEK_API_BASE",
+            "DEEPSEEK_BASE_URL",
+            "DEEPSEEK_API_URL",
+            "DEEPSEEK_MODEL",
+            "DEEPSEEK_CONTEXT_WINDOW_TOKENS",
+        ):
+            monkeypatch.delenv(name, raising=False)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "configs").mkdir()
+            write_json(root / "configs" / "default.json", {"provider_configs": {}})
+            reports = root / "reports"
+            reports.mkdir()
+            details = CapabilityMatrix(root).generate(reports)["capabilities"][
+                "deepseek_provider"
+            ]["details"]
+            assert details["registered"] is True
+            assert details["configured"] is False
+            assert details["live_smoke_status"] == "not_run"
 
     def test_all_statuses_are_allowed(self):
         """All capability statuses must be in ALLOWED_STATUSES."""

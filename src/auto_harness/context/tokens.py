@@ -60,11 +60,27 @@ def normalize_usage(
         input_tokens = estimated_input_tokens
     if total_tokens is None and input_tokens is not None and output_tokens is not None:
         total_tokens = input_tokens + output_tokens
+
+    # Extract DeepSeek cache token fields if present
+    cache_hit_tokens = None
+    cache_miss_tokens = None
+    if "prompt_cache_hit_tokens" in payload:
+        cache_hit_tokens = _safe_int(payload.get("prompt_cache_hit_tokens"))
+    if "prompt_cache_miss_tokens" in payload:
+        cache_miss_tokens = _safe_int(payload.get("prompt_cache_miss_tokens"))
+    # Also check for generic cache fields
+    if cache_hit_tokens is None:
+        cache_hit_tokens = _safe_int(payload.get("cache_hit_tokens"))
+    if cache_miss_tokens is None:
+        cache_miss_tokens = _safe_int(payload.get("cache_read_input_tokens"))
+
     return NormalizedUsage(
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         total_tokens=total_tokens,
         source=source,
+        cache_hit_tokens=cache_hit_tokens,
+        cache_miss_tokens=cache_miss_tokens,
     )
 
 
@@ -77,3 +93,13 @@ def _first_int(payload: Dict[str, Any], *keys: str):
         except (TypeError, ValueError):
             continue
     return None
+
+
+def _safe_int(value) -> Optional[int]:
+    """Safely convert a value to int, returning None on failure."""
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None

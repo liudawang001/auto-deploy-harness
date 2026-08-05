@@ -3,7 +3,11 @@
 The adapter intentionally depends only on the Python standard library. Secrets
 are read from environment variables and are never accepted as plain-text
 configuration values.
+
+Refactored to expose reusable transport methods that vendor-specific
+providers (e.g. DeepSeekProvider) can override individually.
 """
+
 import json
 import os
 import time
@@ -101,22 +105,21 @@ class OpenAICompatibleProvider:
         )
         self.urlopen = urlopen or urllib.request.urlopen
 
-    def complete(
+    # ------------------------------------------------------------------
+    # Reusable transport methods (overridable by subclasses)
+    # ------------------------------------------------------------------
+
+    def _build_payload(
         self,
         messages: List[Message],
         temperature: float = 0.2,
-        max_output_tokens: int = None,
-    ) -> LLMResult:
-        missing = self.missing_configuration()
-        if missing:
-            raise RuntimeError(
-                "%s provider is not configured: missing %s"
-                % (self.provider_name, ", ".join(missing))
-            )
+        max_output_tokens: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Build the JSON payload for a chat completion request."""
         output_limit = self.max_tokens
         if max_output_tokens:
             output_limit = min(output_limit, int(max_output_tokens))
-        payload = {
+        return {
             "model": self.model,
             "messages": [
                 {
@@ -130,41 +133,75 @@ class OpenAICompatibleProvider:
             "temperature": temperature,
             "max_tokens": output_limit,
         }
-        request = urllib.request.Request(
-            self._resolve_url(),
-            data=json.dumps(payload).encode("utf-8"),
-            method="POST",
-        )
-        request.add_header("Content-Type", "application/json")
+
+    def _build_headers(self) -> Dict[str, str]:
+        """Build HTTP headers for the request."""
+        headers = {"Content-Type": "application/json"}
         if self.api_key:
-            request.add_header("Authorization", "Bearer %s" % self.api_key)
+            headers["Authorization"] = "Bearer %s" % self.api_key
         if self.organization:
-            request.add_header("OpenAI-Organization", self.organization)
+            headers["OpenAI-Organization"] = self.organization
+        return headers
+
+    def _perform_request(
+        self,
+        payload: Dict[str, Any],
+        headers: Optional[Dict[str, str]] = None,
+        timeout_seconds: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Send the request and return parsed JSON or raise an error.
+
+        Returns:
+            Parsed response dict with an internal ``_latency_ms`` field.
+
+        Raises:
+            urllib.error.HTTPError: on HTTP errors.
+            urllib.error.URLError: on network errors.
+
+        Malformed JSON is returned as ``{"_raw_text": ...}`` so a
+        vendor-specific parser can classify it without losing the safe preview.
+        """
+        if headers is None:
+            headers = self._build_headers()
+        url = self._resolve_url()
+        data = json.dumps(payload).encode("utf-8")
+        request = urllib.request.Request(url, data=data, method="POST")
+        for key, value in headers.items():
+            request.add_header(key, value)
 
         started = time.time()
         try:
-            with self.urlopen(request, timeout=self.timeout_seconds) as response:
+            request_timeout = (
+                max(0.1, float(timeout_seconds))
+                if timeout_seconds is not None
+                else self.timeout_seconds
+            )
+            with self.urlopen(request, timeout=request_timeout) as response:
                 raw_text = response.read().decode("utf-8")
-        except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace")[:2000]
-            raise RuntimeError(
-                "%s HTTP error %s: %s"
-                % (self.provider_name, exc.code, detail)
-            ) from exc
-        except urllib.error.URLError as exc:
-            raise RuntimeError(
-                "%s network error: %s" % (self.provider_name, str(exc.reason))
-            ) from exc
+        finally:
+            pass
 
         latency_ms = int((time.time() - started) * 1000)
         try:
-            raw = json.loads(raw_text)
+            parsed = json.loads(raw_text)
         except json.JSONDecodeError:
-            return LLMResult(
-                text=raw_text,
-                raw={"raw_text": raw_text[:10000]},
-                latency_ms=latency_ms,
+            raw = {"_raw_text": raw_text[:10000]}
+        else:
+            raw = (
+                parsed
+                if isinstance(parsed, dict)
+                else {"_invalid_response_shape": type(parsed).__name__}
             )
+        raw["_latency_ms"] = latency_ms
+        return raw
+
+    def _parse_response(
+        self,
+        raw: Dict[str, Any],
+        messages: Optional[List[Message]] = None,
+    ) -> LLMResult:
+        """Parse a raw API response into an LLMResult."""
+        latency_ms = raw.pop("_latency_ms", 0)
         return LLMResult(
             text=self._extract_text(raw),
             raw=raw,
@@ -173,6 +210,130 @@ class OpenAICompatibleProvider:
             protocol="json_action",
             tool_calls=self._extract_tool_calls(raw),
         )
+
+    def _classify_http_error(
+        self,
+        exc: urllib.error.HTTPError,
+    ) -> Dict[str, Any]:
+        """Classify an HTTPError into structured error info.
+
+        Returns a dict with keys: category, retryable, safe_detail, request_id.
+        """
+        status = int(exc.code)
+        detail = ""
+        try:
+            detail = exc.read().decode("utf-8", errors="replace")[:2000]
+        except Exception:
+            pass
+
+        from auto_harness.providers.errors import ErrorCategory, sanitize_error_body
+
+        safe = sanitize_error_body(detail)
+        request_id = ""
+
+        if status == 400:
+            # Check for context overflow in the detail
+            if any(marker in detail.lower() for marker in (
+                "context length", "context_length", "too many tokens",
+                "prompt is too long", "request too large",
+            )):
+                return {
+                    "category": ErrorCategory.CONTEXT_OVERFLOW,
+                    "retryable": False,
+                    "safe_detail": safe,
+                    "request_id": request_id,
+                }
+            return {
+                "category": ErrorCategory.INVALID_REQUEST,
+                "retryable": False,
+                "safe_detail": safe,
+                "request_id": request_id,
+            }
+        elif status == 401:
+            return {
+                "category": ErrorCategory.AUTHENTICATION_FAILED,
+                "retryable": False,
+                "safe_detail": safe,
+                "request_id": request_id,
+            }
+        elif status == 402:
+            return {
+                "category": ErrorCategory.INSUFFICIENT_BALANCE,
+                "retryable": False,
+                "safe_detail": safe,
+                "request_id": request_id,
+            }
+        elif status == 422:
+            return {
+                "category": ErrorCategory.INVALID_PARAMETER,
+                "retryable": False,
+                "safe_detail": safe,
+                "request_id": request_id,
+            }
+        elif status == 429:
+            return {
+                "category": ErrorCategory.RATE_LIMITED,
+                "retryable": True,
+                "safe_detail": safe,
+                "request_id": request_id,
+            }
+        elif status == 503:
+            return {
+                "category": ErrorCategory.SERVER_OVERLOADED,
+                "retryable": True,
+                "safe_detail": safe,
+                "request_id": request_id,
+            }
+        else:
+            return {
+                "category": ErrorCategory.SERVER_ERROR,
+                "retryable": status >= 500,
+                "safe_detail": safe,
+                "request_id": request_id,
+            }
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def complete(
+        self,
+        messages: List[Message],
+        temperature: float = 0.2,
+        max_output_tokens: int = None,
+    ) -> LLMResult:
+        missing = self.missing_configuration()
+        if missing:
+            raise RuntimeError(
+                "%s provider is not configured: missing %s"
+                % (self.provider_name, ", ".join(missing))
+            )
+        payload = self._build_payload(messages, temperature, max_output_tokens)
+        headers = self._build_headers()
+
+        try:
+            raw = self._perform_request(payload, headers)
+        except urllib.error.HTTPError as exc:
+            classified = self._classify_http_error(exc)
+            from auto_harness.providers.errors import ProviderError
+            raise ProviderError(
+                "%s HTTP error %s" % (self.provider_name, exc.code),
+                provider_name=self.provider_name,
+                status_code=int(exc.code),
+                category=classified["category"],
+                request_id=classified.get("request_id", ""),
+                safe_detail=classified.get("safe_detail", ""),
+            ) from exc
+        except urllib.error.URLError as exc:
+            from auto_harness.providers.errors import ProviderError, ErrorCategory
+            raise ProviderError(
+                "%s network error: %s" % (self.provider_name, str(exc.reason)),
+                provider_name=self.provider_name,
+                category=ErrorCategory.NETWORK_ERROR,
+                safe_detail=str(exc.reason)[:500],
+            ) from exc
+
+        return self._parse_response(raw, messages)
 
     def missing_configuration(self) -> List[str]:
         missing = []
@@ -232,6 +393,10 @@ class OpenAICompatibleProvider:
         calls = message.get("tool_calls") if isinstance(message, dict) else None
         return calls if isinstance(calls, list) else []
 
+
+# ------------------------------------------------------------------
+# Configuration helpers (public for reuse by subclasses)
+# ------------------------------------------------------------------
 
 def _provider_settings(config: Any, name: str) -> Dict[str, Any]:
     if isinstance(config, dict):

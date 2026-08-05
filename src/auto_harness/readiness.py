@@ -17,6 +17,7 @@ Allowed capability statuses:
 Prohibited: production_ready (never allowed)
 """
 import json
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -402,6 +403,9 @@ class CapabilityMatrix:
             "evidence": ["tests/test_docker_sandbox_policy.py"],
         }
 
+        # 12. deepseek_provider
+        capabilities["deepseek_provider"] = self._deepseek_readiness()
+
         capabilities["unified_agent_observability"] = {
             "status": _check_test_artifact(
                 reports_dir / "p1_unified_metrics_result.json"
@@ -414,6 +418,136 @@ class CapabilityMatrix:
             "commit_sha": commit_sha,
             "generated_at": utc_now_iso(),
             "capabilities": capabilities,
+        }
+
+    def _deepseek_readiness(self) -> Dict[str, Any]:
+        """Assess DeepSeek provider readiness from code and config.
+
+        Checks:
+        - DeepSeekProvider class exists
+        - deepseek registered in ProviderRegistry
+        - Config validation for retired models
+        - ProviderError available
+        """
+        status = "implemented"
+        evidence = []
+        details = {
+            "provider": "deepseek",
+            "registered": False,
+            "configured": False,
+            "model_supported": True,
+            "protocol": "json_action",
+            "thinking_supported": True,
+            "json_mode_supported": True,
+            "thinking_configured": False,
+            "json_mode_configured": False,
+            "native_tool_calling": False,
+            "live_smoke_status": "not_run",
+            "test_status": "not_run",
+        }
+
+        # Check DeepSeekProvider class
+        try:
+            from auto_harness.providers.deepseek import DeepSeekProvider  # noqa: F401
+            evidence.append("src/auto_harness/providers/deepseek.py")
+        except ImportError:
+            details["model_supported"] = False
+            details["thinking_supported"] = False
+            details["json_mode_supported"] = False
+            details["thinking_configured"] = False
+            details["json_mode_configured"] = False
+            return {
+                "status": "not_run",
+                "evidence": [],
+                "details": details,
+            }
+
+        # Check registry registration
+        try:
+            from auto_harness.providers.registry import DEFAULT_PROVIDER_REGISTRY
+            if "deepseek" in DEFAULT_PROVIDER_REGISTRY.names():
+                details["registered"] = True
+                evidence.append("registry: deepseek registered")
+        except Exception:
+            pass
+
+        # Check ProviderError
+        try:
+            from auto_harness.providers.errors import ProviderError  # noqa: F401
+            evidence.append("src/auto_harness/providers/errors.py")
+        except ImportError:
+            pass
+
+        # Registration only proves that code exists. Configuration additionally
+        # requires a constructible provider with no missing endpoint/model/key.
+        try:
+            from auto_harness.config import HarnessConfig
+            from auto_harness.providers.registry import DEFAULT_PROVIDER_REGISTRY
+
+            config_path = os.environ.get("AUTO_HARNESS_CONFIG")
+            if not config_path:
+                default_path = self.project_root / "configs" / "default.json"
+                config_path = str(default_path) if default_path.exists() else None
+            config = HarnessConfig.load(config_path)
+            provider = DEFAULT_PROVIDER_REGISTRY.create(
+                "deepseek",
+                config=config,
+                purpose="live_smoke",
+            )
+            missing = provider.missing_configuration()
+            details["configured"] = not missing
+            details["thinking_configured"] = not missing
+            details["json_mode_configured"] = not missing
+            details["missing_configuration"] = list(missing)
+        except Exception as exc:
+            details["configured"] = False
+            details["configuration_error"] = str(exc)[:200]
+
+        # Check config validation
+        try:
+            from auto_harness.config import _validate_deepseek_config  # noqa: F401
+            evidence.append("config: DeepSeek validation")
+        except ImportError:
+            pass
+
+        # Check test artifacts
+        test_artifact = (
+            self.project_root / "reports" / "deepseek_provider_result.json"
+        )
+        if test_artifact.exists():
+            details["test_status"] = _check_test_artifact(test_artifact)
+            if details["test_status"] == "validated":
+                status = "integrated"
+            elif details["test_status"] == "failed":
+                status = "failed"
+
+        live_manifest = (
+            self.project_root
+            / "docs"
+            / "evidence"
+            / "live-agent-smoke-manifest.json"
+        )
+        if live_manifest.exists():
+            try:
+                manifest = json.loads(live_manifest.read_text(encoding="utf-8"))
+                if manifest.get("provider_name") == "deepseek":
+                    final_status = str(
+                        manifest.get("final_verify_status", "")
+                    ).lower()
+                    if final_status in {"pass", "passed"}:
+                        details["live_smoke_status"] = "validated"
+                        status = "validated"
+                        evidence.append(str(live_manifest.relative_to(self.project_root)))
+                    elif final_status:
+                        details["live_smoke_status"] = "failed"
+                        status = "failed"
+            except (OSError, ValueError):
+                details["live_smoke_status"] = "failed"
+
+        return {
+            "status": status,
+            "evidence": evidence,
+            "details": details,
         }
 
     def check_readiness(self, matrix: Dict) -> int:

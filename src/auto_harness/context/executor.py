@@ -1,5 +1,6 @@
 import inspect
 import uuid
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from auto_harness.context.budget import ContextBudgetManager, context_telemetry
@@ -13,6 +14,7 @@ from auto_harness.context.models import (
 )
 from auto_harness.context.profiles import get_context_profile
 from auto_harness.context.tokens import normalize_usage
+from auto_harness.providers.base import ProviderRequestContext
 
 
 class ContextGovernanceError(RuntimeError):
@@ -43,6 +45,22 @@ class LLMCallExecutor:
         temperature: float = 0.0,
     ) -> LLMCallResult:
         call_id = uuid.uuid4().hex
+        decision_timeout = max(
+            1,
+            int(_config_get(self.config, "agent_decision_timeout_seconds", 60)),
+        )
+        request_context = ProviderRequestContext(
+            call_id=call_id,
+            call_site=call_site,
+            stage=stage,
+            purpose=str(getattr(provider, "purpose", "") or stage),
+            requested_output_tokens=int(
+                envelope.requested_output_tokens or 4096
+            ),
+            deadline_at=(
+                datetime.now(timezone.utc) + timedelta(seconds=decision_timeout)
+            ).isoformat(),
+        )
         profile = profile or get_context_profile(
             stage,
             _config_get(
@@ -173,6 +191,7 @@ class LLMCallExecutor:
                     int(envelope.requested_output_tokens or profile.reserved_output_tokens),
                     capabilities.max_output_tokens,
                 ),
+                request_context,
             )
         except Exception as exc:
             retry_messages = envelope.retry_messages
@@ -197,6 +216,14 @@ class LLMCallExecutor:
                         attempts=attempts,
                         call_id=call_id,
                     ) from exc
+                self._attach_provider_error_context(
+                    exc,
+                    call_id=call_id,
+                    budget=budget,
+                    build=build,
+                    capabilities=capabilities,
+                    attempts=attempts,
+                )
                 raise
             retry_tokens = self.budget_manager.estimate_messages(
                 retry_messages, envelope, capabilities
@@ -246,6 +273,7 @@ class LLMCallExecutor:
                         int(envelope.requested_output_tokens or profile.reserved_output_tokens),
                         capabilities.max_output_tokens,
                     ),
+                    request_context,
                 )
             except Exception as retry_exc:
                 if is_context_overflow_error(retry_exc):
@@ -274,6 +302,14 @@ class LLMCallExecutor:
                         attempts=attempts,
                         call_id=call_id,
                     ) from retry_exc
+                self._attach_provider_error_context(
+                    retry_exc,
+                    call_id=call_id,
+                    budget=budget,
+                    build=build,
+                    capabilities=capabilities,
+                    attempts=attempts,
+                )
                 raise
             build.estimated_input_tokens = retry_tokens
             build.selected_variant = "retry"
@@ -306,9 +342,36 @@ class LLMCallExecutor:
                 "output_tokens": usage.output_tokens,
                 "total_tokens": usage.total_tokens,
                 "source": usage.source,
+                "cache_hit_tokens": usage.cache_hit_tokens,
+                "cache_miss_tokens": usage.cache_miss_tokens,
             },
             attempts=attempts,
         )
+        provider_context = getattr(provider_result, "context", None)
+        safe_provider_context = (
+            dict(provider_context) if isinstance(provider_context, dict) else {}
+        )
+        telemetry["provider_response"] = {
+            **safe_provider_context,
+            "provider_name": str(
+                getattr(provider_result, "provider_name", "")
+                or capabilities.provider_name
+            ),
+            "provider_model": str(
+                getattr(provider_result, "provider_model", "")
+                or capabilities.model
+            ),
+            "purpose": request_context.purpose,
+            "protocol": str(getattr(provider_result, "protocol", "") or ""),
+            "request_id": str(getattr(provider_result, "request_id", "") or ""),
+            "finish_reason": str(
+                getattr(provider_result, "finish_reason", "") or ""
+            ),
+            "retry_count": int(
+                getattr(provider_result, "retry_count", 0) or 0
+            ),
+            "latency_ms": int(getattr(provider_result, "latency_ms", 0) or 0),
+        }
         provider_result.context = telemetry
         return LLMCallResult(
             call_id=call_id,
@@ -317,6 +380,33 @@ class LLMCallExecutor:
             usage=usage,
             attempts=attempts,
         )
+
+    @staticmethod
+    def _attach_provider_error_context(
+        exc,
+        *,
+        call_id,
+        budget,
+        build,
+        capabilities,
+        attempts,
+    ) -> None:
+        serializer = getattr(exc, "to_dict", None)
+        if not callable(serializer):
+            return
+        existing = getattr(exc, "context", None)
+        telemetry = context_telemetry(
+            call_id,
+            budget,
+            build,
+            capabilities,
+            attempts=attempts,
+            stop_reason=str(getattr(exc, "category", "provider_error")),
+        )
+        telemetry["provider_error"] = serializer()
+        if isinstance(existing, dict) and existing:
+            telemetry["provider_error_context"] = existing
+        exc.context = telemetry
 
     @staticmethod
     def _governance_error(
@@ -344,7 +434,13 @@ class LLMCallExecutor:
         )
 
     @staticmethod
-    def _complete(provider, messages, temperature: float, max_output_tokens: int):
+    def _complete(
+        provider,
+        messages,
+        temperature: float,
+        max_output_tokens: int,
+        request_context: ProviderRequestContext,
+    ):
         complete = provider.complete
         try:
             parameters = inspect.signature(complete).parameters
@@ -359,10 +455,17 @@ class LLMCallExecutor:
             kwargs["temperature"] = temperature
         if "max_output_tokens" in parameters or accepts_kwargs:
             kwargs["max_output_tokens"] = max_output_tokens
+        if "request_context" in parameters or accepts_kwargs:
+            kwargs["request_context"] = request_context
         return complete(messages, **kwargs)
 
 
 def is_context_overflow_error(exc: Exception) -> bool:
+    # Check ProviderError category first (most reliable)
+    category = str(getattr(exc, "category", "") or "").lower()
+    if category == "context_overflow":
+        return True
+
     code = str(getattr(exc, "code", "") or "").lower()
     message = str(exc).lower()
     return code in {"context_length_exceeded", "context_window_exceeded"} or any(
@@ -385,6 +488,7 @@ class _DefaultContextConfig:
     agent_context_safety_margin_tokens = 2048
     agent_context_unknown_model_fallback_tokens = 8192
     agent_context_max_overflow_retries = 1
+    agent_decision_timeout_seconds = 60
 
 
 def _default_sections(envelope: PromptEnvelope, profile_name: str):

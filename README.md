@@ -136,7 +136,7 @@ vllm
 ollama
 ```
 
-除 `mock` 和 `xunfei` 外，其余名称均使用可配置的 OpenAI-compatible `chat/completions` 适配器。厂商名称只是配置和审计标识，目标 API 必须真实兼容该协议。
+除 `mock` 和 `xunfei` 外，`deepseek` 有专用 Provider（支持 Thinking Mode、JSON Output、purpose 驱动模型选择与有界重试），其余名称使用可配置的 OpenAI-compatible `chat/completions` 适配器。厂商名称只是配置和审计标识，目标 API 必须真实兼容该协议。
 
 配置示例：
 
@@ -147,16 +147,48 @@ ollama
   "memory_evolution_provider": "deepseek",
   "provider_configs": {
     "deepseek": {
-      "api_base": "https://your-provider.example/v1",
-      "model": "your-model",
+      "api_base": "https://api.deepseek.com",
       "api_key_env": "DEEPSEEK_API_KEY",
-      "context_window_tokens": 32768,
+      "models": {
+        "agent": "deepseek-v4-flash",
+        "plan_first": "deepseek-v4-pro",
+        "memory_evolution": "deepseek-v4-flash"
+      },
+      "thinking": {
+        "agent": "disabled",
+        "plan_first": "enabled"
+      },
+      "reasoning_effort": {
+        "plan_first": "high"
+      },
+      "json_mode": {
+        "agent": true,
+        "plan_first": true,
+        "memory_evolution": true
+      },
+      "context_window_tokens": 65536,
       "max_tokens": 4096,
-      "timeout_seconds": 60
+      "timeout_seconds": 60,
+      "max_retries": 2,
+      "retry_base_seconds": 1.0,
+      "retry_max_seconds": 8.0
     }
   }
 }
 ```
+
+DeepSeek 专用 Provider 特性：
+- **Purpose 驱动模型选择**：`plan_first` 默认用 `deepseek-v4-pro`（Thinking enabled），`agent` 默认用 `deepseek-v4-flash`
+- **Thinking Mode**：显式控制 `thinking` 和 `reasoning_effort`（`high`/`max`）
+- **JSON Output**：`json_mode=true` 时请求 `response_format: {"type": "json_object"}`
+- **结构化错误**：401/402/422 不重试；429/500/503 有界指数退避重试
+- **空响应恢复**：JSON Output 空内容只使用更短 Prompt 重试一次，独立于瞬态网络重试
+- **Deadline 治理**：单次网络超时和重试退避均受 `agent_decision_timeout_seconds` 限制
+- **旧模型名拒绝**：`deepseek-chat`/`deepseek-reasoner` 在配置阶段即报错
+- **Reasoning 隐私**：完整 `reasoning_content` 不落盘，仅保存 hash 和长度
+- **Fail-closed 协议**：当前仅使用 `json_action`；`native_tool_calling=true` 会被拒绝，完成 P3 多轮协议后才能启用
+
+DeepSeek 模型能力注册表保存官方上下文上限，但实际请求预算始终取模型上限、Provider 配置和项目全局配置的最小值。生产环境建议先保持 64K 等保守运行预算。DeepSeek Endpoint（包括环境变量覆盖的 `api_url`）必须使用绝对 HTTPS URL；默认只允许 `api.deepseek.com`，代理地址必须显式设置 `allow_custom_endpoint=true`。
 
 然后仅通过环境变量注入密钥：
 

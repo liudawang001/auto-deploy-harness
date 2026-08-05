@@ -20,7 +20,9 @@ from auto_harness.providers import (
     DEFAULT_PROVIDER_REGISTRY,
     InteractiveProviderConfigurator,
     Message,
+    ProviderError,
 )
+from auto_harness.providers.errors import ErrorCategory
 from auto_harness.queue import DeploymentQueue
 from auto_harness.readiness import ReadinessAuditor
 from auto_harness.runtime import DockerSmokeChecker
@@ -464,17 +466,28 @@ def main(argv=None) -> int:
 
     try:
         for provider_name, purpose in _providers_for_command(config, args):
-            DEFAULT_PROVIDER_REGISTRY.create(
+            provider = DEFAULT_PROVIDER_REGISTRY.create(
                 provider_name,
                 config=config,
                 purpose=purpose,
             )
-    except (TypeError, ValueError) as exc:
+            missing_checker = getattr(provider, "missing_configuration", None)
+            missing = list(missing_checker()) if callable(missing_checker) else []
+            if missing:
+                raise ProviderError(
+                    "%s provider configuration is incomplete" % provider_name,
+                    provider_name=str(provider_name),
+                    category=ErrorCategory.CONFIGURATION_ERROR,
+                    safe_detail="missing: %s" % ", ".join(missing),
+                )
+    except (TypeError, ValueError, ProviderError) as exc:
+        detail = exc.to_dict() if isinstance(exc, ProviderError) else None
         print(
             json.dumps(
                 {
                     "status": "failed",
                     "error": str(exc),
+                    "provider_error": detail,
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -562,7 +575,21 @@ def main(argv=None) -> int:
             config=config,
             purpose="llm_test",
         )
-        result = provider.complete([Message(role="user", content=args.prompt)])
+        try:
+            result = provider.complete([Message(role="user", content=args.prompt)])
+        except ProviderError as exc:
+            print(
+                json.dumps(
+                    {
+                        "status": "failed",
+                        "error": str(exc),
+                        "provider_error": exc.to_dict(),
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
+            return 2
         print(result.text)
         return 0
 

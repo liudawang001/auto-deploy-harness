@@ -70,7 +70,64 @@ class _UnknownProvider:
         return LLMResult(text='{"status":"ok"}')
 
 
+class _AuditedProvider:
+    provider_name = "deepseek"
+    purpose = "plan_first"
+    context_window_tokens = 16384
+    max_tokens = 1024
+    model = "test-model"
+
+    def __init__(self):
+        self.request_context = None
+
+    def complete(
+        self,
+        messages,
+        temperature=0.2,
+        max_output_tokens=None,
+        request_context=None,
+    ):
+        self.request_context = request_context
+        return LLMResult(
+            text='{"status":"ok"}',
+            usage={
+                "prompt_tokens": 12,
+                "completion_tokens": 3,
+                "prompt_cache_hit_tokens": 5,
+            },
+            protocol="json_action",
+            context={"reasoning_present": True, "reasoning_sha256": "abc"},
+            finish_reason="stop",
+            request_id="req-1",
+            provider_name="deepseek",
+            provider_model="test-model",
+            retry_count=1,
+        )
+
+
 class ContextGovernanceTest(unittest.TestCase):
+    def test_provider_request_context_and_audit_metadata_are_preserved(self):
+        provider = _AuditedProvider()
+        call = LLMCallExecutor(_Config()).execute(
+            call_site="plan_first.plan",
+            stage="plan",
+            provider=provider,
+            envelope=PromptEnvelope(
+                messages=[Message(role="user", content="Return JSON")],
+                requested_output_tokens=512,
+            ),
+            profile=get_context_profile("plan", 512),
+        )
+        self.assertEqual(provider.request_context.call_site, "plan_first.plan")
+        self.assertTrue(provider.request_context.deadline_at)
+        audit = call.provider_result.context["provider_response"]
+        self.assertEqual(audit["request_id"], "req-1")
+        self.assertEqual(audit["reasoning_sha256"], "abc")
+        self.assertEqual(audit["retry_count"], 1)
+        self.assertEqual(
+            call.provider_result.context["usage"]["cache_hit_tokens"], 5
+        )
+
     def test_estimator_counts_messages_tools_and_schema(self):
         provider = _RecordingProvider()
         from auto_harness.context.capabilities import resolve_provider_capabilities

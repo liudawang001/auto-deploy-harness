@@ -108,10 +108,19 @@ class ProviderRegistry:
             "xunfei",
             lambda config, purpose, name: XunfeiSparkProvider(config=config),
         )
+
+        # DeepSeek uses dedicated provider with purpose-driven model selection
+        self.register(
+            "deepseek",
+            lambda config, purpose, name: _create_deepseek_provider(
+                config, purpose, name
+            ),
+        )
+
+        # Other OpenAI-compatible providers use generic adapter
         for name in (
             "openai_compatible",
             "openai",
-            "deepseek",
             "qwen",
             "dashscope",
             "volcengine",
@@ -126,6 +135,21 @@ class ProviderRegistry:
                     config=config,
                 ),
             )
+
+
+def _create_deepseek_provider(config, purpose, provider_name):
+    """Create a DeepSeekProvider with purpose-specific configuration.
+
+    This factory function is extracted so it can be patched in tests
+    without affecting other provider factories in the lambda closure.
+    """
+    from auto_harness.providers.deepseek import DeepSeekProvider
+
+    return DeepSeekProvider(
+        provider_name=provider_name,
+        config=config,
+        purpose=purpose,
+    )
 
 
 DEFAULT_PROVIDER_REGISTRY = ProviderRegistry()

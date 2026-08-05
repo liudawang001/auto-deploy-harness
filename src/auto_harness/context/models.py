@@ -110,6 +110,8 @@ class NormalizedUsage:
     output_tokens: Optional[int] = None
     total_tokens: Optional[int] = None
     source: str = "estimated"
+    cache_hit_tokens: Optional[int] = None
+    cache_miss_tokens: Optional[int] = None
 
 
 @dataclass
