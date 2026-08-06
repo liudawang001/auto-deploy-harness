@@ -2807,8 +2807,9 @@ class CoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             output = Path(tmp) / "readiness.json"
             report = ReadinessAuditor().audit(Path.cwd(), output_path=output)
-            self.assertEqual(report["status"], "ready_for_external_smoke")
-            self.assertEqual(report["local_readiness_percent"], 100)
+            self.assertEqual(report["status"], "incomplete")
+            self.assertLess(report["local_readiness_percent"], 100)
+            self.assertTrue(any(gate["id"].startswith("evidence:") for gate in report["local_gates"]))
             self.assertGreaterEqual(report["summary"]["benchmark_manifest_cases"], 50)
             self.assertTrue(any(gate["id"] == "docker_gpu_smoke" for gate in report["external_gates"]))
             self.assertTrue(output.exists())
@@ -2818,10 +2819,10 @@ class CoreTests(unittest.TestCase):
             output = Path(tmp) / "readiness.json"
             with redirect_stdout(io.StringIO()):
                 code = cli_main(["readiness", "--output", str(output)])
-            self.assertEqual(code, 0)
+            self.assertEqual(code, 2)
             report = json.loads(output.read_text(encoding="utf-8"))
-            self.assertEqual(report["status"], "ready_for_external_smoke")
-            self.assertEqual(report["local_readiness_percent"], 100)
+            self.assertEqual(report["status"], "incomplete")
+            self.assertLess(report["local_readiness_percent"], 100)
 
     def test_dashboard_cli_generates_static_html(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -5,6 +5,7 @@ from typing import Dict, List
 from auto_harness.agent.repair_actions import install_package_command
 from auto_harness.models.base import write_json
 from auto_harness.repair.actions import RepairActionNormalizer, RepairActionRegistry
+from auto_harness.runtime import ChildEnvironmentPolicy
 from auto_harness.utils.shell import run_command
 
 
@@ -14,6 +15,7 @@ class RepairApplier:
     def __init__(self) -> None:
         self.normalizer = RepairActionNormalizer()
         self.registry = RepairActionRegistry()
+        self.child_environment_policy = ChildEnvironmentPolicy()
 
     def apply(
         self,
@@ -175,7 +177,14 @@ class RepairApplier:
                     "stderr_tail": str(raw.get("stderr") or "")[-4000:],
                     "timed_out": bool(raw.get("timed_out")),
                 }
-        result = run_command(cmd, run_dir / "workspace" / "repo", timeout_seconds=timeout_seconds)
+        result = run_command(
+            cmd,
+            run_dir / "workspace" / "repo",
+            timeout_seconds=timeout_seconds,
+            env=self.child_environment_policy.build_for_install(
+                home_dir=run_dir / "workspace" / "install_home",
+            ),
+        )
         return {
             "action_type": action_type,
             "executed": True,

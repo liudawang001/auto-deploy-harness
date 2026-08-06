@@ -26,6 +26,11 @@ class LangGraphControllerDependencies:
         self.runner = runner
 
     @property
+    def runtime_config(self):
+        """Expose configuration without constructing provider dependencies."""
+        return self.runner.config
+
+    @property
     def skill_router(self):
         return self.runner.skill_router
 
@@ -54,7 +59,7 @@ class LangGraphControllerDependencies:
         max_replans = getattr(self.runner.config, "agent_plan_first_max_replans", 2)
         return build_initial_state(context, max_replans, config=self.runner.config)
 
-    def graph_deps(self) -> GraphNodeDependencies:
+    def graph_deps(self, planner_mode=None) -> GraphNodeDependencies:
         """Build GraphNodeDependencies with real modules."""
         from auto_harness.agent_runtime.deployment_plan import DeploymentPlanParser
         from auto_harness.agent_runtime.plan_compiler import PlanCompiler
@@ -65,7 +70,10 @@ class LangGraphControllerDependencies:
         from auto_harness.agent_runtime.stage_executor import AgentStageExecutor
 
         # Support deterministic planner mode for baseline evaluation
-        if getattr(self.runner.config, "langgraph_planner_mode", "llm") == "deterministic":
+        selected_planner = planner_mode or getattr(
+            self.runner.config, "langgraph_planner_mode", "auto"
+        )
+        if selected_planner == "deterministic":
             from auto_harness.agent_runtime.deterministic_planner import DeterministicDeploymentPlanner
             planner = DeterministicDeploymentPlanner()
         else:
@@ -325,6 +333,9 @@ class LangGraphControllerDependencies:
         if verify_status in ("passed", "pass"):
             status = "completed"
             stop_reason = "verify_passed"
+        elif output.get("dry_run") and output.get("current_stage") == "report":
+            status = "completed_dry_run"
+            stop_reason = "dry_run_completed"
         elif output.get("pending_approval"):
             status = "interrupted"
             stop_reason = "approval_pending"
@@ -348,12 +359,27 @@ class LangGraphControllerDependencies:
 
     def completed_result(self, values: Dict) -> DeploymentResult:
         """Result when graph is already completed (no next nodes)."""
+        if not values or not values.get("task_id"):
+            return DeploymentResult(
+                task_id="",
+                status="stopped",
+                stop_reason="checkpoint_not_found",
+                controller="langgraph",
+            )
+        verify_status = values.get("verify_status", "")
+        is_dry_run = bool(values.get("dry_run"))
         return DeploymentResult(
             task_id=values.get("task_id", ""),
-            status="completed",
-            stop_reason="already_completed",
+            status=(
+                "completed_dry_run"
+                if is_dry_run and verify_status not in ("passed", "pass")
+                else "completed"
+            ),
+            stop_reason=(
+                "dry_run_completed" if is_dry_run else "already_completed"
+            ),
             controller="langgraph",
-            verify_status=values.get("verify_status", ""),
+            verify_status=verify_status,
         )
 
     def blocked_result(self, values: Dict, reason: str) -> DeploymentResult:

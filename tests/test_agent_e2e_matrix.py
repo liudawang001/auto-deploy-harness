@@ -79,6 +79,7 @@ class TestAgentE2EMatrix(unittest.TestCase):
             agent_runtime_loop_position="primary" if agent_mode != "off" else "primary",
             agent_runtime_loop_max_iterations=15,
             agent_auto_resume_after_repair=False,
+            default_controller="legacy",
             **config_kwargs,
         )
         runner = TaskRunner(config)

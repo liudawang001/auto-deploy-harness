@@ -55,6 +55,7 @@ class TestAgentPrimaryLoopE2E(unittest.TestCase):
                 agent_runtime_loop_max_iterations=15,
                 agent_runtime_loop_stop_on_verify_pass=True,
                 agent_auto_resume_after_repair=False,
+                default_controller="legacy",
             )
             runner = TaskRunner(config)
 
@@ -203,6 +204,7 @@ class TestAgentPrimaryLoopE2E(unittest.TestCase):
                 agent_runtime_loop_position="primary",
                 agent_runtime_loop_max_iterations=15,
                 agent_auto_resume_after_repair=False,
+                default_controller="legacy",
             )
             runner = TaskRunner(config)
 

@@ -2,6 +2,8 @@ name: Playwright Browser Verify Smoke
 
 on:
   workflow_dispatch:
+  push:
+    branches: [main]
 
 jobs:
   browser-verify-smoke:

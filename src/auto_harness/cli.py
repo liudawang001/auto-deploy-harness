@@ -13,8 +13,9 @@ from auto_harness.memory.evolution import MemoryEvolutionManager
 from auto_harness.memory.outcomes import SkillOutcomeRecorder
 from auto_harness.skills.rollback import SkillRollbackManager
 from auto_harness.live_smoke import LiveAgentSmokeRunner
-from auto_harness.orchestrator import TaskRunner
-from auto_harness.models.base import to_plain, write_json
+from auto_harness.orchestrator import TaskExecutionError, TaskRunner
+from auto_harness.controllers.outcomes import controller_exit_code
+from auto_harness.models.base import read_json, to_plain, write_json
 from auto_harness.modules import HostPreflightModule, ProjectAnalyzer, ResourcePlanner
 from auto_harness.providers import (
     DEFAULT_PROVIDER_REGISTRY,
@@ -33,7 +34,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="auto-deploy-harness")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    sub.add_parser("init", help="create local run directories")
+    init = sub.add_parser("init", help="install bundled config and skills without overwriting local files")
+    init.add_argument("--force", action="store_true", default=False)
 
     deploy = sub.add_parser("deploy", help="create and run a deployment task")
     deploy.add_argument("--repo", required=True)
@@ -191,6 +193,7 @@ def build_parser() -> argparse.ArgumentParser:
     readiness = sub.add_parser("readiness", help="audit local project readiness and list external smoke gates")
     readiness.add_argument("--benchmark-report", default="")
     readiness.add_argument("--output", default="")
+    readiness.add_argument("--run-local-gates", action="store_true", default=False)
 
     agent_metrics = sub.add_parser("agent-metrics", help="collect agent metrics from local runs")
     agent_metrics.add_argument("--runs-dir", default="")
@@ -403,14 +406,33 @@ def _providers_for_command(config: HarnessConfig, args):
     return []
 
 
+def _deployment_exit_code(runner, task_id: str) -> int:
+    """Read the persisted outcome while keeping test doubles compatible."""
+    try:
+        run_dir = runner.store.run_dir(task_id)
+        if isinstance(run_dir, (str, Path)):
+            result_path = Path(run_dir) / "reports" / "controller_result.json"
+            if result_path.exists():
+                result = read_json(result_path)
+                return controller_exit_code(result.get("status", ""))
+        state = runner.store.load_state(task_id)
+        status = getattr(state, "status", None)
+        if isinstance(status, str) and status:
+            return controller_exit_code(status)
+    except (AttributeError, OSError, TypeError, ValueError):
+        pass
+    return 0
+
+
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
     config = HarnessConfig.load()
     _apply_cli_overrides(config, args)
 
     if args.command == "init":
-        config.runs_path.mkdir(parents=True, exist_ok=True)
-        print("initialized: %s" % config.runs_path)
+        from auto_harness.resources.installer import initialize_workspace
+        result = initialize_workspace(Path.cwd(), force=args.force)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
 
     if args.command == "preflight":
@@ -500,24 +522,50 @@ def main(argv=None) -> int:
     if args.command == "deploy":
         dry_run = args.dry_run or not args.execute
         controller = getattr(args, "controller", None)
-        task_id = runner.deploy(
-            args.repo,
-            args.name,
-            dry_run=dry_run,
-            skip_clone=args.skip_clone,
-            allow_install=args.allow_install,
-            allow_start=args.allow_start,
-            controller=controller,
-        )
+        try:
+            task_id = runner.deploy(
+                args.repo,
+                args.name,
+                dry_run=dry_run,
+                skip_clone=args.skip_clone,
+                allow_install=args.allow_install,
+                allow_start=args.allow_start,
+                controller=controller,
+            )
+        except TaskExecutionError as exc:
+            print(json.dumps({
+                "task_id": exc.task_id,
+                "status": "failed",
+                "stop_reason": "internal_controller_error",
+                "error_type": exc.cause_type,
+                "exit_code": 3,
+            }, ensure_ascii=False))
+            return 3
+        except KeyboardInterrupt:
+            return 130
         print(task_id)
-        return 0
+        return _deployment_exit_code(runner, task_id)
 
     if args.command == "resume":
         dry_run = args.dry_run or not args.execute
         controller = getattr(args, "controller", None)
-        task_id = runner.resume(args.task_id, dry_run=dry_run, controller=controller)
+        try:
+            task_id = runner.resume(
+                args.task_id, dry_run=dry_run, controller=controller
+            )
+        except TaskExecutionError as exc:
+            print(json.dumps({
+                "task_id": exc.task_id,
+                "status": "failed",
+                "stop_reason": "internal_controller_error",
+                "error_type": exc.cause_type,
+                "exit_code": 3,
+            }, ensure_ascii=False))
+            return 3
+        except KeyboardInterrupt:
+            return 130
         print(task_id)
-        return 0
+        return _deployment_exit_code(runner, task_id)
 
     if args.command == "status":
         print(json.dumps(runner.store.task_summary(args.task_id), ensure_ascii=False, indent=2))
@@ -597,7 +645,9 @@ def main(argv=None) -> int:
         output = Path(args.output) if args.output else None
         report = BenchmarkRunner().run(Path(args.manifest), output, case_ids=args.case_id)
         print(json.dumps(report, ensure_ascii=False, indent=2))
-        return {"passed": 0, "partial": 1}.get(report.get("status"), 2)
+        return {"passed": 0, "partial": 1, "failed": 1}.get(
+            report.get("status"), 3
+        )
 
     if args.command == "dashboard":
         if args.serve:
@@ -618,6 +668,12 @@ def main(argv=None) -> int:
         return 0 if result.get("status") == "generated" else 2
 
     if args.command == "readiness":
+        if args.run_local_gates:
+            from auto_harness.release_gates import run_local_gates
+            gate_result = run_local_gates(Path.cwd())
+            if gate_result.get("status") != "passed":
+                print(json.dumps(gate_result, ensure_ascii=False, indent=2))
+                return 2
         output = Path(args.output) if args.output else Path("reports") / "readiness_audit.json"
         benchmark_report = Path(args.benchmark_report) if args.benchmark_report else None
         result = ReadinessAuditor().audit(Path.cwd(), benchmark_report=benchmark_report, output_path=output)

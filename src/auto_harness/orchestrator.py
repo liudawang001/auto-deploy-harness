@@ -13,6 +13,11 @@ from auto_harness.assets import HuggingFaceDownloader, ModelCache, ModelScopeDow
 from auto_harness.controllers.base import DeploymentContext, DeploymentResult
 from auto_harness.controllers.factory import ControllerUnavailableError, create_controller
 from auto_harness.controllers.legacy import LegacyController
+from auto_harness.controllers.state_sync import (
+    assert_terminal_consistency,
+    mark_controller_running,
+    sync_controller_state,
+)
 from auto_harness.models.base import read_json, to_plain, write_json
 from auto_harness.models.task import ProjectSpec, RuntimePolicy, TaskSpec
 from auto_harness.memory import MemoryStore
@@ -32,9 +37,19 @@ from auto_harness.modules import (
 from auto_harness.providers import DEFAULT_PROVIDER_REGISTRY
 from auto_harness.skills import SkillRegistry
 from auto_harness.repair import RepairApplier, RepairLoopController, RepairOverlay, RepairPlanner, RepairPolicy
+from auto_harness.runtime import ChildEnvironmentPolicy
 from auto_harness.state import StateStore
 from auto_harness.utils.files import safe_name, short_hash
 from auto_harness.utils.time import compact_timestamp, utc_now_iso
+
+
+class TaskExecutionError(RuntimeError):
+    """A task was persisted as failed after an internal controller error."""
+
+    def __init__(self, task_id: str, cause_type: str) -> None:
+        self.task_id = task_id
+        self.cause_type = cause_type
+        super().__init__("task %s failed with %s" % (task_id, cause_type))
 
 
 class TaskRunner:
@@ -138,10 +153,33 @@ class TaskRunner:
         run_dir = self.store.create_task(spec)
         repo_dir = run_dir / "workspace" / "repo"
         if not skip_clone and repo_url.startswith("http"):
-            clone_result = subprocess.run(["git", "clone", repo_url, str(repo_dir)], text=True, capture_output=True)
+            clone_result = subprocess.run(
+                ["git", "clone", repo_url, str(repo_dir)],
+                text=True,
+                capture_output=True,
+                env=ChildEnvironmentPolicy().build_for_install(
+                    home_dir=run_dir / "workspace" / "clone_home",
+                ),
+            )
             self.store.events(spec.task_id).append("clone", "git_clone", {"exit_code": clone_result.returncode, "stderr": clone_result.stderr[-2000:]})
             if clone_result.returncode != 0:
                 self.store.update_stage(spec.task_id, "analyze", "failed", error=clone_result.stderr[-2000:])
+                clone_failure = DeploymentResult(
+                    task_id=spec.task_id,
+                    status="failed",
+                    stop_reason="git_clone_failed",
+                    controller=spec.controller,
+                )
+                write_json(run_dir / "reports" / "controller_result.json", {
+                    "task_id": clone_failure.task_id,
+                    "status": clone_failure.status,
+                    "stop_reason": clone_failure.stop_reason,
+                    "controller": clone_failure.controller,
+                    "verify_status": "",
+                    "artifacts": {},
+                    "metrics": {},
+                })
+                sync_controller_state(self.store, spec.task_id, clone_failure)
                 return spec.task_id
         elif not skip_clone and Path(repo_url).exists():
             source = Path(repo_url).resolve()
@@ -176,11 +214,33 @@ class TaskRunner:
         )
 
         # Build and run controller
+        mark_controller_running(self.store, task_id)
         ctrl = self._build_controller(controller_name)
-        result = ctrl.run(context)
+        try:
+            result = ctrl.run(context)
+        except KeyboardInterrupt:
+            raise
+        except Exception as exc:
+            result = DeploymentResult(
+                task_id=task_id,
+                status="failed",
+                stop_reason="internal_controller_error",
+                controller=controller_name,
+                metrics={"error_type": type(exc).__name__},
+            )
+            self._persist_controller_result(run_dir, task_id, result)
+            raise TaskExecutionError(task_id, type(exc).__name__) from exc
 
-        # Write unified controller result
-        write_json(run_dir / "reports" / "controller_result.json", {
+        self._persist_controller_result(run_dir, task_id, result)
+
+        return task_id
+
+    def _persist_controller_result(
+        self, run_dir: Path, task_id: str, result: DeploymentResult
+    ) -> None:
+        """Persist state, unified result, then enforce terminal invariants."""
+        sync_controller_state(self.store, task_id, result)
+        write_json(Path(run_dir) / "reports" / "controller_result.json", {
             "task_id": result.task_id,
             "status": result.status,
             "stop_reason": result.stop_reason,
@@ -189,8 +249,7 @@ class TaskRunner:
             "artifacts": result.artifacts,
             "metrics": result.metrics,
         })
-
-        return task_id
+        assert_terminal_consistency(self.store, task_id, result)
 
     def _build_controller(self, name: str):
         """Build a deployment controller by name.
@@ -775,17 +834,23 @@ class TaskRunner:
         self.store.events(task_id).append("task", "resume_requested", {"dry_run": dry_run, "controller": resolved_controller})
 
         ctrl = self._build_controller(resolved_controller)
-        result = ctrl.resume(context, resume_input=resume_input)
+        mark_controller_running(self.store, task_id)
+        try:
+            result = ctrl.resume(context, resume_input=resume_input)
+        except KeyboardInterrupt:
+            raise
+        except Exception as exc:
+            result = DeploymentResult(
+                task_id=task_id,
+                status="failed",
+                stop_reason="internal_controller_error",
+                controller=resolved_controller,
+                metrics={"error_type": type(exc).__name__},
+            )
+            self._persist_controller_result(run_dir, task_id, result)
+            raise TaskExecutionError(task_id, type(exc).__name__) from exc
 
-        write_json(run_dir / "reports" / "controller_result.json", {
-            "task_id": result.task_id,
-            "status": result.status,
-            "stop_reason": result.stop_reason,
-            "controller": result.controller,
-            "verify_status": result.verify_status,
-            "artifacts": result.artifacts,
-            "metrics": result.metrics,
-        })
+        self._persist_controller_result(run_dir, task_id, result)
 
         return task_id
 

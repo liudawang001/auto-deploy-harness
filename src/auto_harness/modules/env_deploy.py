@@ -10,7 +10,7 @@ from auto_harness.preflight.policy import EnvironmentPreflightPolicy
 from auto_harness.recovery.dependency import DependencyReconciler
 from auto_harness.recovery.journal import OperationJournal
 from auto_harness.recovery.schemas import canonical_json, compute_operation_id
-from auto_harness.runtime import DockerSandboxBackend
+from auto_harness.runtime import ChildEnvironmentPolicy, DockerSandboxBackend
 from auto_harness.utils.commands import is_allowed_command
 from auto_harness.utils.shell import run_command
 
@@ -23,12 +23,15 @@ class EnvDeployModule:
         postchecker=None,
         ownership=None,
         environment_policy=None,
+        child_environment_policy=None,
     ) -> None:
         self.log_classifier = log_classifier or LogClassifier()
         self.command_runner = command_runner or run_command
         self.postchecker = postchecker or EnvironmentPostchecker()
         self.ownership = ownership or EnvironmentOwnership()
         self.environment_policy = environment_policy or EnvironmentPreflightPolicy()
+        self.child_environment_policy = child_environment_policy or ChildEnvironmentPolicy()
+        self._uses_default_command_runner = command_runner is None
 
     def deploy(
         self,
@@ -181,7 +184,18 @@ class EnvDeployModule:
                         policy_result.get("reason") or (cmd[0] if cmd else ""),
                     ),
                 )
-            result = self.command_runner(cmd, repo_dir, timeout_seconds=timeout_seconds)
+            if self._uses_default_command_runner:
+                child_env = self.child_environment_policy.build_for_install(
+                    home_dir=repo_dir.parent / "install_home",
+                )
+                result = self.command_runner(
+                    cmd,
+                    repo_dir,
+                    timeout_seconds=timeout_seconds,
+                    env=child_env,
+                )
+            else:
+                result = self.command_runner(cmd, repo_dir, timeout_seconds=timeout_seconds)
             command_results.append({
                 "cmd": result.cmd,
                 "original_cmd": original_cmd,

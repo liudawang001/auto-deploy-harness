@@ -63,9 +63,9 @@ class TestFreshTrace:
         """Same before/after traces means not fresh."""
         assert compute_fresh_trace("trace-same", "trace-same") is False
 
-    def test_none_before_is_not_fresh(self):
-        """None before trace means not fresh."""
-        assert compute_fresh_trace(None, "trace-after") is False
+    def test_first_post_repair_trace_is_fresh(self):
+        """A service that failed before verify can produce its first fresh trace."""
+        assert compute_fresh_trace(None, "trace-after") is True
 
     def test_none_after_is_not_fresh(self):
         """None after trace means not fresh."""
@@ -177,10 +177,12 @@ class TestRepairAttempt:
             verification_trace_id="trace-after-123",
             fresh_trace=True,
             repair_verified=True,
+            resume_executed=True,
         )
         assert attempt["failure_signature_before"] == "ImportError: requests"
         assert attempt["effective_action_count"] == 1
         assert attempt["repair_verified"] is True
+        assert attempt["resume_executed"] is True
 
 
 class TestSameFailureLimit:

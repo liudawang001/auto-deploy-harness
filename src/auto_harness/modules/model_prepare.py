@@ -6,6 +6,7 @@ from auto_harness.assets.manifest import AssetManifest, ModelAsset
 from auto_harness.diagnostics import LogClassifier
 from auto_harness.models.base import write_json
 from auto_harness.models.result import StageResult
+from auto_harness.runtime import ChildEnvironmentPolicy
 from auto_harness.utils.commands import is_allowed_command
 from auto_harness.utils.shell import run_command
 
@@ -24,6 +25,8 @@ class ModelPrepareModule:
         self.huggingface_downloader = huggingface_downloader or HuggingFaceDownloader()
         self.modelscope_downloader = modelscope_downloader or ModelScopeDownloader()
         self.command_runner = command_runner or run_command
+        self._uses_default_command_runner = command_runner is None
+        self.child_environment_policy = ChildEnvironmentPolicy()
         self.log_classifier = log_classifier or LogClassifier()
         self.git_lfs_progress_parser = git_lfs_progress_parser or GitLFSProgressParser()
 
@@ -178,7 +181,7 @@ class ModelPrepareModule:
                     },
                 })
                 return result
-            command_result = self.command_runner(cmd, repo_dir, timeout_seconds=timeout_seconds)
+            command_result = self._run_repo_command(cmd, repo_dir, timeout_seconds)
             parsed_progress = self.git_lfs_progress_parser.parse(command_result.stdout + "\n" + command_result.stderr)
             if parsed_progress:
                 result["progress"] = parsed_progress
@@ -251,7 +254,7 @@ class ModelPrepareModule:
                     },
                 })
                 return result
-            command_result = self.command_runner(cmd, repo_dir, timeout_seconds=timeout_seconds)
+            command_result = self._run_repo_command(cmd, repo_dir, timeout_seconds)
             record = {
                 "cmd": command_result.cmd,
                 "exit_code": command_result.exit_code,
@@ -277,6 +280,18 @@ class ModelPrepareModule:
         result["progress"] = final_progress
         progress_callback(final_progress)
         return result
+
+    def _run_repo_command(self, cmd: List[str], repo_dir: Path, timeout_seconds: int):
+        if not self._uses_default_command_runner:
+            return self.command_runner(cmd, repo_dir, timeout_seconds=timeout_seconds)
+        return self.command_runner(
+            cmd,
+            repo_dir,
+            timeout_seconds=timeout_seconds,
+            env=self.child_environment_policy.build_for_install(
+                home_dir=repo_dir.parent / "model_prepare_home",
+            ),
+        )
 
     def _total_size(self, assets):
         sizes = [asset.expected_size_bytes for asset in assets if asset.expected_size_bytes]

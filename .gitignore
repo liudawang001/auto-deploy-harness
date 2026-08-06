@@ -4,6 +4,7 @@ __pycache__/
 .venv/
 .env
 runs/
+reports/
 memory/*.jsonl
 memory/skill_candidates/
 model_cache/

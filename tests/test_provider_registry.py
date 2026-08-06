@@ -147,6 +147,8 @@ class ProviderRegistryTests(unittest.TestCase):
                     "api_base": "https://provider.invalid/v1",
                     "model": "test-model",
                     "api_key_env": "TEST_DEEPSEEK_KEY",
+                    "allow_custom_endpoint": True,
+                    "allow_unknown_model": True,
                     "context_window_tokens": 32768,
                     "max_tokens": 2048,
                     "timeout_seconds": 15,

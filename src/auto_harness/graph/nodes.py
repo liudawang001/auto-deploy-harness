@@ -99,6 +99,9 @@ def make_recovery_gate_node(stage, deps):
             "pending_operation_id": decision.operation.get("operation_id", ""),
             "recovery_result": decision.reconcile_result,
             "pending_operation": decision.operation,
+            # This flag belongs to the current recovery gate. Never carry a
+            # prior stage's reuse decision into a later repaired stage.
+            "recovery_skip_stage": False,
             "current_stage": "recover_%s" % stage,
         }
         if decision.decision == "reuse":
@@ -168,6 +171,10 @@ def make_stage_node(stage, deps):
         current_overlay = state.get("repair_overlay", {})
         hints = effective_stage_hints(state)
 
+        store = getattr(deps.stage_executor, "store", None)
+        if store is not None:
+            store.update_stage(state["task_id"], stage, "running")
+
         executed = deps.stage_executor.execute_stage(
             task_id=state["task_id"], run_dir=Path(state["run_dir"]),
             repo_dir=Path(state["repo_dir"]), stage=stage, state=state,
@@ -178,6 +185,17 @@ def make_stage_node(stage, deps):
             runtime_policy=state.get("runtime_policy", {}),
             skill_context=state.get("skill_contexts", {}).get(stage, {}),
         )
+        if store is not None:
+            result_path = store.save_result(
+                state["task_id"], stage, executed.result
+            )
+            store.update_stage(
+                state["task_id"],
+                stage,
+                "passed" if executed.after_status == "pass" else executed.after_status,
+                result_path=str(result_path),
+                error=executed.error or None,
+            )
         results = dict(state.get("stage_results", {}))
         results[stage] = executed.result or {"status": executed.after_status, "error": executed.error, "data": {}}
         update = {
@@ -736,6 +754,7 @@ class DeploymentGraphNodes:
                 verification_trace_id=after_trace,
                 fresh_trace=fresh_trace,
                 repair_verified=repair_verified,
+                resume_executed=resume_executed,
             )
             write_json(
                 repairs_dir / ("attempt_%s.json" % repair_count),
@@ -800,10 +819,37 @@ class DeploymentGraphNodes:
         }
 
     def report(self, state):
-        self._artifacts(state).write_pipeline_results(state.get("stage_results", {}))
         self.generate_agent_contribution(state)
         self._write_recovery_summary(state)
-        return {"current_stage": "report"}
+        from auto_harness.modules.reporter import ReportGenerator
+        from auto_harness.models.base import to_plain
+
+        run_dir = Path(state["run_dir"])
+        results = dict(state.get("stage_results", {}))
+        task_path = run_dir / "task.json"
+        task = (
+            read_json(task_path)
+            if task_path.exists()
+            else {
+                "task_id": state.get("task_id", ""),
+                "project": {"name": state.get("task_id", ""), "repo_url": ""},
+            }
+        )
+        report_result = ReportGenerator().generate(run_dir, task, results)
+        results["report"] = to_plain(report_result)
+        self._artifacts(state).write_pipeline_results(results)
+        store = getattr(self.deps.stage_executor, "store", None)
+        if store is not None:
+            result_path = store.save_result(
+                state["task_id"], "report", to_plain(report_result)
+            )
+            store.update_stage(
+                state["task_id"],
+                "report",
+                "passed",
+                result_path=str(result_path),
+            )
+        return {"current_stage": "report", "stage_results": results}
 
     def stop(self, state):
         return {"current_stage": "stop"}

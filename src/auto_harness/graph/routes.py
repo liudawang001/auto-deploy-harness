@@ -35,8 +35,14 @@ def route_after_stage(state):
 
 
 def route_after_verify(state):
-    """Route after verify: passed → report, uncertain/failed → observe_failure."""
+    """Route after verify without treating a dry-run as verified execution.
+
+    A dry-run is an inspection/planning result.  Its expected ``uncertain``
+    verification outcome is terminal and reportable, not a repair signal.
+    """
     if state.get("verify_status") in ("pass", "passed"):
+        return "report"
+    if state.get("dry_run"):
         return "report"
     return "observe_failure"
 

@@ -45,6 +45,7 @@ from auto_harness.repair import RepairApplier, RepairLoopController, RepairPlann
 from auto_harness.orchestrator import TaskRunner
 from auto_harness.queue import DeploymentQueue
 from auto_harness.readiness import ReadinessAuditor
+from auto_harness.release_evidence import build_evidence
 from auto_harness.verify import BrowserVerifier, StreamlitVerifier
 from auto_harness.utils.shell import CommandResult
 
@@ -225,19 +226,33 @@ class BenchmarkRunner:
             overall_status = "partial"
         else:
             overall_status = "passed"
-        report = {
-            "status": overall_status,
-            "selected_case_ids": selected_ids,
-            "selected": bool(selected_ids),
-            "level_counts": {
+        project_root = self._project_root(manifest_path)
+        report = build_evidence(
+            project_root,
+            ["auto-deploy-harness", "benchmark", "--manifest", str(manifest_path)],
+            overall_status,
+            passed=sum(1 for item in cases if item.get("status") == "passed"),
+            failed=sum(1 for item in cases if item.get("status") == "failed"),
+            skipped=sum(1 for item in cases if item.get("status") in {"skipped", "not_run"}),
+            selected_case_ids=selected_ids,
+            selected=bool(selected_ids),
+            level_counts={
                 level: sum(1 for case in cases if case.get("test_level") == level)
                 for level in sorted(self.TEST_LEVELS)
             },
-            "cases": cases,
-        }
+            cases=cases,
+        )
         if output_path:
             write_json(Path(output_path), report)
         return report
+
+    @staticmethod
+    def _project_root(path: Path) -> Path:
+        candidate = Path(path).resolve().parent
+        for root in (candidate, *candidate.parents):
+            if (root / "pyproject.toml").exists() or (root / ".git").exists():
+                return root
+        return Path.cwd()
 
     def _run_case(self, case: Dict, fixture_dir: Path) -> Dict:
         case_id = case.get("id")
@@ -1794,21 +1809,16 @@ class BenchmarkRunner:
                     write_json(path, {
                         "cases": [{"id": case_id} for case_id in ReadinessAuditor.REQUIRED_BENCHMARK_CASES]
                     })
-                elif file_name == "docs/progress.md":
-                    path.write_text("当前总项目进度达到 **100%**。\n", encoding="utf-8")
                 else:
                     path.write_text("readiness fixture\n", encoding="utf-8")
-            benchmark_report = root / "benchmark_report.json"
-            write_json(benchmark_report, {
-                "status": "passed",
-                "cases": [{"id": "readiness_audit_report", "status": "passed"}],
-            })
+            for evidence_path in ReadinessAuditor.REQUIRED_EVIDENCE.values():
+                payload = build_evidence(root, ["benchmark-fixture"], "passed", 1, 0)
+                write_json(root / evidence_path, payload)
             output = root / "reports" / "readiness_audit.json"
-            report = ReadinessAuditor().audit(root, benchmark_report=benchmark_report, output_path=output)
+            report = ReadinessAuditor().audit(root, output_path=output)
             ok = (
                 report.get("status") == "ready_for_external_smoke"
                 and report.get("local_readiness_percent") == 100
-                and report.get("project_progress_percent") == 100
                 and report.get("summary", {}).get("external_gate_count") >= 4
                 and output.exists()
             )
@@ -2453,12 +2463,13 @@ class BenchmarkRunner:
                 model_cache_dir=str(root / "model_cache"),
                 skills_dir="skills",
                 default_controller="langgraph",
+                langgraph_planner_mode="llm",
                 allowed_commands=["python", "python3"],
                 langgraph_require_llm=True,
                 langgraph_enable_diagnose=True,
                 langgraph_enable_repair=True,
                 langgraph_enable_agent_verify=True,
-                agent_plan_first_provider="mock",
+                agent_plan_first_provider="benchmark_fixture",
             )
             runner = TaskRunner(config)
             provider = _ControllerE2EProvider()
@@ -2491,8 +2502,22 @@ class BenchmarkRunner:
                 controller="langgraph",
             )
             run_dir = root / "runs" / task_id
-            controller_result = read_json(run_dir / "reports" / "controller_result.json")
-            pipeline = read_json(run_dir / "reports" / "pipeline_results.json")
+            controller_path = run_dir / "reports" / "controller_result.json"
+            pipeline_path = run_dir / "reports" / "pipeline_results.json"
+            controller_result = (
+                read_json(controller_path) if controller_path.exists() else {}
+            )
+            if not pipeline_path.exists():
+                return self._result(
+                    case,
+                    "failed",
+                    "controller ended before pipeline report: status=%s reason=%s"
+                    % (
+                        controller_result.get("status", "missing"),
+                        controller_result.get("stop_reason", "missing"),
+                    ),
+                )
+            pipeline = read_json(pipeline_path)
             attempts = sorted((run_dir / "repairs").glob("attempt_*.json"))
             attempt = read_json(attempts[-1]) if attempts else {}
             verify = pipeline.get("verify") if isinstance(pipeline.get("verify"), dict) else {}

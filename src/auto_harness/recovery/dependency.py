@@ -18,6 +18,10 @@ from typing import Callable, Dict, List, Optional
 from auto_harness.recovery.download import reconcile_result
 from auto_harness.env.ownership import EnvironmentOwnership
 from auto_harness.env.postcheck import EnvironmentPostchecker
+from auto_harness.runtime.environment import ChildEnvironmentPolicy
+
+
+_CHILD_ENVIRONMENT_POLICY = ChildEnvironmentPolicy()
 
 
 def sha256_text(text: str) -> str:
@@ -37,6 +41,9 @@ def check_python_version(env_path, expected_version):
         result = subprocess.run(
             [str(python_bin), "--version"],
             capture_output=True, text=True, timeout=10, check=False,
+            env=_CHILD_ENVIRONMENT_POLICY.build_for_verify(
+                home_dir=Path(env_path).parent / ".auto-harness-reconcile-home",
+            ),
         )
         version_str = result.stdout.strip() + result.stderr.strip()
         # Extract version number (e.g., "Python 3.10.12" → "3.10")
@@ -64,6 +71,9 @@ def check_package_versions(env_path, package_specs):
         result = subprocess.run(
             [str(pip_bin), "list", "--format=json"],
             capture_output=True, text=True, timeout=30, check=False,
+            env=_CHILD_ENVIRONMENT_POLICY.build_for_verify(
+                home_dir=Path(env_path).parent / ".auto-harness-reconcile-home",
+            ),
         )
         if result.returncode != 0:
             return False, {}

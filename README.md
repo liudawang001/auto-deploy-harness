@@ -1,8 +1,8 @@
 # auto-deploy-harness
 
-auto-deploy-harness 是一个基于 LangGraph 编排、由 LLM 负责不确定性决策的自动部署与验证 Agent。
+auto-deploy-harness 是一个基于 LangGraph 编排的自动部署与证据化验证 Agent。
 
-**默认采用 LangGraph Plan-first 编排：** LLM 负责部署规划、候选选择、失败诊断与差异化 Replan；所有模型输出经 Schema 和 Policy Gate 裁决为受控动作，由确定性 stage executor 执行，最终成功仅由 Evidence Gate 裁决。Legacy deterministic pipeline 作为显式 baseline 和无 LLM 降级路径保留。
+**默认采用 LangGraph 编排：** `langgraph_planner_mode=auto` 在未配置真实 Provider（或使用 mock）时选择确定性 planner；配置真实 Provider 时选择 LLM Plan-first。显式 `llm` 模式不会静默降级。所有模型输出经 Schema 和 Policy Gate 裁决，由确定性 stage executor 执行，最终成功仅由 Evidence Gate 裁决。Legacy pipeline 只作为显式 baseline 保留。
 
 **恢复能力：** 结合 SQLite Checkpoint、Operation Journal 和资源 Reconciler，对下载、依赖环境、服务进程及 Docker 容器执行恢复前状态对账，避免 checkpoint resume 导致重复副作用。
 
@@ -56,21 +56,24 @@ auto-deploy-harness 是一个基于 LangGraph 编排、由 LLM 负责不确定�
 - Persistent queue：`queue submit/list/run` 提供本地持久化任务队列，入队与执行分离，前台 worker 显式消费任务；`queue run --max-jobs N` 会用线程池并发运行多个队列项，并通过原子 claim lock 防止多 worker 重复执行同一个 job，过期 lock 会按 TTL 回收。
 - Deployment package：`package --task-id` 会导出 `tar.gz` 审计产物包和 sidecar manifest，包含 task/state/events/reports/evidence/repairs，默认排除 workspace、模型缓存和日志。
 - Readiness audit：`readiness` 命令会生成机器可读完成度审计，区分本地已完成能力和真实联网/GPU/Docker/vLLM 外部验收门，不保存任何密钥值。
-- Agent 设计与评估文档：`docs/agent-architecture.md`、`docs/agent-safety-model.md`、`docs/agent-evaluation-report.md`。
-- Agent runtime 安全文档：`docs/agent-threat-model.md`、`docs/tool-policy.md`、`docs/prompt-injection-eval.md`。
-- 真实 Agent smoke 证据：`docs/evidence/live-agent-smoke-manifest.json` 记录了无密钥 Xunfei repair-mode live smoke manifest。
 - Benchmark fixtures：`tests/fixtures/benchmarks` 覆盖下载续传、缓存命中、并发下载、etag 缓存失效、缓存清理、按来源/repo/keep-list 清理、服务启动后退出、历史 artifact 干扰、Gradio API shape 变化、token 缺失、token report 提示、Gradio `/config` discovery、OpenAPI schema discovery、OpenAI-compatible model discovery/stream verify、浏览器 DOM trace、Streamlit 错误页面、HTTP 200 false-positive 防护、repair policy 拒绝、repair loop 限流、repair resume 阶段跳转、人工审批、checksum 失败、本地 E2E fixture matrix、memory promotion proposal/审批/回归绑定、LLM planner policy merge、LLM repair execute loop、LLM verify hint recovery、静态 dashboard 导出、只读 HTTP dashboard、持久化任务队列 dry-run 调度、队列并发 worker pool、队列 claim lock、stale claim lock recovery、GPU 探测调度、部署产物包导出、readiness audit、Docker backend plan/GPU/cache/log 元数据、GPU 包矩阵、verify progress、Git LFS progress parse、主流程 self-healing、conda/PyTorch backend、verified memory、skill evolution、agent runtime artifacts、tool registry policy 和 baseline vs agent comparison report。
 - 本地 E2E trace smoke：`tests/test_deployment_e2e.py` 会对 `tests/fixtures/e2e/http_trace_echo` 真实执行 `TaskRunner.deploy(... execute=True ...)`，完成本地 repo 复制、venv 安装、服务启动、HTTP trace verify、evidence/report/events 落盘和进程清理，证明部署闭环不是只停留在 dry-run 或 HTTP 200 健康检查。
-- 开发进度报告：`docs/progress.md`。
 
 ## 快速开始
 
 ```bash
-python3 -m auto_harness.cli init
-python3 -m auto_harness.cli deploy --repo https://github.com/example/demo --name demo --dry-run
-python3 -m auto_harness.cli status --task-id <task-id>
-python3 -m auto_harness.cli report --task-id <task-id>
+python -m pip install auto-deploy-harness
+auto-deploy-harness init
+auto-deploy-harness deploy --repo ./demo --name demo --dry-run
 ```
+
+`init` 会从安装包复制默认配置和八个内置 skill；已有文件默认保留，只有显式 `--force` 才覆盖。`dry-run` 的终态是 `completed_dry_run`，表示规划闭环完成，不代表服务已经部署成功。
+
+Planner 模式：`auto`（推荐，按 Provider 决定）、`deterministic`（固定无 LLM）、`llm`（必须有可用真实 Provider，失败关闭）。
+
+CLI 终态退出码：`0`=完成或完成 dry-run，`1`=停止/部分完成，`2`=参数或配置错误，`3`=执行失败，`130`=用户中断。
+
+本地 backend 会运行目标仓库代码，只适用于受信任仓库。对未知代码优先使用最小权限 Docker backend；依赖安装、源码修改、网络和服务启动均需显式授权。
 
 本地源码运行：
 
@@ -662,7 +665,7 @@ runs/<task-id>/reports/skill_effects.json
 memory/deployment_issues.jsonl
 ```
 
-该文件被 git 忽略，因为它可能包含部署日志或环境相关症状。Agent 会在阶段 `failed` 或 `uncertain` 时写入 memory，并在后续部署中按 stage/framework 检索相似问题。详细设计见 `docs/skill-memory-design.md`。
+该文件被 git 忽略，因为它可能包含部署日志或环境相关症状。Agent 会在阶段 `failed` 或 `uncertain` 时写入 memory，并在后续部署中按 stage/framework 检索相似问题。
 
 Memory promotion 会把高频 verified success 经验聚类为可审核的 skill 更新 proposal；apply 前必须审批，apply 后默认运行绑定 benchmark 子集并写出 regression report。
 
@@ -795,23 +798,7 @@ python3 -m playwright install chromium
 
 如果环境没有安装 Playwright，`browser_dom_probe` 会记录 `uncertain` 证据，不会阻塞已有 HTTP trace 或 artifact evidence。
 
-真实浏览器 backend smoke test 文档见：
-
-```text
-docs/playwright-smoke.md
-```
-
-仓库还提供手动触发的 GitHub Actions workflow：`.github/workflows/playwright-smoke.yml`。
-
-## 优化路线图
-
-面向真实开源模型自动部署的长期优化计划见：
-
-```text
-docs/optimization-roadmap.md
-```
-
-该文档覆盖模型下载与缓存、断点续传、资源预估、CUDA/PyTorch 环境求解、长任务状态机、自动诊断修复、增强 verify、安全沙箱和 benchmark 体系。
+仓库提供 GitHub Actions workflow：`.github/workflows/playwright-smoke.yml`。
 
 ## Dashboard
 
@@ -932,7 +919,7 @@ PYTHONPATH=src python3 -m auto_harness.cli agent-live-smoke --provider xunfei --
 - 崩溃 worker 遗留的过期 claim lock 可以按 TTL 回收并继续执行任务。
 - 队列可以根据 GPU 探测结果调度 `--require-gpu` 任务，无可用 slot 时保留 queued 并写入跳过原因。
 - 部署任务可以导出不包含 workspace 的审计产物包和 manifest。
-- Readiness audit 可以把本地完成度标记为 100%，并列出真实联网/GPU/Docker/vLLM 外部验收门。
+- Readiness audit 只有在测试、完整 benchmark、默认 CLI 和 wheel 安装 smoke 的证据均绑定当前提交且来自干净工作区时才通过；缺失、失败、篡改或过期证据都会失败关闭。
 - 服务进程启动后快速退出不能判定为启动成功。
 - token 缺失或 401 日志会被诊断为 `auth_required`。
 - token 缺失时 report 只展示 `HF_TOKEN` / `MODELSCOPE_TOKEN` 等变量名，不记录密钥值。
@@ -1094,5 +1081,8 @@ runs/<task-id>/reports/unified_metrics.json
 ```
 
 指标从 LLM trace、Policy、Repair、Recovery、Verify 和 Skill 工件生成，并保留
-`source_artifact`。详细设计和本地证据见
-`docs/agent-p1-recovery-sandbox-observability-report.md`。
+`source_artifact`。
+
+## 发布边界
+
+本地 release gates 不等同于真实基础设施验证。真实 Provider、联网长任务、Docker/GPU、vLLM 和大型模型仓库矩阵属于外部门禁；在对应环境的证据产生前，项目状态最多为 `ready_for_external_smoke`，不能宣称生产就绪。

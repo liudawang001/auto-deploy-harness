@@ -37,7 +37,7 @@ from auto_harness.graph.routes import (
     route_resume_stage,
 )
 from auto_harness.graph.state import DeploymentGraphState
-from auto_harness.models.base import write_json
+from auto_harness.models.base import read_json, write_json
 
 
 # Pipeline stages in execution order
@@ -427,19 +427,108 @@ class LangGraphController:
         """
         self.dependencies = dependencies
 
+    def _prepare_planner_selection(self, context, *, reuse_selection=False):
+        """Resolve and freeze planner selection before provider construction."""
+        from auto_harness.config import HarnessConfig
+        from auto_harness.controllers.validation import resolve_planner_mode
+
+        prebuilt = None
+        configured = getattr(self.dependencies, "runtime_config", None)
+        if configured is None:
+            # Compatibility for the small dependency fakes used by the graph
+            # contract tests. Production dependencies expose runtime_config.
+            prebuilt = self.dependencies.graph_deps()
+            configured = getattr(prebuilt, "runtime_config", None)
+
+        requested = getattr(configured, "langgraph_planner_mode", "auto")
+        if requested not in {"auto", "llm", "deterministic"}:
+            requested = "auto"
+        provider_name = getattr(configured, "agent_plan_first_provider", "mock")
+        if not isinstance(provider_name, str) or not provider_name.strip():
+            provider_name = "mock"
+        require_llm = getattr(configured, "langgraph_require_llm", False)
+        if not isinstance(require_llm, bool):
+            require_llm = False
+
+        reports_dir = Path(context.run_dir) / "reports"
+        selection_path = reports_dir / "controller_selection.json"
+        selection = None
+        if reuse_selection and selection_path.exists():
+            try:
+                candidate = read_json(selection_path)
+                if candidate.get("resolved_planner_mode") in {
+                    "llm", "deterministic"
+                }:
+                    selection = candidate
+            except (OSError, ValueError):
+                selection = None
+
+        if selection is None:
+            resolved = resolve_planner_mode(
+                requested_mode=requested,
+                provider_name=provider_name,
+                require_llm=require_llm,
+            )
+            selection = {
+                "controller": "langgraph",
+                "requested_planner_mode": requested,
+                "resolved_planner_mode": resolved,
+                "provider": provider_name,
+                "dry_run": bool(context.dry_run),
+                "reason": (
+                    "explicit_mode"
+                    if requested != "auto"
+                    else "real_provider_configured"
+                    if resolved == "llm" and not require_llm
+                    else "llm_required"
+                    if resolved == "llm"
+                    else "mock_or_missing_provider"
+                ),
+            }
+            write_json(selection_path, selection)
+            runner = getattr(self.dependencies, "runner", None)
+            store = getattr(runner, "store", None)
+            if store is not None:
+                store.events(context.task_id).append(
+                    "controller", "controller_selected", selection
+                )
+
+        effective_config = configured
+        if not hasattr(effective_config, "langgraph_allow_mock_in_execute"):
+            effective_config = HarnessConfig(
+                langgraph_planner_mode=selection["resolved_planner_mode"]
+            )
+        return effective_config, selection, prebuilt
+
+    def _build_graph_dependencies(self, selection, prebuilt=None):
+        """Construct provider-bearing graph dependencies after validation."""
+        import inspect
+
+        if prebuilt is not None:
+            return prebuilt
+        graph_deps_factory = self.dependencies.graph_deps
+        parameters = inspect.signature(graph_deps_factory).parameters
+        if "planner_mode" in parameters:
+            return graph_deps_factory(
+                planner_mode=selection["resolved_planner_mode"]
+            )
+        return graph_deps_factory()
+
     def run(self, context: DeploymentContext) -> DeploymentResult:
         """Run a new deployment from scratch using the StateGraph."""
         # Pre-run validation
         from auto_harness.controllers.validation import validate_controller_run
-        from auto_harness.config import HarnessConfig
 
-        config = self.dependencies.graph_deps().runtime_config
-        provider_name = getattr(config, "agent_provider", "mock") if config else "mock"
+        config, selection, prebuilt = self._prepare_planner_selection(
+            context
+        )
+        provider_name = selection["provider"]
         validation = validate_controller_run(
             controller="langgraph",
             dry_run=context.dry_run,
             provider_name=provider_name,
-            config=config if config else HarnessConfig(),
+            config=config,
+            planner_mode=selection["resolved_planner_mode"],
         )
         if not validation.allowed:
             reports_dir = Path(context.run_dir) / "reports"
@@ -455,9 +544,14 @@ class LangGraphController:
                 controller="langgraph",
             )
 
+        graph_dependencies = self._build_graph_dependencies(selection, prebuilt)
         initial_state = self.dependencies.initial_state(context)
+        initial_state["llm_required"] = (
+            selection["resolved_planner_mode"] == "llm"
+        )
+        initial_state["llm_provider"] = provider_name
         with SqliteCheckpointManager(Path(context.run_dir)) as checkpoint:
-            graph = build_graph(self.dependencies.graph_deps(), checkpoint.saver)
+            graph = build_graph(graph_dependencies, checkpoint.saver)
             output = graph.invoke(initial_state, config=checkpoint.config(context.task_id))
         return self.dependencies.to_controller_result(output)
 
@@ -496,8 +590,30 @@ class LangGraphController:
             "final_stop_reason": "",
         }
 
+        config, selection, prebuilt = self._prepare_planner_selection(
+            context, reuse_selection=True
+        )
+        from auto_harness.controllers.validation import validate_controller_run
+        validation = validate_controller_run(
+            controller="langgraph",
+            dry_run=context.dry_run,
+            provider_name=selection["provider"],
+            config=config,
+            planner_mode=selection["resolved_planner_mode"],
+        )
+        if not validation.allowed:
+            audit["final_stop_reason"] = validation.reason
+            self._write_resume_audit(run_dir, audit)
+            return DeploymentResult(
+                task_id=context.task_id,
+                status="stopped",
+                stop_reason=validation.reason,
+                controller="langgraph",
+            )
+
+        graph_dependencies = self._build_graph_dependencies(selection, prebuilt)
         with SqliteCheckpointManager(run_dir) as checkpoint:
-            graph = build_graph(self.dependencies.graph_deps(), checkpoint.saver)
+            graph = build_graph(graph_dependencies, checkpoint.saver)
             config = checkpoint.config(context.task_id)
             snapshot = graph.get_state(config)
 

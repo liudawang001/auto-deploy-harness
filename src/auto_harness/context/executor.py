@@ -493,11 +493,28 @@ class _DefaultContextConfig:
 
 def _default_sections(envelope: PromptEnvelope, profile_name: str):
     sections = []
-    for index, message in enumerate(envelope.messages):
+    if not any(getattr(message, "role", "") == "system" for message in envelope.messages):
+        # Application policy still frames a user-only provider request. Record
+        # that frame as metadata without changing the prompt sent to Provider.
+        sections.append(ContextSection(
+            name="instructions",
+            content="application_policy",
+            priority=ContextPriority.REQUIRED,
+            trust_level=TrustLevel.TRUSTED_INSTRUCTION,
+            content_type="policy_frame",
+            required=False,
+            source="application",
+            metadata={"profile": profile_name},
+        ))
+    task_index = 0
+    for message in envelope.messages:
         trusted = getattr(message, "role", "") == "system"
+        section_name = "instructions" if trusted else (
+            "task" if task_index == 0 else "task_%s" % task_index
+        )
         sections.append(
             ContextSection(
-                name="instructions" if trusted else "task_%s" % index,
+                name=section_name,
                 content=getattr(message, "content", ""),
                 priority=ContextPriority.REQUIRED
                 if trusted
@@ -511,6 +528,8 @@ def _default_sections(envelope: PromptEnvelope, profile_name: str):
                 metadata={"profile": profile_name},
             )
         )
+        if not trusted:
+            task_index += 1
     return sections
 
 
@@ -561,7 +580,13 @@ def _preserves_profile_requirements(
 ) -> bool:
     required = set(profile.required_sections or ())
     roles = {str(getattr(message, "role", "")) for message in selected}
-    if "instructions" in required and "system" not in roles:
+    sections = _sections_for_variant(envelope, variant)
+    section_names = {section.name for section in sections}
+    if (
+        "instructions" in required
+        and "system" not in roles
+        and "instructions" not in section_names
+    ):
         return False
     if "task" in required and not any(
         str(getattr(message, "role", "")) != "system"
@@ -569,8 +594,6 @@ def _preserves_profile_requirements(
         for message in selected
     ):
         return False
-    sections = _sections_for_variant(envelope, variant)
-    section_names = {section.name for section in sections}
     return all(
         name in {"instructions", "task"} or name in section_names
         for name in required

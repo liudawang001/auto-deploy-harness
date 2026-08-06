@@ -41,6 +41,7 @@ class TestLLMPlanFirstE2E(unittest.TestCase):
 
             # Configure with plan-first mode
             config = HarnessConfig(
+                default_controller="legacy",
                 runs_dir=str(root / "runs"),
                 skills_dir=str(root / "skills"),
                 memory_dir=str(root / "memory"),

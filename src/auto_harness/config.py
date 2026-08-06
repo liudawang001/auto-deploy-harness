@@ -1,5 +1,6 @@
 import json
 import os
+from importlib import resources
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -128,7 +129,7 @@ class HarnessConfig:
     agent_plan_first_require_grounding: bool = True
     agent_plan_first_allow_external_network: bool = False
     default_controller: str = "langgraph"
-    langgraph_require_llm: bool = True
+    langgraph_require_llm: bool = False
     langgraph_allow_mock_in_dry_run: bool = True
     langgraph_allow_mock_in_execute: bool = False
     langgraph_enable_diagnose: bool = True
@@ -139,7 +140,7 @@ class HarnessConfig:
     langgraph_max_diagnoses: int = 2
     langgraph_max_repairs: int = 2
     langgraph_max_same_failure: int = 2
-    langgraph_planner_mode: str = "llm"  # llm | deterministic
+    langgraph_planner_mode: str = "auto"  # auto | llm | deterministic
 
     def __post_init__(self) -> None:
         if self.allowed_commands is None:
@@ -175,9 +176,10 @@ class HarnessConfig:
             raise ValueError("langgraph_max_repairs must be non-negative, got: %s" % self.langgraph_max_repairs)
         if self.langgraph_max_same_failure < 0:
             raise ValueError("langgraph_max_same_failure must be non-negative, got: %s" % self.langgraph_max_same_failure)
-        if self.langgraph_planner_mode not in ("llm", "deterministic"):
+        if self.langgraph_planner_mode not in ("auto", "llm", "deterministic"):
             raise ValueError(
-                "langgraph_planner_mode must be 'llm' or 'deterministic', got: %s" % self.langgraph_planner_mode
+                "langgraph_planner_mode must be 'auto', 'llm' or "
+                "'deterministic', got: %s" % self.langgraph_planner_mode
             )
         if self.agent_context_mode not in {"observe", "shadow", "enforce"}:
             raise ValueError(
@@ -284,12 +286,19 @@ class HarnessConfig:
     @classmethod
     def load(cls, path: str = None) -> "HarnessConfig":
         config_path = Path(path or os.environ.get("AUTO_HARNESS_CONFIG", "configs/default.json"))
-        if not config_path.exists():
+        if config_path.exists():
+            with config_path.open("r", encoding="utf-8") as f:
+                data = json.load(f)
+        elif path or os.environ.get("AUTO_HARNESS_CONFIG"):
             return cls(
                 use_agent_analyzer=os.environ.get("AUTO_HARNESS_USE_AGENT_ANALYZER") == "1"
             )
-        with config_path.open("r", encoding="utf-8") as f:
-            data = json.load(f)
+        else:
+            data = json.loads(
+                resources.files("auto_harness.resources")
+                .joinpath("default.json")
+                .read_text(encoding="utf-8")
+            )
         known: Dict[str, Any] = {}
         for key in cls.__dataclass_fields__:
             if key in data:
@@ -407,7 +416,7 @@ def _validate_deepseek_config(provider_name: str, settings: dict) -> None:
         parsed = urlparse(str(endpoint))
         if parsed.scheme.lower() != "https" or not parsed.netloc:
             raise ValueError(
-                "provider_configs.deepseek.%s must be an absolute HTTPS URL, got: %s"
+                "provider_configs.deepseek.%s must be an absolute https URL, got: %s"
                 % (endpoint_key, endpoint)
             )
 

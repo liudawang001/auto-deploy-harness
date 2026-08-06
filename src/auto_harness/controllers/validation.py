@@ -13,7 +13,28 @@ class ControllerValidation:
     reason: str = ""
 
 
-def validate_controller_run(*, controller, dry_run, provider_name, config):
+def resolve_planner_mode(*, requested_mode, provider_name, require_llm=False):
+    """Resolve ``auto`` before graph construction or any stage side effect.
+
+    ``auto`` selects the deterministic planner for the built-in mock (or an
+    empty provider name), and the LLM planner for an explicitly configured
+    real provider.  ``require_llm`` keeps a fail-closed deployment available
+    for operators that deliberately require an LLM.
+    """
+    requested = str(requested_mode or "auto").strip().lower()
+    if requested not in {"auto", "llm", "deterministic"}:
+        raise ValueError("unsupported langgraph planner mode: %s" % requested)
+    if requested != "auto":
+        return requested
+    provider = str(provider_name or "").strip().lower()
+    if require_llm or (provider and provider != "mock"):
+        return "llm"
+    return "deterministic"
+
+
+def validate_controller_run(
+    *, controller, dry_run, provider_name, config, planner_mode=None
+):
     """Validate that the controller can run with the given configuration.
 
     Args:
@@ -29,8 +50,12 @@ def validate_controller_run(*, controller, dry_run, provider_name, config):
     if controller != "langgraph":
         return ControllerValidation(True)
 
-    if not config.langgraph_require_llm:
-        # LLM not required for langgraph — unusual but allowed
+    resolved_mode = planner_mode or resolve_planner_mode(
+        requested_mode=getattr(config, "langgraph_planner_mode", "auto"),
+        provider_name=provider_name,
+        require_llm=getattr(config, "langgraph_require_llm", False),
+    )
+    if resolved_mode == "deterministic":
         return ControllerValidation(True)
 
     if provider_name == "mock" and not dry_run and not config.langgraph_allow_mock_in_execute:

@@ -6,15 +6,16 @@ from typing import Dict, List
 from auto_harness.models.result import StageResult
 from auto_harness.env import CondaBackend
 from auto_harness.diagnostics import LogClassifier
-from auto_harness.runtime import DockerSandboxBackend
+from auto_harness.runtime import ChildEnvironmentPolicy, DockerSandboxBackend
 from auto_harness.utils.commands import is_allowed_command
 from auto_harness.utils.ports import is_port_open
 from auto_harness.utils.files import short_hash
 
 
 class RunnerModule:
-    def __init__(self, log_classifier: LogClassifier = None) -> None:
+    def __init__(self, log_classifier: LogClassifier = None, child_environment_policy=None) -> None:
         self.log_classifier = log_classifier or LogClassifier()
+        self.child_environment_policy = child_environment_policy or ChildEnvironmentPolicy()
 
     def run(
         self,
@@ -85,10 +86,14 @@ class RunnerModule:
         logs_dir = repo_dir.parent.parent / "logs"
         logs_dir.mkdir(parents=True, exist_ok=True)
         log_path = logs_dir / "runner.log"
+        child_env = self.child_environment_policy.build_for_service(
+            home_dir=logs_dir / "runtime_home",
+        )
         log_file = log_path.open("a", encoding="utf-8")
         proc = subprocess.Popen(
             effective_candidate["cmd"],
             cwd=str(repo_dir),
+            env=child_env,
             stdout=log_file,
             stderr=subprocess.STDOUT,
             text=True,

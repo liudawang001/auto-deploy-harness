@@ -93,6 +93,11 @@ class TestRouteAfterVerify:
         state = {"verify_status": "failed", "replan_count": 0, "max_replans": 2}
         assert route_after_verify(state) == "observe_failure"
 
+    @pytest.mark.parametrize("status", ["uncertain", "failed", ""])
+    def test_dry_run_non_pass_goes_to_report(self, status):
+        state = {"verify_status": status, "dry_run": True}
+        assert route_after_verify(state) == "report"
+
     def test_uncertain_goes_to_observe_failure(self):
         """Uncertain verify routes to observe_failure for diagnosis."""
         state = {"verify_status": "uncertain", "replan_count": 0, "max_replans": 1}

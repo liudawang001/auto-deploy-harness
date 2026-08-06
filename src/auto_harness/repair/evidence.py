@@ -50,13 +50,11 @@ def compute_fresh_trace(
         after_trace: Trace ID captured after repair.
 
     Returns:
-        True if before and after traces exist and differ.
+        True when a post-repair trace exists and it is not a reused pre-repair
+        trace. A missing pre-repair trace is expected when the service failed
+        before verification; the first trace produced after repair is fresh.
     """
-    return bool(
-        before_trace
-        and after_trace
-        and before_trace != after_trace
-    )
+    return bool(after_trace and (not before_trace or before_trace != after_trace))
 
 
 def compute_repair_verified(
@@ -111,6 +109,7 @@ def build_repair_attempt(
     verification_trace_id: str = "",
     fresh_trace: bool = False,
     repair_verified: bool = False,
+    resume_executed: bool = False,
 ) -> Dict[str, Any]:
     """Build a RepairAttempt schema dict.
 
@@ -150,4 +149,5 @@ def build_repair_attempt(
         "verification_trace_id": verification_trace_id,
         "fresh_trace": fresh_trace,
         "repair_verified": repair_verified,
+        "resume_executed": resume_executed,
     }

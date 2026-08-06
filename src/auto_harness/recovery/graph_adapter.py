@@ -241,6 +241,29 @@ class GraphRecoveryAdapter:
             )
 
         if status == "failed":
+            repair_apply = state.get("repair_apply_result") or {}
+            authorized_retry = (
+                bool(state.get("repair_resume_executed"))
+                and int(state.get("repair_count", 0)) > 0
+                and state.get("failed_stage") == stage
+                and int(repair_apply.get("effective_action_count", 0)) > 0
+                and not existing.get("observed_resource")
+            )
+            if authorized_retry:
+                retryable = journal.transition(
+                    operation_id,
+                    "retryable",
+                    reconcile_result={
+                        "decision": "retry",
+                        "reason": "effective_repair_authorized_retry",
+                    },
+                )
+                return RecoveryDecision(
+                    decision="retry",
+                    operation=retryable,
+                    reconcile_result=retryable.get("reconcile_result", {}),
+                    hydrated_stage_result={},
+                )
             # Fail-closed: failed operations require operator decision.
             # Auto-retry is not allowed without explicit retry policy.
             return RecoveryDecision(

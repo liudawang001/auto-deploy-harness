@@ -170,6 +170,33 @@ class TestRecoveryGateNode:
         assert result["recovery_decision"] == "reuse"
         assert result["recovery_skip_stage"] is True
 
+    def test_retry_clears_prior_stage_reuse_flag(self):
+        """A reused env stage must not skip a later repaired runner stage."""
+        from auto_harness.graph.nodes import make_recovery_gate_node
+
+        mock_adapter = MagicMock()
+        mock_adapter.prepare_or_reconcile.return_value = RecoveryDecision(
+            decision="retry",
+            operation={"operation_id": "op2"},
+            reconcile_result={"decision": "retry"},
+            hydrated_stage_result={},
+        )
+
+        class MockDeps:
+            recovery_adapter = mock_adapter
+            runtime_config = None
+
+        result = make_recovery_gate_node("runner", MockDeps())({
+            "run_dir": "/tmp",
+            "task_id": "t1",
+            "repo_dir": "/tmp/repo",
+            "runtime_policy": {},
+            "compiled_analysis": {},
+            "recovery_skip_stage": True,
+        })
+        assert result["recovery_decision"] == "retry"
+        assert result["recovery_skip_stage"] is False
+
     def test_conflict_stops(self):
         """conflict 决策停止。"""
         from auto_harness.graph.nodes import make_recovery_gate_node
@@ -652,3 +679,29 @@ class TestReconcileDecisionApplied:
         decision = adapter.prepare_or_reconcile(state, "env_deploy")
         assert decision.decision == "approval"
         assert decision.stop_reason == "failed_operation_requires_operator_decision"
+
+    def test_effective_repair_authorizes_exact_failed_stage_retry(self, tmp_path):
+        """A policy-applied effective repair may retry its exact failed stage."""
+        from auto_harness.recovery.journal import OperationJournal
+
+        adapter = GraphRecoveryAdapter()
+        state = {
+            "task_id": "t1",
+            "run_dir": str(tmp_path),
+            "repo_dir": str(tmp_path / "workspace" / "repo"),
+            "runtime_policy": {},
+            "compiled_analysis": {},
+            "failed_stage": "runner",
+            "repair_count": 1,
+            "repair_resume_executed": True,
+            "repair_apply_result": {"effective_action_count": 1},
+        }
+        op = adapter.build_operation(state, "runner")
+        journal = OperationJournal(tmp_path)
+        journal.begin(op)
+        journal.transition(op["operation_id"], "failed", error="early_exit")
+
+        decision = adapter.prepare_or_reconcile(state, "runner")
+
+        assert decision.decision == "retry"
+        assert journal.load(op["operation_id"])["status"] == "retryable"

@@ -17,13 +17,12 @@ Allowed capability statuses:
 Prohibited: production_ready (never allowed)
 """
 import json
-import os
-import re
 import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from auto_harness.models.base import write_json
+from auto_harness.release_evidence import validate_evidence
 from auto_harness.utils.time import utc_now_iso
 
 
@@ -35,36 +34,21 @@ class ReadinessAuditor:
 
     REQUIRED_FILES = [
         "README.md",
-        "docs/progress.md",
-        "docs/optimization-roadmap.md",
-        "docs/llm-agent-upgrade-execution-plan.md",
-        "src/auto_harness/agent/schemas.py",
-        "src/auto_harness/agent/engine.py",
-        "src/auto_harness/agent/policy.py",
-        "src/auto_harness/agent/traces.py",
-        "src/auto_harness/agent/safety.py",
-        "src/auto_harness/agent/metrics.py",
-        "src/auto_harness/agent/diagnoser.py",
-        "src/auto_harness/agent/verify_planner.py",
-        "src/auto_harness/observability/metrics.py",
-        "src/auto_harness/recovery/faults.py",
-        "src/auto_harness/live_smoke.py",
-        "src/auto_harness/orchestrator.py",
-        "src/auto_harness/modules/verify.py",
-        "src/auto_harness/modules/model_prepare.py",
-        "src/auto_harness/modules/env_solve.py",
-        "src/auto_harness/runtime/docker_smoke.py",
-        "src/auto_harness/runtime/gpu.py",
-        "src/auto_harness/preflight/service.py",
-        "src/auto_harness/preflight/compatibility.py",
-        "src/auto_harness/preflight/policy.py",
-        "src/auto_harness/env/ownership.py",
-        "src/auto_harness/env/postcheck.py",
-        "src/auto_harness/queue.py",
-        "src/auto_harness/dashboard.py",
-        "src/auto_harness/artifacts.py",
+        "LICENSE",
+        "SECURITY.md",
+        "CONTRIBUTING.md",
+        "CHANGELOG.md",
+        "pyproject.toml",
+        ".github/workflows/ci.yml",
         "tests/fixtures/benchmarks/manifest.json",
     ]
+
+    REQUIRED_EVIDENCE = {
+        "test_summary": "reports/test-summary.json",
+        "benchmark": "reports/benchmark.json",
+        "package_smoke": "reports/package-smoke.json",
+        "default_cli_smoke": "reports/default-cli-smoke.json",
+    }
 
     REQUIRED_BENCHMARK_CASES = [
         "model_download_resume",
@@ -140,14 +124,14 @@ class ReadinessAuditor:
         local_gates = []
         local_gates.extend(self._file_gates(root))
         local_gates.append(self._benchmark_manifest_gate(root))
-        if benchmark_report:
+        local_gates.extend(self._evidence_gates(root))
+        if benchmark_report and Path(benchmark_report) != root / self.REQUIRED_EVIDENCE["benchmark"]:
             local_gates.append(self._benchmark_report_gate(Path(benchmark_report)))
 
         failed = [gate for gate in local_gates if gate["status"] != "passed"]
         report = {
             "status": "ready_for_external_smoke" if not failed else "incomplete",
             "local_readiness_percent": 100 if not failed else self._completion_percent(local_gates),
-            "project_progress_percent": self._progress_percent(root / "docs" / "progress.md"),
             "local_gates": local_gates,
             "external_gates": list(self.EXTERNAL_GATES),
             "summary": {
@@ -205,22 +189,36 @@ class ReadinessAuditor:
             "failed_case_ids": failed,
         }
 
+    def _evidence_gates(self, root: Path) -> List[Dict]:
+        gates: List[Dict] = []
+        for gate_id, relative_path in self.REQUIRED_EVIDENCE.items():
+            path = root / relative_path
+            if not path.exists():
+                gates.append({
+                    "id": "evidence:%s" % gate_id,
+                    "status": "missing",
+                    "evidence": str(path),
+                })
+                continue
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                errors = validate_evidence(payload, root)
+            except (OSError, ValueError, json.JSONDecodeError) as exc:
+                errors = ["invalid evidence JSON: %s" % exc]
+            gates.append({
+                "id": "evidence:%s" % gate_id,
+                "status": "passed" if not errors else "failed",
+                "evidence": str(path),
+                "errors": errors,
+            })
+        return gates
+
     def _manifest_case_count(self, root: Path) -> int:
         manifest_path = root / "tests" / "fixtures" / "benchmarks" / "manifest.json"
         if not manifest_path.exists():
             return 0
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         return len(manifest.get("cases", []))
-
-    def _progress_percent(self, progress_path: Path) -> Optional[int]:
-        if not progress_path.exists():
-            return None
-        text = progress_path.read_text(encoding="utf-8")
-        matches = re.findall(r"进度(?:约为|达到)?\s*\*\*(\d+)%\*\*", text)
-        if matches:
-            return int(matches[-1])
-        matches = re.findall(r"\*\*(\d+)%\*\*", text)
-        return int(matches[-1]) if matches else None
 
     def _completion_percent(self, gates: List[Dict]) -> int:
         if not gates:

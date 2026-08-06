@@ -395,7 +395,7 @@
     {
       "id": "readiness_audit_report",
       "purpose": "验证项目完成度审计能区分本地已完成能力和外部真实验收门槛",
-      "expected_signal": "readiness report marks local readiness 100% and lists external smoke gates",
+      "expected_signal": "readiness reaches 100% only with clean commit-bound evidence and lists external smoke gates",
       "case_id": "readiness_audit_report",
       "test_level": "unit_simulation",
       "requires": []

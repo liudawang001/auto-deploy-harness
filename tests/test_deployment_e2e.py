@@ -34,6 +34,7 @@ class TestDeploymentE2E(unittest.TestCase):
                 allowed_commands=["python", "python3", "pip"],
                 env_backend="venv",
                 agent_auto_resume_after_repair=False,
+                default_controller="legacy",
             )
             runner = TaskRunner(config)
             with warnings.catch_warnings():

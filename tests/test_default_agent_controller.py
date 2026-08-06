@@ -15,7 +15,11 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from auto_harness.config import HarnessConfig
-from auto_harness.controllers.validation import ControllerValidation, validate_controller_run
+from auto_harness.controllers.validation import (
+    ControllerValidation,
+    resolve_planner_mode,
+    validate_controller_run,
+)
 from auto_harness.models.task import ProjectSpec, RuntimePolicy, TaskSpec
 from auto_harness.state.store import StateStore
 
@@ -110,9 +114,17 @@ class TestControllerValidation:
         )
         assert result.allowed is True
 
-    def test_langgraph_execute_mock_rejected(self):
-        """execute + mock + langgraph 被拒绝。"""
+    def test_langgraph_execute_mock_uses_deterministic_default(self):
+        """默认 auto + mock 在 execute 中选择确定性 planner。"""
         config = HarnessConfig()
+        result = validate_controller_run(
+            controller="langgraph", dry_run=False, provider_name="mock", config=config,
+        )
+        assert result.allowed is True
+
+    def test_explicit_llm_execute_mock_rejected(self):
+        """显式 llm + mock + execute 仍然 fail closed。"""
+        config = HarnessConfig(langgraph_planner_mode="llm")
         result = validate_controller_run(
             controller="langgraph", dry_run=False, provider_name="mock", config=config,
         )
@@ -145,7 +157,10 @@ class TestControllerValidation:
 
     def test_langgraph_dry_run_mock_disabled(self):
         """langgraph_allow_mock_in_dry_run=False 时拒绝。"""
-        config = HarnessConfig(langgraph_allow_mock_in_dry_run=False)
+        config = HarnessConfig(
+            langgraph_planner_mode="llm",
+            langgraph_allow_mock_in_dry_run=False,
+        )
         result = validate_controller_run(
             controller="langgraph", dry_run=True, provider_name="mock", config=config,
         )
@@ -167,7 +182,7 @@ class TestNoSilentFallback:
         验证方式：当 validate_controller_run 拒绝时，
         调用者不应 fallback 到 legacy。
         """
-        config = HarnessConfig()
+        config = HarnessConfig(langgraph_planner_mode="llm")
         result = validate_controller_run(
             controller="langgraph", dry_run=False, provider_name="mock", config=config,
         )
@@ -228,6 +243,32 @@ class TestLangGraphConfigValidation:
         assert config.langgraph_max_repairs == 0
         assert config.langgraph_max_same_failure == 0
 
+    def test_default_planner_mode_is_auto_without_required_llm(self):
+        config = HarnessConfig()
+        assert config.langgraph_planner_mode == "auto"
+        assert config.langgraph_require_llm is False
+
+    def test_auto_mock_resolves_deterministic(self):
+        assert resolve_planner_mode(
+            requested_mode="auto", provider_name="mock"
+        ) == "deterministic"
+
+    def test_auto_real_provider_resolves_llm(self):
+        assert resolve_planner_mode(
+            requested_mode="auto", provider_name="deepseek"
+        ) == "llm"
+
+    def test_explicit_planner_mode_never_falls_back(self):
+        assert resolve_planner_mode(
+            requested_mode="llm", provider_name="mock"
+        ) == "llm"
+
+    def test_invalid_planner_mode_raises(self):
+        with pytest.raises(ValueError, match="unsupported"):
+            resolve_planner_mode(
+                requested_mode="invalid", provider_name="mock"
+            )
+
 
 class TestPyprojectDependencies:
     """langgraph 依赖应在核心依赖中。"""
@@ -241,5 +282,5 @@ class TestPyprojectDependencies:
         match = re.search(r'dependencies\s*=\s*\[([^\]]*)\]', pyproject)
         assert match, "dependencies list not found in pyproject.toml"
         deps = match.group(1)
-        assert '"langgraph"' in deps
-        assert '"langgraph-checkpoint-sqlite"' in deps
+        assert re.search(r'"langgraph(?:[<>=!~].*)?"', deps)
+        assert re.search(r'"langgraph-checkpoint-sqlite(?:[<>=!~].*)?"', deps)

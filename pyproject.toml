@@ -1,23 +1,39 @@
 [build-system]
-requires = ["setuptools>=61.0"]
+requires = ["setuptools>=77,<83"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "auto-deploy-harness"
-version = "0.1.0"
+version = "0.2.0"
 description = "A Python-controlled agent harness for deploying and verifying AI demo projects."
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 authors = [
   { name = "liudawang001" }
 ]
 dependencies = [
-  "langgraph",
-  "langgraph-checkpoint-sqlite",
+  "langgraph>=1.0,<2",
+  "langgraph-checkpoint-sqlite>=3,<4",
+]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
 ]
 
+[project.urls]
+Repository = "https://github.com/liudawang001/auto-deploy-harness"
+Issues = "https://github.com/liudawang001/auto-deploy-harness/issues"
+
 [project.optional-dependencies]
-langgraph = []  # Now in core deps; kept as empty compat group
+test = ["pytest>=8,<10"]
+browser = ["playwright>=1.45,<2"]
+dev = ["build>=1.2,<2", "pip-audit>=2.7,<3", "ruff>=0.8,<1", "pytest>=8,<10"]
 
 [project.scripts]
 auto-deploy-harness = "auto_harness.cli:main"
@@ -25,6 +41,9 @@ auto-harness = "auto_harness.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"auto_harness.resources" = ["default.json", "skills/*/SKILL.md"]
 
 [tool.pytest.ini_options]
 pythonpath = [".", "src"]

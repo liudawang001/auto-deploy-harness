@@ -7,6 +7,7 @@ from typing import Dict, List
 
 from auto_harness.preflight.conda import _completed
 from auto_harness.preflight.schemas import EnvironmentPostcheckEvidence
+from auto_harness.runtime.environment import ChildEnvironmentPolicy
 
 
 PROBE_SCRIPT = (
@@ -28,6 +29,8 @@ PROBE_SCRIPT = (
 class EnvironmentPostchecker:
     def __init__(self, command_runner=None, timeout_seconds: int = 30) -> None:
         self.command_runner = command_runner or subprocess.run
+        self._uses_default_command_runner = command_runner is None
+        self.child_environment_policy = ChildEnvironmentPolicy()
         self.timeout_seconds = timeout_seconds
 
     def check(
@@ -44,13 +47,17 @@ class EnvironmentPostchecker:
         script = PROBE_SCRIPT % (names, bool(gpu_required))
         command = [tool, "run", "-p", str(prefix), "python", "-c", script]
         try:
-            result = self.command_runner(
-                command,
-                capture_output=True,
-                text=True,
-                timeout=self.timeout_seconds,
-                check=False,
-            )
+            kwargs = {
+                "capture_output": True,
+                "text": True,
+                "timeout": self.timeout_seconds,
+                "check": False,
+            }
+            if self._uses_default_command_runner:
+                kwargs["env"] = self.child_environment_policy.build_for_verify(
+                    home_dir=prefix.parent / ".auto-harness-postcheck-home",
+                )
+            result = self.command_runner(command, **kwargs)
         except subprocess.TimeoutExpired:
             return EnvironmentPostcheckEvidence(
                 prefix=str(prefix), spec_hash=spec_hash, errors=["postcheck_timeout"]
