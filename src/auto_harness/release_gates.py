@@ -2,8 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import contextlib
-import io
 import json
 import os
 import re
@@ -80,16 +78,21 @@ def run_local_gates(project_root: Path, skip_tests: bool = False) -> Dict[str, o
 
 def _package_smoke(root: Path) -> Dict[str, object]:
     command = [
-        sys.executable, "-m", "pip", "wheel", ".", "--no-deps",
-        "--no-build-isolation",
+        sys.executable, "-m", "build", "--wheel", "--sdist",
     ]
     with tempfile.TemporaryDirectory(prefix="auto-harness-wheel-") as tmp:
         temp = Path(tmp)
-        build = _run(command + ["--wheel-dir", str(temp / "dist")], root)
+        build = _run(
+            command + ["--outdir", str(temp / "dist"), str(root)],
+            temp,
+        )
         wheels = list((temp / "dist").glob("*.whl"))
+        sdists = list((temp / "dist").glob("*.tar.gz"))
         errors: List[str] = []
         if build.returncode != 0 or len(wheels) != 1:
             errors.append("wheel build failed")
+        if build.returncode != 0 or len(sdists) != 1:
+            errors.append("sdist build failed")
         members: List[str] = []
         sdist_members: List[str] = []
         if wheels:
@@ -102,15 +105,9 @@ def _package_smoke(root: Path) -> Dict[str, object]:
             if any(name.startswith("docs/") or "/docs/" in name for name in members):
                 errors.append("private docs leaked into wheel")
         try:
-            from setuptools import build_meta
-            previous_cwd = Path.cwd()
-            os.chdir(root)
-            try:
-                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-                    sdist_name = build_meta.build_sdist(str(temp / "dist"))
-            finally:
-                os.chdir(previous_cwd)
-            with tarfile.open(temp / "dist" / sdist_name, "r:gz") as archive:
+            if len(sdists) != 1:
+                raise OSError("expected exactly one sdist")
+            with tarfile.open(sdists[0], "r:gz") as archive:
                 sdist_members = archive.getnames()
             if any("/docs/" in name or name.startswith("docs/") for name in sdist_members):
                 errors.append("private docs leaked into sdist")
