@@ -267,9 +267,13 @@ def test_postcheck_requires_prefix_python_packages_and_gpu(tmp_path):
 def test_postcheck_fails_closed_for_invalid_constraints_and_supports_python_ranges():
     checker = EnvironmentPostchecker()
     assert checker._package_satisfied(
-        "numpy>=99;python_version>='3.12'",
+        "numpy>=99;python_version>='3.0'",
         {"numpy": "1.0"},
     ) is False
+    assert checker._package_satisfied(
+        "numpy>=99;python_version<'3.0'",
+        {"numpy": "1.0"},
+    ) is True
     assert checker._python_satisfied("3.11.9", ">=3.10,<3.12") is True
 
 
