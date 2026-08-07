@@ -1649,6 +1649,9 @@ class BenchmarkRunner:
                 model_cache_dir=str(root / "model_cache"),
                 task_queue_dir=str(root / "queue"),
                 default_controller="legacy",
+                agent_provider="mock",
+                agent_plan_first_provider="mock",
+                memory_evolution_provider="mock",
             )
             queue = DeploymentQueue(config.task_queue_path, TaskRunner(config))
             submitted = queue.submit(str(repo), name="queue-demo", dry_run=True)

@@ -30,6 +30,27 @@ from auto_harness.runtime import DockerSmokeChecker
 from auto_harness.utils.time import compact_timestamp
 
 
+def _positive_int_arg(value: str) -> int:
+    parsed = int(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("value must be a positive integer")
+    return parsed
+
+
+def _add_llm_runtime_arguments(parser) -> None:
+    parser.add_argument("--model", default=None)
+    parser.add_argument(
+        "--context-window-tokens",
+        type=_positive_int_arg,
+        default=None,
+    )
+    parser.add_argument(
+        "--max-output-tokens",
+        type=_positive_int_arg,
+        default=None,
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="auto-deploy-harness")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -78,6 +99,7 @@ def build_parser() -> argparse.ArgumentParser:
     deploy.add_argument("--agent-plan-first-mode", choices=["planner", "gated_actor"], default=None)
     deploy.add_argument("--agent-plan-first-max-replans", type=int, default=None)
     deploy.add_argument("--controller", choices=["legacy", "langgraph"], default=None)
+    _add_llm_runtime_arguments(deploy)
 
     resume = sub.add_parser("resume", help="resume an existing task")
     resume.add_argument("--task-id", required=True)
@@ -100,6 +122,7 @@ def build_parser() -> argparse.ArgumentParser:
     resume.add_argument("--docker-gpus", default=None)
     resume.add_argument("--docker-model-cache-dir", default=None)
     resume.add_argument("--controller", choices=["legacy", "langgraph"], default=None)
+    _add_llm_runtime_arguments(resume)
 
     status = sub.add_parser("status", help="show task status")
     status.add_argument("--task-id", required=True)
@@ -155,6 +178,7 @@ def build_parser() -> argparse.ArgumentParser:
     memory_evolve.add_argument("--reason", default="")
     memory_evolve.add_argument("--reviewer", default="operator")
     memory_evolve.add_argument("--note", default="")
+    _add_llm_runtime_arguments(memory_evolve)
 
     skill_rollback = sub.add_parser("skill-rollback", help="rollback a promoted skill candidate")
     skill_rollback.add_argument("--candidate", required=True)
@@ -174,9 +198,10 @@ def build_parser() -> argparse.ArgumentParser:
     evidence_package.add_argument("--run-dir", default="", help="explicit run directory for --task-id")
 
     llm = sub.add_parser("llm-test", help="test LLM provider")
-    llm.add_argument("--provider", default="mock")
+    llm.add_argument("--provider", default=None)
     llm.add_argument("--interactive-provider", action="store_true", default=False, help="securely prompt for a temporary custom LLM endpoint and API key")
     llm.add_argument("--prompt", default="Return a JSON object with status ok.")
+    _add_llm_runtime_arguments(llm)
 
     benchmark = sub.add_parser("benchmark", help="run local benchmark fixtures")
     benchmark.add_argument("--manifest", default="tests/fixtures/benchmarks/manifest.json")
@@ -220,6 +245,7 @@ def build_parser() -> argparse.ArgumentParser:
     queue_submit.add_argument("--skip-clone", action="store_true", default=False)
     queue_submit.add_argument("--require-gpu", action="store_true", default=False)
     queue_submit.add_argument("--priority", type=int, default=100)
+    _add_llm_runtime_arguments(queue_submit)
     queue_list = queue_sub.add_parser("list", help="list queued deployment jobs")
     queue_list.add_argument("--status", default="")
     queue_run = queue_sub.add_parser("run", help="run queued jobs in this foreground process")
@@ -233,12 +259,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     agent_live_smoke = sub.add_parser("agent-live-smoke", help="run optional live LLM agent smoke and write redacted manifest")
     agent_live_smoke.add_argument("--repo", default="tests/fixtures/live/llm_repair_missing_dependency")
-    agent_live_smoke.add_argument("--provider", default="xunfei")
+    agent_live_smoke.add_argument("--provider", default=None)
     agent_live_smoke.add_argument("--interactive-provider", action="store_true", default=False, help="securely prompt for a temporary custom LLM endpoint and API key")
     agent_live_smoke.add_argument("--execute", action="store_true", default=False)
     agent_live_smoke.add_argument("--output", default="")
     agent_live_smoke.add_argument("--disable-analyze-planner", action="store_true", default=False)
     agent_live_smoke.add_argument("--resume-attempts", type=int, default=1)
+    _add_llm_runtime_arguments(agent_live_smoke)
 
     docker_smoke = sub.add_parser("docker-smoke", help="plan or probe Docker/GPU runtime readiness")
     docker_smoke.add_argument("--probe", action="store_true", default=False)
@@ -355,7 +382,7 @@ def _apply_cli_overrides(config: HarnessConfig, args) -> None:
 
 def _interactive_default_name(args, config: HarnessConfig) -> str:
     if args.command in {"llm-test", "memory-evolve", "agent-live-smoke"}:
-        current = getattr(args, "provider", "")
+        current = getattr(args, "provider", "") or config.agent_provider
     else:
         current = getattr(args, "agent_provider", "")
     if not current or current in {"mock", "xunfei"}:
@@ -393,16 +420,18 @@ def _providers_for_command(config: HarnessConfig, args):
             (config.agent_plan_first_provider, "plan_first"),
         ]
     if args.command == "llm-test":
-        return [(args.provider, "llm_test")]
+        return [(args.provider or config.agent_provider, "llm_test")]
     if args.command == "memory-evolve":
-        return [
-            (
-                args.provider or config.memory_evolution_provider,
-                "memory_evolution",
-            )
-        ]
+        if getattr(args, "propose", False):
+            return [
+                (
+                    args.provider or config.memory_evolution_provider,
+                    "memory_evolution",
+                )
+            ]
+        return []
     if args.command == "agent-live-smoke":
-        return [(args.provider, "live_smoke")]
+        return [(args.provider or config.agent_provider, "live_smoke")]
     return []
 
 
@@ -486,8 +515,84 @@ def main(argv=None) -> int:
             )
         )
 
+    # Resolve effective providers for this command
+    command_providers = _providers_for_command(config, args)
+
+    # Check mixed-provider + uniform override conflict (23.2)
+    uniform_override_present = any(
+        getattr(args, key, None) is not None
+        for key in ("model", "context_window_tokens", "max_output_tokens")
+    )
+    if uniform_override_present and len(command_providers) > 1:
+        unique_providers = {p for p, _ in command_providers}
+        if len(unique_providers) > 1:
+            print(
+                json.dumps(
+                    {
+                        "status": "failed",
+                        "error": "uniform LLM overrides require a single effective provider",
+                        "providers": sorted(unique_providers),
+                        "user_action": "remove the uniform override or configure each provider in provider_configs",
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
+            return 2
+
+    # Apply LLM runtime overrides (after interactive config for correct priority)
+    from auto_harness.providers.settings import set_runtime_overrides
+    llm_model = getattr(args, "model", None)
+    llm_ctx = getattr(args, "context_window_tokens", None)
+    llm_max = getattr(args, "max_output_tokens", None)
+    if uniform_override_present:
+        provider_names = [p for p, _ in command_providers]
+        try:
+            set_runtime_overrides(
+                config,
+                provider_names,
+                model=llm_model,
+                context_window_tokens=llm_ctx,
+                max_output_tokens=llm_max,
+            )
+        except ValueError as exc:
+            print(
+                json.dumps(
+                    {"status": "failed", "error": str(exc)},
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
+            return 2
+
+    # Sync Context Governance when all purposes use one effective provider.
+    # deploy/resume normally contain two entries (agent + plan_first), so the
+    # number of unique provider names — not tuple count — is authoritative.
+    unique_command_providers = {
+        DEFAULT_PROVIDER_REGISTRY.normalize_name(provider_name)
+        for provider_name, _ in command_providers
+    }
+    if len(unique_command_providers) == 1:
+        from auto_harness.context.capabilities import _positive_int as _cap_pos_int
+        provider_name, purpose = command_providers[0]
+        try:
+            temp_provider = DEFAULT_PROVIDER_REGISTRY.create(
+                provider_name,
+                config=config,
+                purpose=purpose,
+            )
+            effective_ctx = _cap_pos_int(getattr(temp_provider, "context_window_tokens", None))
+            effective_max = _cap_pos_int(getattr(temp_provider, "max_tokens", None))
+        except Exception:
+            effective_ctx = None
+            effective_max = None
+        if effective_ctx is not None:
+            config.agent_context_window_tokens = effective_ctx
+        if effective_max is not None:
+            config.agent_context_reserved_output_tokens = effective_max
+
     try:
-        for provider_name, purpose in _providers_for_command(config, args):
+        for provider_name, purpose in command_providers:
             provider = DEFAULT_PROVIDER_REGISTRY.create(
                 provider_name,
                 config=config,
@@ -504,16 +609,20 @@ def main(argv=None) -> int:
                 )
     except (TypeError, ValueError, ProviderError) as exc:
         detail = exc.to_dict() if isinstance(exc, ProviderError) else None
+        error_payload: Dict[str, Any] = {
+            "status": "failed",
+            "error": str(exc),
+            "provider_error": detail,
+        }
+        # Add user_action for DeepSeek missing key
+        if isinstance(exc, ProviderError) and exc.category == ErrorCategory.CONFIGURATION_ERROR:
+            safe = (detail or {}).get("safe_detail", "")
+            if "deepseek" in str(exc.provider_name).lower() and "DEEPSEEK_API_KEY" in safe:
+                error_payload["user_action"] = (
+                    '请先执行：export DEEPSEEK_API_KEY="你的 API Key"'
+                )
         print(
-            json.dumps(
-                {
-                    "status": "failed",
-                    "error": str(exc),
-                    "provider_error": detail,
-                },
-                ensure_ascii=False,
-                indent=2,
-            )
+            json.dumps(error_payload, ensure_ascii=False, indent=2)
         )
         return 2
 
@@ -619,7 +728,7 @@ def main(argv=None) -> int:
 
     if args.command == "llm-test":
         provider = DEFAULT_PROVIDER_REGISTRY.create(
-            args.provider,
+            args.provider or config.agent_provider,
             config=config,
             purpose="llm_test",
         )
@@ -708,6 +817,74 @@ def main(argv=None) -> int:
         queue = DeploymentQueue(config.task_queue_path, runner, claim_ttl_seconds=config.queue_claim_ttl_seconds)
         if args.queue_command == "submit":
             dry_run = args.dry_run or not args.execute
+            # Build a resolved, non-sensitive LLM snapshot for reproducible
+            # execution by a later queue worker. API keys are never included.
+            model = getattr(args, "model", None)
+            ctx = getattr(args, "context_window_tokens", None)
+            max_out = getattr(args, "max_output_tokens", None)
+            queue_provider_names = {
+                DEFAULT_PROVIDER_REGISTRY.normalize_name(config.agent_provider),
+                DEFAULT_PROVIDER_REGISTRY.normalize_name(
+                    config.agent_plan_first_provider
+                ),
+            }
+            if (model is not None or ctx is not None or max_out is not None) and len(
+                queue_provider_names
+            ) > 1:
+                print(
+                    json.dumps(
+                        {
+                            "status": "failed",
+                            "error": "uniform LLM overrides require a single effective provider",
+                            "providers": sorted(queue_provider_names),
+                            "user_action": "remove the uniform override or configure each provider in provider_configs",
+                        },
+                        ensure_ascii=False,
+                        indent=2,
+                    )
+                )
+                return 2
+
+            if len(queue_provider_names) == 1:
+                try:
+                    set_runtime_overrides(
+                        config,
+                        queue_provider_names,
+                        model=model,
+                        context_window_tokens=ctx,
+                        max_output_tokens=max_out,
+                    )
+                    snapshot_provider = DEFAULT_PROVIDER_REGISTRY.create(
+                        config.agent_provider,
+                        config=config,
+                        purpose="agent",
+                    )
+                except (TypeError, ValueError, ProviderError) as exc:
+                    print(
+                        json.dumps(
+                            {"status": "failed", "error": str(exc)},
+                            ensure_ascii=False,
+                            indent=2,
+                        )
+                    )
+                    return 2
+                snapshot_model = getattr(snapshot_provider, "model", "") or None
+                snapshot_ctx = getattr(
+                    snapshot_provider, "context_window_tokens", None
+                )
+                snapshot_max = getattr(snapshot_provider, "max_tokens", None)
+            else:
+                snapshot_model = None
+                snapshot_ctx = None
+                snapshot_max = None
+
+            llm_snapshot = {
+                "agent_provider": config.agent_provider,
+                "plan_first_provider": config.agent_plan_first_provider,
+                "model": snapshot_model,
+                "context_window_tokens": snapshot_ctx,
+                "max_output_tokens": snapshot_max,
+            }
             result = queue.submit(
                 args.repo,
                 name=args.name,
@@ -717,6 +894,7 @@ def main(argv=None) -> int:
                 allow_start=args.allow_start,
                 require_gpu=args.require_gpu,
                 priority=args.priority,
+                llm=llm_snapshot,
             )
         elif args.queue_command == "list":
             result = queue.list(status=args.status or None)
@@ -740,7 +918,7 @@ def main(argv=None) -> int:
         output = Path(args.output) if args.output else Path("runs") / "live_smoke" / compact_timestamp()
         result = LiveAgentSmokeRunner().run(
             Path(args.repo),
-            args.provider,
+            args.provider or config.agent_provider,
             execute=args.execute,
             output_dir=output,
             config=config,
@@ -760,12 +938,15 @@ def main(argv=None) -> int:
         return 0 if result.get("status") in ("planned", "passed") else 2
 
     if args.command == "memory-evolve":
-        provider_name = args.provider or config.memory_evolution_provider
-        provider = DEFAULT_PROVIDER_REGISTRY.create(
-            provider_name,
-            config=config,
-            purpose="memory_evolution",
-        )
+        # Only --propose requires an LLM Provider (Section 23.4)
+        provider = None
+        if args.propose:
+            provider_name = args.provider or config.memory_evolution_provider
+            provider = DEFAULT_PROVIDER_REGISTRY.create(
+                provider_name,
+                config=config,
+                purpose="memory_evolution",
+            )
 
         manager = MemoryEvolutionManager(
             memory_dir=config.memory_path,

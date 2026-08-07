@@ -14,13 +14,50 @@
   "use_agent_analyzer": false,
   "agent_timeout_seconds": 900,
   "agent_mode": "off",
-  "agent_provider": "mock",
-  "provider_configs": {},
+  "agent_provider": "deepseek",
+  "agent_plan_first_provider": "deepseek",
+  "memory_evolution_provider": "deepseek",
+  "provider_configs": {
+    "deepseek": {
+      "api_base": "https://api.deepseek.com",
+      "api_key_env": "DEEPSEEK_API_KEY",
+      "require_api_key": true,
+
+      "model": "deepseek-v4-pro",
+      "context_window_tokens": 262144,
+      "max_tokens": 16384,
+
+      "thinking": {
+        "agent": "disabled",
+        "plan_first": "enabled",
+        "memory_evolution": "disabled",
+        "llm_test": "disabled",
+        "live_smoke": "disabled"
+      },
+
+      "reasoning_effort": {
+        "plan_first": "high"
+      },
+
+      "json_mode": {
+        "agent": true,
+        "plan_first": true,
+        "memory_evolution": true,
+        "llm_test": false,
+        "live_smoke": true
+      },
+
+      "timeout_seconds": 60,
+      "max_retries": 2,
+      "retry_base_seconds": 1.0,
+      "retry_max_seconds": 8.0
+    }
+  },
   "agent_max_input_chars": 20000,
   "agent_max_file_chars": 6000,
   "agent_context_mode": "enforce",
-  "agent_context_window_tokens": null,
-  "agent_context_reserved_output_tokens": 4096,
+  "agent_context_window_tokens": 262144,
+  "agent_context_reserved_output_tokens": 16384,
   "agent_context_safety_margin_tokens": 2048,
   "agent_context_warn_ratio": 0.7,
   "agent_context_compact_ratio": 0.85,

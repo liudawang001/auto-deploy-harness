@@ -1,14 +1,32 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import copy
 import os
 import time
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from auto_harness.models.base import read_json, write_json
 from auto_harness.orchestrator import TaskRunner
 from auto_harness.runtime import GpuResourceProbe
 from auto_harness.utils.files import ensure_dir, safe_name, short_hash
 from auto_harness.utils.time import compact_timestamp, utc_now_iso
+
+# Whitelist for LLM snapshot keys persisted in queue items
+_ALLOWED_LLM_SNAPSHOT_KEYS = frozenset({
+    "agent_provider",
+    "plan_first_provider",
+    "model",
+    "context_window_tokens",
+    "max_output_tokens",
+})
+
+_FORBIDDEN_LLM_SNAPSHOT_KEYS = frozenset({
+    "api_key",
+    "token",
+    "secret",
+    "password",
+    "authorization",
+})
 
 
 class DeploymentQueue:
@@ -34,7 +52,10 @@ class DeploymentQueue:
         allow_start: bool = False,
         require_gpu: bool = False,
         priority: int = 100,
+        llm: Optional[Dict] = None,
     ) -> Dict:
+        # Validate and whitelist LLM snapshot
+        llm_snapshot = _sanitize_llm_snapshot(llm)
         base = safe_name(name or repo_url.rstrip("/").rsplit("/", 1)[-1].replace(".git", "") or "task")
         stamp = compact_timestamp()
         job_id = "job_%s_%s_%s" % (base, stamp, short_hash(repo_url + name + stamp + str(priority), 6))
@@ -56,6 +77,8 @@ class DeploymentQueue:
             "created_at": now,
             "updated_at": now,
         }
+        if llm_snapshot:
+            item["llm"] = llm_snapshot
         self._write(item)
         return item
 
@@ -126,7 +149,25 @@ class DeploymentQueue:
 
     def _run_item(self, item: Dict) -> Dict:
         try:
-            task_id = self.runner.deploy(
+            # Use task-level config when the runner has real config/provider_registry
+            runner_config = getattr(self.runner, "config", None)
+            runner_registry = getattr(self.runner, "provider_registry", None)
+            if runner_config is not None and runner_registry is not None:
+                job_config = copy.deepcopy(runner_config)
+                llm_snapshot = item.get("llm")
+                if isinstance(llm_snapshot, dict):
+                    _apply_queue_llm_snapshot(job_config, llm_snapshot)
+                job_runner = TaskRunner(
+                    job_config,
+                    provider_registry=runner_registry,
+                )
+                _validate_job_providers(job_runner, job_config, item)
+                effective_runner = job_runner
+            else:
+                # Test double path — delegate directly
+                effective_runner = self.runner
+
+            task_id = effective_runner.deploy(
                 item["repo_url"],
                 item.get("name") or "",
                 dry_run=bool(item.get("dry_run", True)),
@@ -247,3 +288,110 @@ class DeploymentQueue:
             status = item.get("status") or "unknown"
             counts[status] = counts.get(status, 0) + 1
         return counts
+
+
+# ---------------------------------------------------------------------------
+# LLM snapshot helpers
+# ---------------------------------------------------------------------------
+
+def _sanitize_llm_snapshot(llm: Optional[Dict]) -> Optional[Dict]:
+    """Whitelist and validate an LLM snapshot for queue persistence."""
+    if llm is None:
+        return None
+    if not isinstance(llm, dict):
+        return None
+    forbidden = _FORBIDDEN_LLM_SNAPSHOT_KEYS.intersection(
+        str(k).lower() for k in llm
+    )
+    if forbidden:
+        raise ValueError(
+            "LLM snapshot must not contain secret keys: %s"
+            % ", ".join(sorted(forbidden))
+        )
+    snapshot = {}
+    for key in _ALLOWED_LLM_SNAPSHOT_KEYS:
+        if key in llm and llm[key] is not None:
+            snapshot[key] = llm[key]
+    return snapshot if snapshot else None
+
+
+def _apply_queue_llm_snapshot(config: Any, llm_snapshot: Dict) -> None:
+    """Restore provider selection, runtime limits, and governance budgets."""
+    from auto_harness.providers.settings import (
+        normalize_provider_name,
+        set_runtime_overrides,
+    )
+
+    agent_provider = llm_snapshot.get("agent_provider", "")
+    plan_provider = llm_snapshot.get("plan_first_provider", "") or agent_provider
+    if not agent_provider:
+        return
+    config.agent_provider = normalize_provider_name(agent_provider)
+    config.agent_plan_first_provider = normalize_provider_name(plan_provider)
+
+    provider_names = {
+        config.agent_provider,
+        config.agent_plan_first_provider,
+    }
+    model = llm_snapshot.get("model")
+    context_window = llm_snapshot.get("context_window_tokens")
+    max_output = llm_snapshot.get("max_output_tokens")
+    if len(provider_names) > 1 and any(
+        value is not None for value in (model, context_window, max_output)
+    ):
+        raise ValueError(
+            "uniform queue LLM overrides require a single effective provider"
+        )
+    set_runtime_overrides(
+        config,
+        provider_names,
+        model=model,
+        context_window_tokens=context_window,
+        max_output_tokens=max_output,
+    )
+    if context_window is not None:
+        config.agent_context_window_tokens = int(context_window)
+    if max_output is not None:
+        config.agent_context_reserved_output_tokens = int(max_output)
+
+
+def _validate_job_providers(job_runner, config, item: Dict) -> None:
+    """Pre-check agent and plan-first providers before deploy.
+
+    LangGraph ``planner_mode=auto`` may select the real plan-first provider
+    even when the legacy ``agent_plan_first`` flag is false, so both paths
+    must be ready before a queued deployment starts.
+    """
+    from auto_harness.providers.errors import ErrorCategory, ProviderError
+
+    agent_provider = getattr(config, "agent_provider", "deepseek")
+    plan_provider = getattr(config, "agent_plan_first_provider", "deepseek")
+    # LangGraph planner_mode=auto selects the real plan-first provider even
+    # when the legacy agent_plan_first flag is false, so validate both paths.
+    providers_to_check = [
+        (agent_provider, "agent"),
+        (plan_provider, "plan_first"),
+    ]
+
+    for provider_name, purpose in providers_to_check:
+        try:
+            provider = job_runner.provider_registry.create(
+                provider_name,
+                config=config,
+                purpose=purpose,
+            )
+        except Exception as exc:
+            raise ProviderError(
+                "queue job provider pre-check failed for %s: %s" % (provider_name, exc),
+                provider_name=str(provider_name),
+                category=ErrorCategory.CONFIGURATION_ERROR,
+            ) from exc
+        missing_checker = getattr(provider, "missing_configuration", None)
+        missing = list(missing_checker()) if callable(missing_checker) else []
+        if missing:
+            raise ProviderError(
+                "%s provider configuration is incomplete" % provider_name,
+                provider_name=str(provider_name),
+                category=ErrorCategory.CONFIGURATION_ERROR,
+                safe_detail="missing: %s" % ", ".join(missing),
+            )

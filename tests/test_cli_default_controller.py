@@ -101,7 +101,12 @@ class TestCLIDeployWithoutController:
 
     def test_cli_deploy_without_controller_passes_none(self, tmp_path):
         """When --controller is not specified, None is passed (not "legacy")."""
-        config = HarnessConfig(runs_dir=str(tmp_path / "runs"), default_controller="langgraph")
+        config = HarnessConfig(
+            runs_dir=str(tmp_path / "runs"),
+            default_controller="langgraph",
+            agent_provider="mock",
+            agent_plan_first_provider="mock",
+        )
         with patch("auto_harness.cli.TaskRunner") as MockRunner:
             mock_runner = MagicMock()
             mock_runner.deploy.return_value = "task_123"
@@ -115,7 +120,12 @@ class TestCLIDeployWithoutController:
 
     def test_cli_deploy_with_explicit_controller(self, tmp_path):
         """When --controller legacy is specified, "legacy" is passed."""
-        config = HarnessConfig(runs_dir=str(tmp_path / "runs"), default_controller="langgraph")
+        config = HarnessConfig(
+            runs_dir=str(tmp_path / "runs"),
+            default_controller="langgraph",
+            agent_provider="mock",
+            agent_plan_first_provider="mock",
+        )
         with patch("auto_harness.cli.TaskRunner") as MockRunner:
             mock_runner = MagicMock()
             mock_runner.deploy.return_value = "task_123"

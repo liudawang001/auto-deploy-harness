@@ -16,6 +16,60 @@ auto-deploy-harness 是一个基于 LangGraph 编排的自动部署与证据化�
 
 项目发布名和主命令为 `auto-deploy-harness`。为避免破坏历史 import 和已有脚本，Python 包名继续保留为 `auto_harness`，旧命令 `auto-harness` 也继续兼容。
 
+## 最快开始
+
+新安装项目后，只需设置 API Key 即可使用默认的 DeepSeek V4 Pro：
+
+```bash
+export DEEPSEEK_API_KEY="sk-..."
+auto-deploy-harness llm-test
+```
+
+无需 `--provider`、`--interactive-provider` 或手动输入 API 地址、模型名称等参数。
+
+**临时切换到 Flash 模型：**
+
+```bash
+auto-deploy-harness llm-test --model deepseek-v4-flash
+```
+
+命令结束后默认模型恢复为 V4 Pro。
+
+**调整 Token 预算：**
+
+```bash
+auto-deploy-harness deploy \
+  --repo ./project \
+  --name my-agent \
+  --context-window-tokens 524288 \
+  --max-output-tokens 32768 \
+  --execute
+```
+
+**配置优先级（从高到低）：**
+
+| 优先级 | 来源 | 示例 |
+|---|---|---|
+| 1 | 命令行参数 | `--model deepseek-v4-flash` |
+| 2 | Provider 环境变量 | `DEEPSEEK_MODEL` |
+| 3 | 通用环境变量 | `AUTO_HARNESS_LLM_MODEL` |
+| 4 | 配置文件 | `provider_configs.deepseek.model` |
+| 5 | 代码默认值 | DeepSeek Provider 内部兜底 |
+
+**切换其他 Provider：**
+
+```bash
+auto-deploy-harness deploy \
+  --repo ./project \
+  --agent-provider openai \
+  --interactive-provider \
+  --execute
+```
+
+**Queue 场景：** API Key 由 Worker 环境变量提供，队列文件仅保存非敏感的 Provider、模型和 Token 配置快照。
+
+**旧配置兼容：** 已有的 `configs/default.json` 不会被自动覆盖。如果旧配置中 `agent_provider` 为 `mock` 或其他值，系统不会自动改成 `deepseek`。请手动合并 DeepSeek 配置块或备份后重新执行 `init`。
+
 ## 当前 MVP
 
 当前仓库已经包含：

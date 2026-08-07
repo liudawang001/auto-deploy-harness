@@ -63,6 +63,7 @@ class OpenAICompatibleProvider:
             self.settings.get("api_url"),
         )
         self.model = _first_nonempty(
+            _runtime_get(config, self.provider_name, "model"),
             os.environ.get("%s_MODEL" % prefix),
             os.environ.get("AUTO_HARNESS_LLM_MODEL"),
             self.settings.get("model"),
@@ -87,12 +88,14 @@ class OpenAICompatibleProvider:
             default=60,
         )
         self.max_tokens = _positive_int(
+            _runtime_get(config, self.provider_name, "max_output_tokens"),
             os.environ.get("%s_MAX_TOKENS" % prefix),
             os.environ.get("AUTO_HARNESS_LLM_MAX_TOKENS"),
             self.settings.get("max_tokens"),
             default=4096,
         )
         self.context_window_tokens = _positive_int(
+            _runtime_get(config, self.provider_name, "context_window_tokens"),
             os.environ.get("%s_CONTEXT_WINDOW_TOKENS" % prefix),
             os.environ.get("AUTO_HARNESS_LLM_CONTEXT_WINDOW_TOKENS"),
             self.settings.get("context_window_tokens"),
@@ -448,3 +451,24 @@ def _positive_int(*values, default: int) -> int:
         if parsed > 0:
             return parsed
     return default
+
+
+def _runtime_get(config: Any, provider_name: str, key: str):
+    """Read a single non-sensitive runtime override for *provider_name*.
+
+    Returns None when no override exists or the config does not support
+    runtime overrides.
+    """
+    if config is None:
+        return None
+    overrides = getattr(config, "llm_runtime_overrides", None)
+    if not isinstance(overrides, dict):
+        return None
+    normalized = _normalize_name(provider_name)
+    provider_overrides = overrides.get(normalized)
+    if not isinstance(provider_overrides, dict):
+        return None
+    value = provider_overrides.get(key)
+    if value is None or value == "":
+        return None
+    return value

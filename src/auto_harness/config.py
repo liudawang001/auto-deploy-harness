@@ -1,9 +1,42 @@
 import json
 import os
 from importlib import resources
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+
+def _default_deepseek_provider_configs() -> Dict[str, Dict[str, Any]]:
+    """Return a fresh, secret-free DeepSeek configuration for direct use."""
+    return {
+        "deepseek": {
+            "api_base": "https://api.deepseek.com",
+            "api_key_env": "DEEPSEEK_API_KEY",
+            "require_api_key": True,
+            "model": "deepseek-v4-pro",
+            "context_window_tokens": 262144,
+            "max_tokens": 16384,
+            "thinking": {
+                "agent": "disabled",
+                "plan_first": "enabled",
+                "memory_evolution": "disabled",
+                "llm_test": "disabled",
+                "live_smoke": "disabled",
+            },
+            "reasoning_effort": {"plan_first": "high"},
+            "json_mode": {
+                "agent": True,
+                "plan_first": True,
+                "memory_evolution": True,
+                "llm_test": False,
+                "live_smoke": True,
+            },
+            "timeout_seconds": 60,
+            "max_retries": 2,
+            "retry_base_seconds": 1.0,
+            "retry_max_seconds": 8.0,
+        }
+    }
 
 
 @dataclass
@@ -34,13 +67,13 @@ class HarnessConfig:
     use_agent_analyzer: bool = False
     agent_timeout_seconds: int = 900
     agent_mode: str = "off"
-    agent_provider: str = "mock"
+    agent_provider: str = "deepseek"
     provider_configs: Dict[str, Dict[str, Any]] = None
     agent_max_input_chars: int = 20000
     agent_max_file_chars: int = 6000
     agent_context_mode: str = "enforce"
-    agent_context_window_tokens: Optional[int] = None
-    agent_context_reserved_output_tokens: int = 4096
+    agent_context_window_tokens: Optional[int] = 262144
+    agent_context_reserved_output_tokens: int = 16384
     agent_context_safety_margin_tokens: int = 2048
     agent_context_warn_ratio: float = 0.70
     agent_context_compact_ratio: float = 0.85
@@ -104,7 +137,7 @@ class HarnessConfig:
     memory_evolution_require_shadow: bool = True
     memory_evolution_shadow_helped_threshold: int = 2
     memory_evolution_shadow_harmful_threshold: int = 0
-    memory_evolution_provider: str = "mock"
+    memory_evolution_provider: str = "deepseek"
     skill_candidate_dir: str = "memory/skill_candidates"
     # Decision gate configuration
     agent_enable_plan_gate: bool = False
@@ -121,7 +154,7 @@ class HarnessConfig:
     agent_runtime_loop_position: str = "primary"  # primary | post_pipeline
     # LLM Plan-first configuration
     agent_plan_first: bool = False
-    agent_plan_first_provider: str = "mock"
+    agent_plan_first_provider: str = "deepseek"
     agent_plan_first_mode: str = "planner"  # planner | gated_actor
     agent_plan_first_max_replans: int = 2
     agent_plan_first_max_files: int = 80
@@ -142,6 +175,13 @@ class HarnessConfig:
     langgraph_max_same_failure: int = 2
     langgraph_planner_mode: str = "auto"  # auto | llm | deterministic
 
+    # Non-persistent runtime overrides (never loaded from or saved to JSON)
+    llm_runtime_overrides: Dict[str, Dict[str, Any]] = field(
+        default_factory=dict,
+        init=False,
+        repr=False,
+    )
+
     def __post_init__(self) -> None:
         if self.allowed_commands is None:
             self.allowed_commands = ["python", "python3", "pip", "curl", "git", "streamlit"]
@@ -161,7 +201,7 @@ class HarnessConfig:
         if self.langgraph_fault_injection_points is None:
             self.langgraph_fault_injection_points = []
         if self.provider_configs is None:
-            self.provider_configs = {}
+            self.provider_configs = _default_deepseek_provider_configs()
         if self.gpu_probe_timeout_seconds <= 0:
             raise ValueError("gpu_probe_timeout_seconds must be positive")
         if self.conda_probe_timeout_seconds <= 0 or self.conda_inventory_timeout_seconds <= 0:
@@ -300,8 +340,8 @@ class HarnessConfig:
                 .read_text(encoding="utf-8")
             )
         known: Dict[str, Any] = {}
-        for key in cls.__dataclass_fields__:
-            if key in data:
+        for key, definition in cls.__dataclass_fields__.items():
+            if definition.init and key in data:
                 known[key] = data[key]
         if os.environ.get("AUTO_HARNESS_USE_AGENT_ANALYZER"):
             known["use_agent_analyzer"] = os.environ.get("AUTO_HARNESS_USE_AGENT_ANALYZER") == "1"
@@ -380,6 +420,40 @@ class HarnessConfig:
 # ------------------------------------------------------------------
 # DeepSeek configuration validation
 # ------------------------------------------------------------------
+
+_RUNTIME_OVERRIDE_WHITELIST = frozenset({
+    "model",
+    "context_window_tokens",
+    "max_output_tokens",
+})
+
+_RUNTIME_OVERRIDE_FORBIDDEN = frozenset({
+    "api_key",
+    "authorization",
+    "token",
+    "password",
+    "secret",
+})
+
+
+def validate_runtime_overrides(overrides: dict) -> None:
+    """Reject secret-bearing or unknown keys in runtime overrides."""
+    if not isinstance(overrides, dict):
+        raise ValueError("llm_runtime_overrides must be an object")
+    forbidden = _RUNTIME_OVERRIDE_FORBIDDEN.intersection(
+        str(k).lower() for k in overrides
+    )
+    if forbidden:
+        raise ValueError(
+            "llm_runtime_overrides must not contain secret values: %s"
+            % ", ".join(sorted(forbidden))
+        )
+    unknown = set(overrides) - _RUNTIME_OVERRIDE_WHITELIST
+    if unknown:
+        raise ValueError(
+            "unknown llm_runtime_overrides keys: %s; allowed: %s"
+            % (", ".join(sorted(unknown)), ", ".join(sorted(_RUNTIME_OVERRIDE_WHITELIST)))
+        )
 
 _RETIRED_DEEPSEEK_MODELS = frozenset({
     "deepseek-chat",

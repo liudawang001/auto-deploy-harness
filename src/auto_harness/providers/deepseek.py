@@ -62,13 +62,13 @@ _V4_MODELS = frozenset({
     "deepseek-v4-pro",
 })
 
-# Purpose → model defaults
+# Purpose → model defaults (all default to V4 Pro)
 _DEFAULT_PURPOSE_MODELS = {
     "plan_first": "deepseek-v4-pro",
-    "agent": "deepseek-v4-flash",
-    "memory_evolution": "deepseek-v4-flash",
-    "llm_test": "deepseek-v4-flash",
-    "live_smoke": "deepseek-v4-flash",
+    "agent": "deepseek-v4-pro",
+    "memory_evolution": "deepseek-v4-pro",
+    "llm_test": "deepseek-v4-pro",
+    "live_smoke": "deepseek-v4-pro",
 }
 
 # Purpose → thinking defaults
@@ -175,6 +175,7 @@ class DeepSeekProvider(OpenAICompatibleProvider):
 
         # Validate configuration eagerly
         self._validate_models()
+        self._validate_token_limits()
         self._validate_thinking()
         self._validate_json_mode()
         self._validate_api_base()
@@ -185,17 +186,28 @@ class DeepSeekProvider(OpenAICompatibleProvider):
     # ------------------------------------------------------------------
 
     def _resolve_purpose_config(self) -> None:
-        """Resolve model, thinking, and JSON mode from purpose-specific config."""
-        # Model: purpose-specific → single model → default
-        models_config = self.settings.get("models", {})
-        if isinstance(models_config, dict) and self.purpose in models_config:
-            purpose_model = models_config[self.purpose]
-            if purpose_model:
-                self.model = str(purpose_model)
-        elif not self.model:
-            self.model = _DEFAULT_PURPOSE_MODELS.get(
-                self.purpose, "deepseek-v4-flash"
-            )
+        """Resolve model, thinking, and JSON mode from purpose-specific config.
+
+        Model priority (highest first):
+          runtime_overrides.model > DEEPSEEK_MODEL > AUTO_HARNESS_LLM_MODEL
+          > provider_configs.deepseek.models[purpose]
+          > provider_configs.deepseek.model
+          > _DEFAULT_PURPOSE_MODELS[purpose]
+        """
+        from auto_harness.providers.settings import has_explicit_model_override
+
+        # Model: respect runtime/env override; otherwise purpose → single → default
+        explicit = has_explicit_model_override(self.config, self.provider_name)
+        if not explicit:
+            models_config = self.settings.get("models", {})
+            if isinstance(models_config, dict) and self.purpose in models_config:
+                purpose_model = models_config[self.purpose]
+                if purpose_model:
+                    self.model = str(purpose_model)
+            elif not self.model:
+                self.model = _DEFAULT_PURPOSE_MODELS.get(
+                    self.purpose, "deepseek-v4-pro"
+                )
 
         # Thinking
         thinking_config = self.settings.get("thinking", {})
@@ -327,6 +339,29 @@ class DeepSeekProvider(OpenAICompatibleProvider):
                 "deepseek-v4-flash / deepseek-v4-pro" % self.model,
             )
         self._require_explicit_unknown_model_capacity()
+
+    def _validate_token_limits(self) -> None:
+        """Reject impossible or model-incompatible token budgets eagerly."""
+        context_window = int(self.context_window_tokens or 0)
+        max_output = int(self.max_tokens or 0)
+        if context_window <= 0 or max_output <= 0:
+            return
+        if max_output >= context_window:
+            raise configuration_error(
+                self.provider_name,
+                "max_output_tokens must be smaller than context_window_tokens",
+            )
+        if self.model.strip().lower() in _V4_MODELS:
+            if context_window > 1_000_000:
+                raise configuration_error(
+                    self.provider_name,
+                    "context_window_tokens exceeds DeepSeek V4 limit of 1000000",
+                )
+            if max_output > 384_000:
+                raise configuration_error(
+                    self.provider_name,
+                    "max_output_tokens exceeds DeepSeek V4 limit of 384000",
+                )
 
     def _require_explicit_unknown_model_capacity(self) -> None:
         explicit_context = bool(

@@ -2920,6 +2920,9 @@ class CoreTests(unittest.TestCase):
                 "queue_max_concurrent_tasks": 1,
                 "queue_gpu_slots": 0,
                 "default_controller": "legacy",
+                "agent_provider": "mock",
+                "agent_plan_first_provider": "mock",
+                "memory_evolution_provider": "mock",
             }), encoding="utf-8")
             old_config = os.environ.get("AUTO_HARNESS_CONFIG")
             os.environ["AUTO_HARNESS_CONFIG"] = str(config_path)
@@ -3068,6 +3071,9 @@ class CoreTests(unittest.TestCase):
                 "memory_dir": str(root / "memory"),
                 "model_cache_dir": str(root / "model_cache"),
                 "task_queue_dir": str(root / "queue"),
+                "agent_provider": "mock",
+                "agent_plan_first_provider": "mock",
+                "memory_evolution_provider": "mock",
             }), encoding="utf-8")
             old_config = os.environ.get("AUTO_HARNESS_CONFIG")
             os.environ["AUTO_HARNESS_CONFIG"] = str(config_path)
