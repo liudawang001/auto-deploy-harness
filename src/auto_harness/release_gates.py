@@ -149,6 +149,11 @@ def _default_cli_smoke(root: Path) -> Dict[str, object]:
         ]
         env = dict(os.environ)
         env["PYTHONPATH"] = str(root / "src")
+        # The default provider requires a key during CLI preflight, even
+        # though this smoke is an isolated dry-run and never calls DeepSeek.
+        # Always replace any inherited real key with a clearly non-secret
+        # placeholder so CI can validate the default path safely.
+        env["DEEPSEEK_API_KEY"] = "ci-dry-run-placeholder"
         completed = _run(command, work, env)
         states = list((work / "runs").glob("*/state.json"))
         terminal = read_json(states[0]).get("status") if len(states) == 1 else "missing"

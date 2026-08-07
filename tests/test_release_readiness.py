@@ -1,6 +1,8 @@
 import json
+import subprocess
 from pathlib import Path
 
+from auto_harness import release_gates
 from auto_harness.readiness import ReadinessAuditor
 from auto_harness.release_evidence import build_evidence, evidence_hash
 from auto_harness.resources.installer import initialize_workspace
@@ -60,3 +62,24 @@ def test_packaged_resources_match_repository_defaults():
     for source in sorted((repository / "skills").glob("*/SKILL.md")):
         target = packaged / "skills" / source.parent.name / "SKILL.md"
         assert target.read_bytes() == source.read_bytes()
+
+
+def test_default_cli_smoke_uses_non_secret_deepseek_placeholder(monkeypatch, tmp_path):
+    captured = {}
+
+    def fake_run(command, cwd, env=None):
+        captured["command"] = command
+        captured["env"] = env
+        state = Path(cwd) / "runs" / "task" / "state.json"
+        state.parent.mkdir(parents=True)
+        write_json(state, {"status": "completed_dry_run"})
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "inherited-real-key-must-not-pass-through")
+    monkeypatch.setattr(release_gates, "_run", fake_run)
+
+    evidence = release_gates._default_cli_smoke(tmp_path)
+
+    assert evidence["status"] == "passed"
+    assert "--dry-run" in captured["command"]
+    assert captured["env"]["DEEPSEEK_API_KEY"] == "ci-dry-run-placeholder"
