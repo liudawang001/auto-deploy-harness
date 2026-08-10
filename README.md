@@ -1061,7 +1061,9 @@ PYTHONPATH=src python3 -m auto_harness.cli benchmark --case-id gradio_config_dis
 
 ## LLM Plan-first Agent Mode
 
-auto-deploy-harness 支持 Plan-first 部署模式。在此模式下，LLM 先读取经过脱敏的项目快照，生成结构化部署方案（install 命令、runner 候选、model asset 策略、verify request），框架将其当作不可信 proposal：经过 schema 校验、policy gate 验证、编译为 effective plan，再分阶段执行。最终是否部署成功仍由 trace-based evidence 判定，不由 LLM 自行声称。
+auto-deploy-harness 支持 Plan-first 部署模式。默认 `layered` 仓库上下文先提供元数据索引和小型核心证据；证据不足时，LLM 通过 JSON Action 请求目录、受限搜索、指定行范围或依赖文件，Python 在仓库根边界、敏感文件拒绝、密钥脱敏和 Token/轮数预算内执行只读观察。LLM 不获得 Shell 或任意文件系统权限。最终结构化部署方案经过 schema、Grounding SHA、policy gate 和 compiler 后再分阶段执行，是否成功仍由 Evidence Gate 判定。
+
+Layered 模式默认限制 4 个观察轮、每轮 4 个请求、20 个观察文件和 24000 个观察 Token。每次观察写入脱敏 `observation_ledger.jsonl`，LangGraph Checkpoint 恢复时不会重复读取；仓库指纹或 Grounding 文件 SHA 变化会拒绝旧 Plan。`eager_compat` 仅作为显式兼容模式保留，不会在失败后静默启用。
 
 运行：
 
@@ -1092,6 +1094,10 @@ PYTHONPATH=src python3 -m auto_harness.cli deploy \
 
 ```text
 runs/<task-id>/reports/project_snapshot.json
+runs/<task-id>/reports/repository_inventory.json
+runs/<task-id>/reports/observation_ledger.jsonl
+runs/<task-id>/reports/repository_budget.json
+runs/<task-id>/reports/planner_turns/turn_*.json
 runs/<task-id>/reports/llm_deployment_plan.raw.json
 runs/<task-id>/reports/llm_deployment_plan.parsed.json
 runs/<task-id>/reports/llm_plan_policy.json

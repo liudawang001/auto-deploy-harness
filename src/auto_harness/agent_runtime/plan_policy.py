@@ -8,9 +8,12 @@ and grounding requirements are met.
 This is a hard gate: if policy rejects, the plan must NOT be compiled or executed.
 """
 import re
+import hashlib
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from auto_harness.agent.safety import AgentInputSanitizer
+from auto_harness.context.repository import safe_repo_path
 
 
 # Command root allowlist - only these programs may be proposed
@@ -312,15 +315,75 @@ class PlanPolicyGate:
             if selected_id and candidates:
                 return {"allowed": False, "rejection": {"section": "grounding", "item_index": -1, "reason": "selected runner candidate requires grounding but none provided"}}
 
-        # Check each grounding entry references files that exist
+        # Check each grounding entry references files that exist.
         file_tree = set(snapshot.get("file_tree", []))
+        layered = snapshot.get("context_mode") == "layered"
+        observations = self._grounding_observations(snapshot) if layered else {}
         for i, g in enumerate(grounding):
             if isinstance(g, dict):
                 gfile = str(g.get("file", ""))
                 if gfile and gfile not in file_tree:
                     return {"allowed": False, "rejection": {"section": "grounding", "item_index": i, "reason": "grounding file '%s' not found in snapshot file_tree" % gfile}}
+                if layered:
+                    observation_id = str(g.get("observation_id", ""))
+                    observed_candidates = observations.get(observation_id, [])
+                    observed = next(
+                        (item for item in observed_candidates if item.get("path") == gfile),
+                        None,
+                    )
+                    if not observation_id or not observed:
+                        return {"allowed": False, "rejection": {"section": "grounding", "item_index": i, "reason": "grounding_not_observed"}}
+                    if not g.get("sha256") or g.get("sha256") != observed.get("sha256"):
+                        return {"allowed": False, "rejection": {"section": "grounding", "item_index": i, "reason": "grounding_digest_stale"}}
+                    start = g.get("line_start")
+                    end = g.get("line_end")
+                    if not isinstance(start, int) or not isinstance(end, int) or start > end:
+                        return {"allowed": False, "rejection": {"section": "grounding", "item_index": i, "reason": "grounding line range is invalid"}}
+                    if start < int(observed.get("line_start", 1)) or end > int(observed.get("line_end", 0)):
+                        return {"allowed": False, "rejection": {"section": "grounding", "item_index": i, "reason": "grounding line range was not observed"}}
+                    repo_dir = snapshot.get("repo_dir")
+                    if repo_dir:
+                        try:
+                            current = safe_repo_path(Path(repo_dir), gfile).read_bytes()
+                        except (OSError, ValueError):
+                            return {"allowed": False, "rejection": {"section": "grounding", "item_index": i, "reason": "grounding file is unavailable"}}
+                        if hashlib.sha256(current).hexdigest() != g.get("sha256"):
+                            return {"allowed": False, "rejection": {"section": "grounding", "item_index": i, "reason": "grounding_digest_stale"}}
 
         return {"allowed": True}
+
+    @staticmethod
+    def _grounding_observations(snapshot: Dict) -> Dict[str, List[Dict]]:
+        observations: Dict[str, List[Dict]] = {}
+        for path, item in (snapshot.get("selected_files") or {}).items():
+            if not isinstance(item, dict) or not item.get("observation_id"):
+                continue
+            observations.setdefault(item["observation_id"], []).append({
+                "path": path,
+                "line_start": item.get("line_start", 1),
+                "line_end": item.get("line_end", 0),
+                "sha256": item.get("sha256", ""),
+            })
+        for record in snapshot.get("observation_ledger", []) or []:
+            if not isinstance(record, dict) or record.get("status") != "passed":
+                continue
+            observation_id = record.get("observation_id")
+            evidence = record.get("evidence", {})
+            candidates = []
+            if isinstance(evidence.get("files"), list):
+                candidates.extend(evidence["files"])
+            if isinstance(evidence.get("results"), list):
+                candidates.extend(evidence["results"])
+            for item in candidates:
+                if not isinstance(item, dict) or not item.get("path"):
+                    continue
+                observations.setdefault(observation_id, []).append({
+                    "path": item["path"],
+                    "line_start": item.get("line_start", item.get("line", 1)),
+                    "line_end": item.get("line_end", item.get("line", 1)),
+                    "sha256": item.get("sha256", ""),
+                })
+        return observations
 
     def _check_secrets(self, plan: Dict) -> List[Dict]:
         """Check for secret patterns in plan string values."""

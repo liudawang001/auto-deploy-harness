@@ -30,6 +30,7 @@ from auto_harness.graph.routes import (
     route_after_verify,
     route_after_replan,
     route_after_llm_plan,
+    route_after_repo_observation,
     route_after_diagnose,
     route_after_repair_policy,
     route_after_approval,
@@ -53,7 +54,7 @@ def build_initial_state(context: DeploymentContext, max_replans: int, config=Non
     Only called by run(), never by resume().
     """
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "task_id": context.task_id,
         "controller": "langgraph",
         "run_dir": str(context.run_dir),
@@ -121,6 +122,22 @@ def build_initial_state(context: DeploymentContext, max_replans: int, config=Non
         "llm_required": True,
         "llm_provider": "",
         "llm_error": "",
+        # Layered repository observation
+        "repository_inventory_path": "",
+        "repository_fingerprint": "",
+        "observation_ledger_path": "",
+        "planner_turn_count": 0,
+        "planner_turn_paths": [],
+        "planner_turn_kind": "",
+        "observation_round": 0,
+        "pending_observation_requests": [],
+        "observation_budget": {
+            "remaining_rounds": getattr(config, "agent_repo_max_observation_rounds", 4) if config else 4,
+            "remaining_tokens": getattr(config, "agent_repo_observation_budget_tokens", 24000) if config else 24000,
+            "remaining_files": getattr(config, "agent_repo_max_observed_files", 20) if config else 20,
+        },
+        "observed_file_digests": {},
+        "planner_phase": "plan",
         # Memory/Skill fields (Task 8)
         "memory_hits": [],
         "selected_skills": {},
@@ -149,6 +166,7 @@ def build_graph(deps, checkpointer):
     # Add all nodes
     builder.add_node("snapshot", nodes.build_snapshot)
     builder.add_node("plan", nodes.plan)
+    builder.add_node("observe_repo", nodes.observe_repo)
     builder.add_node("parse", nodes.parse)
     builder.add_node("policy", nodes.policy)
     builder.add_node("compile", nodes.compile)
@@ -243,7 +261,12 @@ def build_graph(deps, checkpointer):
     builder.add_edge(START, "snapshot")
     builder.add_edge("snapshot", "plan")
     builder.add_conditional_edges("plan", route_after_llm_plan, {
+        "observe": "observe_repo",
         "parse": "parse",
+        "stop": "stop",
+    })
+    builder.add_conditional_edges("observe_repo", route_after_repo_observation, {
+        "plan": "plan",
         "stop": "stop",
     })
     builder.add_conditional_edges(
@@ -326,7 +349,7 @@ def build_graph(deps, checkpointer):
     # Replan routes back to parse
     builder.add_conditional_edges(
         "replan", route_after_replan,
-        {"parse": "parse", "stop": "stop"},
+        {"plan": "plan", "parse": "parse", "stop": "stop"},
     )
     # Failure observation → diagnose
     builder.add_edge("observe_failure", "diagnose")

@@ -96,6 +96,25 @@ class ReportGenerator:
                     "- Repair verified: `%s`" % str(bool(effectiveness.get("repair_verified"))).lower(),
                 ])
             lines.append("")
+        repository_context = self._repository_context_summary(run_dir)
+        if repository_context:
+            lines.extend([
+                "## Repository Context",
+                "",
+                "- Mode: `%s`" % repository_context.get("mode", ""),
+                "- Initial estimated input tokens: `%s`"
+                % repository_context.get("initial_input_tokens", 0),
+                "- Observation rounds: `%s`"
+                % repository_context.get("observation_rounds", 0),
+                "- Observed files: `%s`"
+                % repository_context.get("observed_files", 0),
+                "- Observation tokens: `%s`"
+                % repository_context.get("observation_tokens", 0),
+                "- Cache hits: `%s`" % repository_context.get("cache_hits", 0),
+                "- Rejected reads: `%s`"
+                % repository_context.get("rejected_reads", 0),
+                "",
+            ])
         agent_metrics = self._read_optional(run_dir / "reports" / "agent_metrics.json")
         metrics = agent_metrics.get("agent_metrics") if isinstance(agent_metrics, dict) else {}
         if metrics:
@@ -194,6 +213,56 @@ class ReportGenerator:
             lines.append("")
         report_path.write_text("\n".join(lines), encoding="utf-8")
         return StageResult("report", "passed", "report generated", {"report_path": str(report_path)}, evidence=[str(report_path)])
+
+    def _repository_context_summary(self, run_dir: Path) -> Dict:
+        reports = Path(run_dir) / "reports"
+        snapshot = self._read_optional(reports / "project_snapshot.json")
+        if not isinstance(snapshot, dict) or snapshot.get("context_mode") != "layered":
+            return {}
+        records = []
+        ledger = reports / "observation_ledger.jsonl"
+        if ledger.exists():
+            import json
+            for line in ledger.read_text(
+                encoding="utf-8", errors="ignore"
+            ).splitlines():
+                try:
+                    item = json.loads(line)
+                except (TypeError, ValueError):
+                    continue
+                if isinstance(item, dict):
+                    records.append(item)
+        observed_paths = set()
+        for record in records:
+            evidence = record.get("evidence", {})
+            candidates = []
+            if isinstance(evidence, dict):
+                candidates.extend(evidence.get("files", []) or [])
+                candidates.extend(evidence.get("results", []) or [])
+            for item in candidates:
+                if isinstance(item, dict) and item.get("path"):
+                    observed_paths.add(item["path"])
+        initial_tokens = 0
+        turns = sorted((reports / "planner_turns").glob("turn_*.json"))
+        if turns:
+            first = self._read_optional(turns[0])
+            context = first.get("context", {}) if isinstance(first, dict) else {}
+            initial_tokens = int(context.get("estimated_input_tokens", 0) or 0)
+        return {
+            "mode": "layered",
+            "initial_input_tokens": initial_tokens,
+            "observation_rounds": max(
+                [int(item.get("round", 0) or 0) for item in records] or [0]
+            ),
+            "observed_files": len(observed_paths),
+            "observation_tokens": sum(
+                int(item.get("content_tokens", 0) or 0) for item in records
+            ),
+            "cache_hits": sum(bool(item.get("cache_hit")) for item in records),
+            "rejected_reads": sum(
+                item.get("status") == "rejected" for item in records
+            ),
+        }
 
     def _repair_rerun_summary(self, run_dir: Path, results: Dict[str, Dict]) -> Dict:
         plan = self._read_optional(run_dir / "repairs" / "repair_plan.json")

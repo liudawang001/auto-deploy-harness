@@ -270,7 +270,7 @@ class TestBuildInitialState:
     def test_initial_state_fields(self, tmp_path):
         ctx = make_context(tmp_path)
         state = build_initial_state(ctx, max_replans=2)
-        assert state["schema_version"] == 2
+        assert state["schema_version"] == 3
         assert state["task_id"] == "test_task"
         assert state["controller"] == "langgraph"
         assert state["dry_run"] is True
@@ -330,6 +330,76 @@ class TestLangGraphControllerPolicyReject:
         assert result.stop_reason == "policy_rejected"
         assert executor.call_count == 0
         assert policy.validate_call_count == 1
+
+
+class TestLangGraphLayeredRepositoryObservation:
+    def test_observe_turn_reads_repository_then_finalizes(self, tmp_path):
+        import json
+        from auto_harness.agent_runtime.repository_inventory import RepositoryInventoryBuilder
+
+        deps, executor, policy, _ = make_fake_deps(tmp_path)
+
+        class LayeredPlanner:
+            def __init__(self):
+                self.calls = 0
+
+            def turn(self, snapshot, **kwargs):
+                self.calls += 1
+                result = MagicMock()
+                result.context = {}
+                if self.calls == 1:
+                    result.text = json.dumps({
+                        "protocol_version": 1,
+                        "kind": "observe",
+                        "reason": "confirm entrypoint",
+                        "requests": [{
+                            "request_id": "r1",
+                            "tool": "read_selected_files",
+                            "input": {"files": [{"path": "app.py", "start_line": 1, "end_line": 20}]},
+                        }],
+                    })
+                else:
+                    assert kwargs["observations"]
+                    result.text = json.dumps({
+                        "protocol_version": 1,
+                        "kind": "final",
+                        "plan": {"status": "no_safe_plan"},
+                    })
+                return result
+
+        planner = LayeredPlanner()
+        deps.planner = planner
+        from auto_harness.agent_runtime.deployment_plan import DeploymentPlanParser
+        deps.parser = DeploymentPlanParser()
+        ctx = make_context(tmp_path, dry_run=True)
+        repo = Path(ctx.repo_dir)
+        repo.mkdir(parents=True)
+        (repo / "app.py").write_text("print('ok')\n", encoding="utf-8")
+
+        def layered_snapshot(state):
+            inventory = RepositoryInventoryBuilder().build(
+                repo, ["app.py"], detected_signals={}, total_file_count=1,
+            )
+            return {
+                "task_id": state["task_id"],
+                "context_mode": "layered",
+                "file_tree": ["app.py"],
+                "file_tree_summary": {"total_file_count": 1, "truncated": False},
+                "selected_files": {},
+                "detected_signals": {},
+                "repository_fingerprint": inventory["repository_fingerprint"],
+                "repository_inventory": inventory,
+                "skill_context": {},
+            }
+
+        deps.build_snapshot = layered_snapshot
+        ctrl = LangGraphController(FakeControllerDependencies(deps))
+        result = ctrl.run(ctx)
+        assert planner.calls == 2
+        ledger = Path(ctx.run_dir) / "reports" / "observation_ledger.jsonl"
+        assert ledger.exists()
+        assert "app.py" in ledger.read_text(encoding="utf-8")
+        assert result.stop_reason == "plan_not_ok"
 
 
 class TestLangGraphControllerVerifyReplan:

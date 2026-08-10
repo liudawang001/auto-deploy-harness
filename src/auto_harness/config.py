@@ -161,6 +161,20 @@ class HarnessConfig:
     agent_plan_first_max_file_chars: int = 6000
     agent_plan_first_require_grounding: bool = True
     agent_plan_first_allow_external_network: bool = False
+    # Layered repository context and bounded on-demand observation.
+    agent_repo_context_mode: str = "layered"  # layered | eager_compat
+    agent_repo_inventory_budget_tokens: int = 4000
+    agent_repo_core_budget_tokens: int = 12000
+    agent_repo_observation_budget_tokens: int = 24000
+    agent_repo_max_observation_rounds: int = 4
+    agent_repo_max_requests_per_round: int = 4
+    agent_repo_max_observed_files: int = 20
+    agent_repo_max_chars_per_read: int = 12000
+    agent_repo_max_lines_per_read: int = 400
+    agent_repo_search_max_results: int = 30
+    agent_repo_search_max_files: int = 5000
+    agent_repo_search_max_bytes: int = 50000000
+    agent_repo_tree_max_entries: int = 5000
     default_controller: str = "langgraph"
     langgraph_require_llm: bool = False
     langgraph_allow_mock_in_dry_run: bool = True
@@ -221,6 +235,30 @@ class HarnessConfig:
                 "langgraph_planner_mode must be 'auto', 'llm' or "
                 "'deterministic', got: %s" % self.langgraph_planner_mode
             )
+        if self.agent_repo_context_mode not in {"layered", "eager_compat"}:
+            raise ValueError("agent_repo_context_mode must be layered or eager_compat")
+        repo_budget_fields = (
+            "agent_repo_inventory_budget_tokens",
+            "agent_repo_core_budget_tokens",
+            "agent_repo_observation_budget_tokens",
+            "agent_repo_max_observation_rounds",
+            "agent_repo_max_requests_per_round",
+            "agent_repo_max_observed_files",
+            "agent_repo_max_chars_per_read",
+            "agent_repo_max_lines_per_read",
+            "agent_repo_search_max_results",
+            "agent_repo_search_max_files",
+            "agent_repo_search_max_bytes",
+            "agent_repo_tree_max_entries",
+        )
+        for name in repo_budget_fields:
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ValueError("%s must be a positive integer" % name)
+        if self.agent_repo_max_observation_rounds > 8:
+            raise ValueError("agent_repo_max_observation_rounds must be <= 8")
+        if self.agent_repo_max_requests_per_round > 8:
+            raise ValueError("agent_repo_max_requests_per_round must be <= 8")
         if self.agent_context_mode not in {"observe", "shadow", "enforce"}:
             raise ValueError(
                 "agent_context_mode must be observe, shadow or enforce, got: %s"
@@ -388,6 +426,28 @@ class HarnessConfig:
             known["agent_plan_first_mode"] = os.environ["AUTO_HARNESS_AGENT_PLAN_FIRST_MODE"]
         if os.environ.get("AUTO_HARNESS_AGENT_PLAN_FIRST_MAX_REPLANS"):
             known["agent_plan_first_max_replans"] = int(os.environ["AUTO_HARNESS_AGENT_PLAN_FIRST_MAX_REPLANS"])
+        if os.environ.get("AUTO_HARNESS_AGENT_REPO_CONTEXT_MODE"):
+            known["agent_repo_context_mode"] = os.environ["AUTO_HARNESS_AGENT_REPO_CONTEXT_MODE"]
+        if os.environ.get("AUTO_HARNESS_AGENT_REPO_MAX_OBSERVATION_ROUNDS"):
+            known["agent_repo_max_observation_rounds"] = int(
+                os.environ["AUTO_HARNESS_AGENT_REPO_MAX_OBSERVATION_ROUNDS"]
+            )
+        repo_integer_overrides = {
+            "agent_repo_inventory_budget_tokens": "AUTO_HARNESS_AGENT_REPO_INVENTORY_BUDGET_TOKENS",
+            "agent_repo_core_budget_tokens": "AUTO_HARNESS_AGENT_REPO_CORE_BUDGET_TOKENS",
+            "agent_repo_observation_budget_tokens": "AUTO_HARNESS_AGENT_REPO_OBSERVATION_BUDGET_TOKENS",
+            "agent_repo_max_requests_per_round": "AUTO_HARNESS_AGENT_REPO_MAX_REQUESTS_PER_ROUND",
+            "agent_repo_max_observed_files": "AUTO_HARNESS_AGENT_REPO_MAX_OBSERVED_FILES",
+            "agent_repo_max_chars_per_read": "AUTO_HARNESS_AGENT_REPO_MAX_CHARS_PER_READ",
+            "agent_repo_max_lines_per_read": "AUTO_HARNESS_AGENT_REPO_MAX_LINES_PER_READ",
+            "agent_repo_search_max_results": "AUTO_HARNESS_AGENT_REPO_SEARCH_MAX_RESULTS",
+            "agent_repo_search_max_files": "AUTO_HARNESS_AGENT_REPO_SEARCH_MAX_FILES",
+            "agent_repo_search_max_bytes": "AUTO_HARNESS_AGENT_REPO_SEARCH_MAX_BYTES",
+            "agent_repo_tree_max_entries": "AUTO_HARNESS_AGENT_REPO_TREE_MAX_ENTRIES",
+        }
+        for field, environment_name in repo_integer_overrides.items():
+            if os.environ.get(environment_name):
+                known[field] = int(os.environ[environment_name])
         if os.environ.get("AUTO_HARNESS_LANGGRAPH_FAULT_INJECTION"):
             known["langgraph_fault_injection_points"] = [
                 point.strip()

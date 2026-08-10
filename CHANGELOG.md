@@ -4,6 +4,7 @@ All notable changes are documented here.
 
 ## 0.2.0 - Unreleased
 
+- Added layered repository snapshots, bounded JSON observation turns, redacted observation ledgers, checkpoint-safe on-demand reads, and SHA-backed plan grounding.
 - Made LangGraph the functional default with explicit automatic, deterministic, and LLM planner selection.
 - Added terminal state synchronization and stable CLI exit codes.
 - Isolated child-process environments from provider credentials.

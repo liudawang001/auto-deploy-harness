@@ -102,8 +102,13 @@ class DeploymentPlanParser:
                 raise ValueError("grounding[%d] must be a dict" % i)
             if not g.get("file"):
                 raise ValueError("grounding[%d] must have 'file'" % i)
+            if not g.get("claim"):
+                raise ValueError("grounding[%d] must have 'claim'" % i)
             if not g.get("reason"):
                 raise ValueError("grounding[%d] must have 'reason'" % i)
+            for field_name in ("line_start", "line_end"):
+                if field_name in g and not isinstance(g[field_name], int):
+                    raise ValueError("grounding[%d].%s must be an integer" % (i, field_name))
 
         # Validate environment
         environment = data.get("environment", {})

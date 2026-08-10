@@ -53,7 +53,7 @@ class ToolExecutor:
         implemented = {
             name
             for name, schema in self.registry.tools.items()
-            if schema.implemented
+            if schema.implemented and schema.executor == "verify"
         }
         registered = set(self.handlers)
 
@@ -77,7 +77,7 @@ class ToolExecutor:
             ToolResult with status, evidence, and strong_verify_pass flag.
         """
         schema = self.registry.tools.get(tool_call.name)
-        if schema is None or not schema.implemented:
+        if schema is None or not schema.implemented or schema.executor != "verify":
             return ToolResult(
                 status="rejected",
                 tool_name=tool_call.name,

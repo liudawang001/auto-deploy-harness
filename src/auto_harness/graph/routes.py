@@ -66,9 +66,18 @@ def route_after_llm_plan(state):
 
     Catches both explicit stop_reason from LLM failure and missing raw_plan_path.
     """
-    if state.get("stop_reason") or not state.get("raw_plan_path"):
+    if state.get("stop_reason"):
+        return "stop"
+    if state.get("planner_turn_kind") == "observe":
+        return "observe"
+    if not state.get("raw_plan_path"):
         return "stop"
     return "parse"
+
+
+def route_after_repo_observation(state):
+    """Continue the planner observation loop unless the read failed closed."""
+    return "stop" if state.get("stop_reason") else "plan"
 
 
 def route_after_replan(state):
@@ -77,7 +86,11 @@ def route_after_replan(state):
         return "stop"
     count = int(state.get("replan_count", 0))
     maximum = int(state.get("max_replans", 0))
-    if not state.get("raw_plan_path") or count > maximum:
+    if count > maximum:
+        return "stop"
+    if state.get("planner_turn_kind") == "replan_pending":
+        return "plan"
+    if not state.get("raw_plan_path"):
         return "stop"
     return "parse"
 

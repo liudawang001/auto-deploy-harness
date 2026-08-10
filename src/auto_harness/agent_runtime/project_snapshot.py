@@ -9,6 +9,9 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from auto_harness.agent.safety import AgentInputSanitizer
+from auto_harness.agent_runtime.core_evidence import CoreEvidenceSelector
+from auto_harness.agent_runtime.repository_inventory import RepositoryInventoryBuilder
+from auto_harness.tools.repository_policy import RepositoryReadPolicy
 
 
 # Priority files to read first (in order of importance)
@@ -52,11 +55,20 @@ class ProjectSnapshotBuilder:
         max_files: int = 80,
         max_file_chars: int = 6000,
         max_tree_entries: int = 20000,
+        context_mode: str = "eager_compat",
+        core_budget_tokens: int = 12000,
     ) -> None:
         self.max_files = max_files
         self.max_file_chars = max_file_chars
         self.max_tree_entries = max_tree_entries
+        self.context_mode = context_mode
+        self.core_budget_tokens = core_budget_tokens
         self._last_total_file_count = 0
+        self._last_excluded = {
+            "sensitive_files": 0,
+            "binary_files": 0,
+            "oversized_files": 0,
+        }
 
     def build(
         self,
@@ -83,8 +95,15 @@ class ProjectSnapshotBuilder:
         # 1. Collect file tree
         file_tree = self._collect_file_tree(repo_dir)
 
-        # 2. Select and read priority files
-        selected_files = self._select_files(repo_dir, file_tree)
+        # 2. Select and read files. Layered mode keeps only compact core
+        # evidence; eager_compat preserves the historical selection behavior.
+        if self.context_mode == "layered":
+            selected_files = CoreEvidenceSelector(
+                budget_tokens=self.core_budget_tokens,
+                max_file_chars=self.max_file_chars,
+            ).select(repo_dir, file_tree, self._read_file)
+        else:
+            selected_files = self._select_files(repo_dir, file_tree)
 
         # 3. Detect signals
         detected_signals = self._detect_signals(repo_dir, file_tree, selected_files)
@@ -96,20 +115,50 @@ class ProjectSnapshotBuilder:
         # 5. Compute sha256 for each file
         file_digests = {}
         for name, content in selected_files.items():
-            file_digests[name] = hashlib.sha256(content.encode("utf-8")).hexdigest()
+            try:
+                file_digests[name] = hashlib.sha256(
+                    (repo_dir / name).read_bytes()
+                ).hexdigest()
+            except OSError:
+                file_digests[name] = hashlib.sha256(
+                    content.encode("utf-8")
+                ).hexdigest()
 
         # Build selected_files with metadata
         selected_with_meta = {}
         for name in sanitized_files:
+            content = sanitized_files[name]
+            digest = file_digests.get(name, "")
+            observed_content = content.rsplit("\n\n[truncated]", 1)[0]
             selected_with_meta[name] = {
                 "path": name,
-                "content": sanitized_files[name],
-                "sha256": file_digests.get(name, ""),
+                "content": content,
+                "sha256": digest,
+                "observation_id": "core_%s" % digest[:12],
+                "line_start": 1,
+                "line_end": max(1, len(observed_content.splitlines())),
+                "truncated": content.endswith("\n\n[truncated]"),
+                "trust_level": "untrusted_repository",
             }
 
+        inventory = RepositoryInventoryBuilder().build(
+            repo_dir,
+            file_tree,
+            detected_signals=detected_signals,
+            total_file_count=self._last_total_file_count,
+            tree_truncated=self._last_total_file_count > len(file_tree),
+            excluded=self._last_excluded,
+        )
+
         return {
+            "schema_version": 2,
+            "context_mode": self.context_mode,
             "task_id": task_id,
+            # repo_dir is needed by local runtime artifacts but planners must
+            # not treat it as an authority or echo it into plans.
             "repo_dir": str(repo_dir),
+            "repository_fingerprint": inventory["repository_fingerprint"],
+            "repository_inventory": inventory,
             "file_tree": file_tree,
             "file_tree_summary": {
                 "total_file_count": self._last_total_file_count,
@@ -131,24 +180,50 @@ class ProjectSnapshotBuilder:
         """Collect the full file tree, skipping .git and binary dirs."""
         result: List[str] = []
         seen = set()
+        seen_files = set()
         self._last_total_file_count = 0
+        self._last_excluded = {
+            "sensitive_files": 0,
+            "binary_files": 0,
+            "oversized_files": 0,
+        }
         for name in PRIORITY_FILES:
             path = repo_dir / name
+            if not RepositoryReadPolicy.path_allowed(name):
+                self._last_excluded["sensitive_files"] += 1
+                continue
             if path.is_file() and path.suffix.lower() not in SKIP_EXTENSIONS:
+                try:
+                    identity = (path.stat().st_dev, path.stat().st_ino)
+                except OSError:
+                    continue
+                if identity in seen_files:
+                    continue
                 result.append(name)
                 seen.add(name)
+                seen_files.add(identity)
         for path in sorted(repo_dir.rglob("*")):
-            if path.is_dir():
+            if path.is_symlink() or path.is_dir():
                 continue
             # Skip files inside skipped directories
             if any(part in SKIP_DIRS for part in path.parts):
                 continue
             # Skip binary/weight files by extension
             if path.suffix.lower() in SKIP_EXTENSIONS:
+                self._last_excluded["binary_files"] += 1
                 continue
             try:
                 rel = str(path.relative_to(repo_dir))
             except ValueError:
+                continue
+            if not RepositoryReadPolicy.path_allowed(rel):
+                self._last_excluded["sensitive_files"] += 1
+                continue
+            try:
+                identity = (path.stat().st_dev, path.stat().st_ino)
+            except OSError:
+                continue
+            if identity in seen_files:
                 continue
             if rel in seen:
                 continue
@@ -156,10 +231,15 @@ class ProjectSnapshotBuilder:
             if len(result) < self.max_tree_entries:
                 result.append(rel)
                 seen.add(rel)
+                seen_files.add(identity)
         self._last_total_file_count += len(
             [name for name in result if name in PRIORITY_FILES]
         )
         return result
+
+    def collect_file_tree(self, repo_dir: Path) -> List[str]:
+        """Public metadata-only tree collection used for freshness checks."""
+        return self._collect_file_tree(Path(repo_dir))
 
     def _select_files(self, repo_dir: Path, file_tree: List[str]) -> Dict[str, str]:
         """Select priority files and read their content."""

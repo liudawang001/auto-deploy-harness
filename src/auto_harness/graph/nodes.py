@@ -276,7 +276,12 @@ class DeploymentGraphNodes:
 
     def build_snapshot(self, state):
         snapshot = self.deps.build_snapshot(state)
-        path = self._artifacts(state).write_project_snapshot(snapshot)
+        artifacts = self._artifacts(state)
+        path = artifacts.write_project_snapshot(snapshot)
+        if snapshot.get("repository_inventory") and hasattr(artifacts, "write_repository_inventory"):
+            inventory_path = artifacts.write_repository_inventory(snapshot["repository_inventory"])
+        else:
+            inventory_path = path
         # Update state with skill/memory fields from snapshot (Task 9)
         route_path = Path(state["run_dir"]) / "skills" / "routes" / "plan.json"
         update = {
@@ -295,6 +300,13 @@ class DeploymentGraphNodes:
                 **state.get("skill_route_paths", {}),
                 "plan": str(route_path) if route_path.exists() else "",
             },
+            "repository_fingerprint": snapshot.get("repository_fingerprint", ""),
+            "repository_inventory_path": str(inventory_path),
+            "observation_ledger_path": str(
+                Path(state["run_dir"]) / "reports" / "observation_ledger.jsonl"
+            ),
+            "planner_turn_kind": "",
+            "planner_phase": "plan",
         }
         return update
 
@@ -361,8 +373,36 @@ class DeploymentGraphNodes:
 
     def plan(self, state):
         snapshot = read_json(Path(state["snapshot_path"]))
+        layered = (
+            snapshot.get("context_mode") == "layered"
+            and callable(getattr(self.deps.planner, "turn", None))
+        )
         try:
-            raw = self.deps.planner.plan(snapshot, skill_context=snapshot.get("skill_context", {}))
+            if layered:
+                from auto_harness.agent_runtime.observation_ledger import ObservationLedger
+                observation_budget = dict(state.get("observation_budget", {}))
+                exhausted = (
+                    int(observation_budget.get("remaining_rounds", 0)) <= 0
+                    or int(observation_budget.get("remaining_tokens", 0)) <= 0
+                    or int(observation_budget.get("remaining_files", 0)) <= 0
+                )
+                observation_budget.update({
+                    "force_final": exhausted,
+                    "budget_exhausted": exhausted,
+                })
+                raw = self.deps.planner.turn(
+                    snapshot,
+                    observations=ObservationLedger(
+                        Path(state["observation_ledger_path"])
+                    ).load(),
+                    observation_budget=observation_budget,
+                    skill_context=snapshot.get("skill_context", {}),
+                    phase=state.get("planner_phase", "plan"),
+                    failure_context=state.get("failure_context", {})
+                    if state.get("planner_phase") == "replan" else None,
+                )
+            else:
+                raw = self.deps.planner.plan(snapshot, skill_context=snapshot.get("skill_context", {}))
         except Exception as exc:
             return {
                 "llm_error": _sanitize_error(exc),
@@ -373,11 +413,133 @@ class DeploymentGraphNodes:
                 "raw_plan_path": "",
                 "current_stage": "plan",
             }
-        path = self._artifacts(state).write_raw_plan({
-            "raw_text": raw.text[:10000],
+        if not layered:
+            raw_text = raw.text
+            if snapshot.get("context_mode") == "layered":
+                from auto_harness.agent_runtime.observation_ledger import enrich_plan_grounding
+                from auto_harness.agent_runtime.planner_turn import PlannerTurnParser
+                try:
+                    direct_turn = PlannerTurnParser().parse(raw.text)
+                    if direct_turn.kind == "final":
+                        raw_text = json.dumps(
+                            enrich_plan_grounding(direct_turn.plan, snapshot, []),
+                            ensure_ascii=False,
+                        )
+                except ValueError:
+                    pass
+            path = self._artifacts(state).write_raw_plan({
+                "raw_text": raw_text[:10000],
+                "context": safe_context_telemetry(getattr(raw, "context", {})),
+            })
+            return {"raw_plan_path": str(path), "current_stage": "plan", "planner_turn_kind": "final"}
+
+        from auto_harness.agent_runtime.planner_turn import PlannerTurnParser
+        try:
+            turn = PlannerTurnParser(
+                max_requests=self._cfg("agent_repo_max_requests_per_round", 4)
+            ).parse(raw.text)
+        except ValueError as exc:
+            return {
+                "llm_error": _sanitize_error(exc),
+                "stop_reason": "planner_turn_invalid",
+                "current_stage": "plan",
+            }
+        turn_number = int(state.get("planner_turn_count", 0)) + 1
+        turn_dir = Path(state["run_dir"]) / "reports" / "planner_turns"
+        turn_dir.mkdir(parents=True, exist_ok=True)
+        turn_path = turn_dir / ("turn_%03d.json" % turn_number)
+        write_json(turn_path, {
+            "kind": turn.kind,
+            "reason": turn.reason,
+            "requests": [request.to_dict() for request in turn.requests],
+            "plan": turn.plan,
             "context": safe_context_telemetry(getattr(raw, "context", {})),
         })
-        return {"raw_plan_path": str(path), "current_stage": "plan"}
+        paths = list(state.get("planner_turn_paths", [])) + [str(turn_path)]
+        if turn.kind == "observe":
+            budget = state.get("observation_budget", {})
+            if int(budget.get("remaining_rounds", 0)) <= 0:
+                return {"stop_reason": "observation_budget_exhausted", "planner_turn_kind": "observe", "planner_turn_count": turn_number, "planner_turn_paths": paths}
+            return {
+                "planner_turn_kind": "observe",
+                "pending_observation_requests": [request.to_dict() for request in turn.requests],
+                "planner_turn_count": turn_number,
+                "planner_turn_paths": paths,
+                "current_stage": "plan",
+            }
+        from auto_harness.agent_runtime.observation_ledger import (
+            ObservationLedger, enrich_plan_grounding,
+        )
+        enriched_plan = enrich_plan_grounding(
+            turn.plan,
+            snapshot,
+            ObservationLedger(Path(state["observation_ledger_path"])).load(),
+        )
+        path = self._artifacts(state).write_raw_plan({
+            "raw_text": json.dumps(enriched_plan, ensure_ascii=False),
+            "context": safe_context_telemetry(getattr(raw, "context", {})),
+        })
+        return {
+            "raw_plan_path": str(path),
+            "planner_turn_kind": "final",
+            "pending_observation_requests": [],
+            "planner_turn_count": turn_number,
+            "planner_turn_paths": paths,
+            "current_stage": "plan",
+        }
+
+    def observe_repo(self, state):
+        from auto_harness.agent_runtime.observation_ledger import RepositoryObservationService
+        from auto_harness.agent_runtime.repository_inventory import (
+            rebuild_repository_inventory,
+        )
+
+        snapshot = read_json(Path(state["snapshot_path"]))
+        current = rebuild_repository_inventory(
+            Path(state["repo_dir"]),
+            snapshot,
+            max_tree_entries=self._cfg("agent_repo_tree_max_entries", 5000),
+        )
+        if current.get("repository_fingerprint") != state.get("repository_fingerprint"):
+            return {"stop_reason": "repository_changed_during_plan", "current_stage": "observe_repo"}
+        round_number = int(state.get("observation_round", 0)) + 1
+        result = RepositoryObservationService(
+            config=self.deps.runtime_config
+        ).execute_round(
+            state.get("pending_observation_requests", []),
+            repo_dir=Path(state["repo_dir"]),
+            ledger_path=Path(state["observation_ledger_path"]),
+            repository_fingerprint=state.get("repository_fingerprint", ""),
+            round_number=round_number,
+            budget=state.get("observation_budget", {}),
+        )
+        if result.get("status") != "passed":
+            return {
+                "stop_reason": result.get("stop_reason", "repository_observation_failed"),
+                "current_stage": "observe_repo",
+            }
+        budget_path = Path(state["run_dir"]) / "reports" / "repository_budget.json"
+        write_json(budget_path, result.get("budget", {}))
+        digests = dict(state.get("observed_file_digests", {}))
+        for record in result.get("results", []):
+            evidence = record.get("evidence", {}) if isinstance(record, dict) else {}
+            for item in evidence.get("files", []) if isinstance(evidence, dict) else []:
+                if item.get("path") and item.get("sha256"):
+                    digests[item["path"]] = item["sha256"]
+        return {
+            "observation_round": round_number,
+            "observation_budget": result.get("budget", {}),
+            "pending_observation_requests": [],
+            "observed_file_digests": digests,
+            "planner_turn_kind": "",
+            "current_stage": "observe_repo",
+        }
+
+    def _cfg(self, name, default):
+        config = self.deps.runtime_config
+        if isinstance(config, dict):
+            return int(config.get(name, default))
+        return int(getattr(config, name, default))
 
     def parse(self, state):
         raw = read_json(Path(state["raw_plan_path"]))
@@ -393,8 +555,39 @@ class DeploymentGraphNodes:
     def policy(self, state):
         parsed = read_json(Path(state["parsed_plan_path"]))
         snapshot = read_json(Path(state["snapshot_path"]))
+        if snapshot.get("context_mode") == "layered":
+            from auto_harness.agent_runtime.observation_ledger import ObservationLedger
+            from auto_harness.agent_runtime.repository_inventory import (
+                rebuild_repository_inventory,
+            )
+            current = rebuild_repository_inventory(
+                Path(state["repo_dir"]),
+                snapshot,
+                max_tree_entries=self._cfg("agent_repo_tree_max_entries", 5000),
+            )
+            if current.get("repository_fingerprint") != state.get("repository_fingerprint"):
+                return {"stop_reason": "repository_changed_during_plan", "policy_result_path": ""}
+            snapshot["observation_ledger"] = ObservationLedger(
+                Path(state["observation_ledger_path"])
+            ).load()
         result = self.deps.policy_gate.validate(parsed, snapshot, runtime_policy=state.get("runtime_policy", {}), config=self.deps.runtime_config)
-        path = self._artifacts(state).write_policy_result(result)
+        artifacts = self._artifacts(state)
+        path = artifacts.write_policy_result(result)
+        if snapshot.get("context_mode") == "layered":
+            artifacts.write_repository_grounding({
+                "schema_version": 1,
+                "verdict": "accepted" if result.get("allowed") else "rejected",
+                "accepted_grounding": parsed.get("grounding", [])
+                if result.get("allowed") else [],
+                "rejected_grounding": [] if result.get("allowed") else [
+                    result.get("rejection") or {
+                        "reason": "grounding or plan policy rejected"
+                    }
+                ],
+                "repository_fingerprint": state.get(
+                    "repository_fingerprint", ""
+                ),
+            })
         return {"policy_result_path": str(path), "stop_reason": "" if result.get("allowed") else "policy_rejected"}
 
     def compile(self, state):
@@ -451,6 +644,27 @@ class DeploymentGraphNodes:
             except Exception:
                 pass
             failure["skill_context"] = skill_context
+        layered = (
+            isinstance(snapshot, dict)
+            and snapshot.get("context_mode") == "layered"
+            and callable(getattr(self.deps.planner, "turn", None))
+        )
+        if layered:
+            revision = int(state.get("replan_count", 0)) + 1
+            replans_dir = Path(state["run_dir"]) / "reports" / "replans"
+            replans_dir.mkdir(parents=True, exist_ok=True)
+            previous_path = replans_dir / ("replan_%s.previous.json" % revision)
+            write_json(previous_path, previous_plan)
+            return {
+                "previous_plan_path": str(previous_path),
+                "replan_count": revision,
+                "planner_phase": "replan",
+                "planner_turn_kind": "replan_pending",
+                "failure_context": failure,
+                "raw_plan_path": "",
+                "stop_reason": "",
+                "current_stage": "replan",
+            }
         try:
             raw = self.deps.planner.replan(
                 snapshot, previous_plan, failure,

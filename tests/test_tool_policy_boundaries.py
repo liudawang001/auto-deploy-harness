@@ -213,7 +213,7 @@ class TestToolPolicyBoundaries(unittest.TestCase):
     def test_unimplemented_tool_rejected_before_risk(self):
         """Unimplemented tools should be rejected before risk/category checks."""
         tool_call = ToolCall(
-            name="inspect_repo_tree",  # not implemented
+            name="inspect_env_log",  # not implemented
             input={"path": "."},
         )
         decision = self.policy.validate(

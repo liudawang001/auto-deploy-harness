@@ -105,6 +105,9 @@ class LangGraphControllerDependencies:
             snapshot_builder = ProjectSnapshotBuilder(
                 max_files=getattr(self.runner.config, "agent_plan_first_max_files", 80),
                 max_file_chars=getattr(self.runner.config, "agent_plan_first_max_file_chars", 6000),
+                max_tree_entries=getattr(self.runner.config, "agent_repo_tree_max_entries", 5000),
+                context_mode=getattr(self.runner.config, "agent_repo_context_mode", "layered"),
+                core_budget_tokens=getattr(self.runner.config, "agent_repo_core_budget_tokens", 12000),
             )
             # Build first so routing uses signals from the actual repository.
             snapshot = snapshot_builder.build(

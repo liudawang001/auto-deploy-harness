@@ -74,14 +74,17 @@ class TestImplementedTools:
                 "implemented tool %s has no executor" % tool["name"]
             )
 
-    def test_only_four_tools_are_implemented(self):
-        """First version: only probe_http, discover_gradio_api,
-        discover_openapi_schema, probe_browser_dom are implemented."""
+    def test_repository_and_verify_tools_are_implemented(self):
+        """Implemented tools are backed by repository or verify executors."""
         registry = ToolRegistry()
         implemented = [
             name for name, tool in registry.tools.items() if tool.implemented
         ]
         assert sorted(implemented) == sorted([
+            "inspect_repo_tree",
+            "search_repo",
+            "read_selected_files",
+            "parse_dependency_files",
             "probe_http",
             "discover_gradio_api",
             "discover_openapi_schema",
@@ -141,7 +144,7 @@ class TestExecutorContract:
         registry.tools["force_implemented"] = ToolSchema(
             name="force_implemented",
             implemented=True,
-            executor="missing",
+            executor="verify",
             stages=["verify"],
         )
         executor = ToolExecutor(registry=registry)

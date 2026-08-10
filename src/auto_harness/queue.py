@@ -18,6 +18,19 @@ _ALLOWED_LLM_SNAPSHOT_KEYS = frozenset({
     "model",
     "context_window_tokens",
     "max_output_tokens",
+    "agent_repo_context_mode",
+    "agent_repo_inventory_budget_tokens",
+    "agent_repo_core_budget_tokens",
+    "agent_repo_observation_budget_tokens",
+    "agent_repo_max_observation_rounds",
+    "agent_repo_max_requests_per_round",
+    "agent_repo_max_observed_files",
+    "agent_repo_max_chars_per_read",
+    "agent_repo_max_lines_per_read",
+    "agent_repo_search_max_results",
+    "agent_repo_search_max_files",
+    "agent_repo_search_max_bytes",
+    "agent_repo_tree_max_entries",
 })
 
 _FORBIDDEN_LLM_SNAPSHOT_KEYS = frozenset({
@@ -321,6 +334,27 @@ def _apply_queue_llm_snapshot(config: Any, llm_snapshot: Dict) -> None:
         normalize_provider_name,
         set_runtime_overrides,
     )
+
+    repository_fields = (
+        "agent_repo_context_mode",
+        "agent_repo_inventory_budget_tokens",
+        "agent_repo_core_budget_tokens",
+        "agent_repo_observation_budget_tokens",
+        "agent_repo_max_observation_rounds",
+        "agent_repo_max_requests_per_round",
+        "agent_repo_max_observed_files",
+        "agent_repo_max_chars_per_read",
+        "agent_repo_max_lines_per_read",
+        "agent_repo_search_max_results",
+        "agent_repo_search_max_files",
+        "agent_repo_search_max_bytes",
+        "agent_repo_tree_max_entries",
+    )
+    for field in repository_fields:
+        if field not in llm_snapshot:
+            continue
+        value = llm_snapshot[field]
+        setattr(config, field, value if field == "agent_repo_context_mode" else int(value))
 
     agent_provider = llm_snapshot.get("agent_provider", "")
     plan_provider = llm_snapshot.get("plan_first_provider", "") or agent_provider

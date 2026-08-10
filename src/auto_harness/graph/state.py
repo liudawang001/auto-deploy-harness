@@ -4,7 +4,7 @@ DeploymentGraphState is a TypedDict used by the StateGraph.
 It only stores serializable types (paths, strings, dicts, lists).
 No provider, module, Popen, callback, or file handle references.
 
-schema_version: 2 — includes all fields from Phases 1–6.
+schema_version: 3 — includes layered repository observation state.
 Annotated list fields (errors, node_history, recovery_events,
 approval_history, agent_trace_paths) use operator.add reducers so
 that each node can append entries without overwriting previous ones.
@@ -106,6 +106,20 @@ class DeploymentGraphState(TypedDict, total=False):
     llm_error: str
     llm_context: Dict[str, Any]
     previous_plan_path: str
+
+    # ── Layered repository observation ───────────────────────────────
+
+    repository_inventory_path: str
+    repository_fingerprint: str
+    observation_ledger_path: str
+    planner_turn_count: int
+    planner_turn_paths: List[str]
+    planner_turn_kind: str
+    observation_round: int
+    pending_observation_requests: List[Dict[str, Any]]
+    observation_budget: Dict[str, Any]
+    observed_file_digests: Dict[str, str]
+    planner_phase: str
 
     # ── Memory/Skill fields (Task 8) ───────────────────────────────────
 

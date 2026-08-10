@@ -28,6 +28,21 @@ class PlanArtifactWriter:
         write_json(path, snapshot)
         return path
 
+    def write_repository_inventory(self, inventory: Dict) -> Path:
+        path = self.reports_dir / "repository_inventory.json"
+        write_json(path, inventory)
+        return path
+
+    def write_repository_budget(self, budget: Dict) -> Path:
+        path = self.reports_dir / "repository_budget.json"
+        write_json(path, budget)
+        return path
+
+    def write_repository_grounding(self, grounding: Dict) -> Path:
+        path = self.reports_dir / "repository_grounding.json"
+        write_json(path, grounding)
+        return path
+
     def write_raw_plan(self, raw_plan: Any) -> Path:
         path = self.reports_dir / "llm_deployment_plan.raw.json"
         write_json(path, raw_plan)

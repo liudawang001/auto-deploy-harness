@@ -78,6 +78,9 @@ class RepoEvidenceSelector:
 
 def safe_repo_path(repo_dir: Path, relative_path: str) -> Path:
     root = Path(repo_dir).resolve()
+    raw = Path(str(relative_path))
+    if raw.is_absolute() or "\x00" in str(relative_path):
+        raise ValueError("repository path must be a safe relative path")
     candidate = (root / relative_path).resolve()
     try:
         candidate.relative_to(root)

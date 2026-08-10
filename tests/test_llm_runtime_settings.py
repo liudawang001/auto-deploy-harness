@@ -308,6 +308,8 @@ class TestQueueSnapshot:
             "model": "deepseek-v4-flash",
             "context_window_tokens": 524288,
             "max_output_tokens": 32768,
+            "agent_repo_context_mode": "eager_compat",
+            "agent_repo_max_observation_rounds": 2,
         })
 
         assert config.agent_provider == "deepseek"
@@ -320,6 +322,8 @@ class TestQueueSnapshot:
         }
         assert config.agent_context_window_tokens == 524288
         assert config.agent_context_reserved_output_tokens == 32768
+        assert config.agent_repo_context_mode == "eager_compat"
+        assert config.agent_repo_max_observation_rounds == 2
 
     def test_provider_precheck_always_checks_agent_and_plan_first(self):
         from auto_harness.queue import _validate_job_providers
