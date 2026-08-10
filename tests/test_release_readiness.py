@@ -64,7 +64,7 @@ def test_packaged_resources_match_repository_defaults():
         assert target.read_bytes() == source.read_bytes()
 
 
-def test_default_cli_smoke_uses_non_secret_deepseek_placeholder(monkeypatch, tmp_path):
+def test_default_cli_smoke_uses_offline_mock_without_llm_keys(monkeypatch, tmp_path):
     captured = {}
 
     def fake_run(command, cwd, env=None):
@@ -75,11 +75,17 @@ def test_default_cli_smoke_uses_non_secret_deepseek_placeholder(monkeypatch, tmp
         write_json(state, {"status": "completed_dry_run"})
         return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
-    monkeypatch.setenv("DEEPSEEK_API_KEY", "inherited-real-key-must-not-pass-through")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "inherited-key-must-not-pass-through")
+    monkeypatch.setenv("AUTO_HARNESS_LLM_API_KEY", "generic-key-must-not-pass-through")
     monkeypatch.setattr(release_gates, "_run", fake_run)
 
     evidence = release_gates._default_cli_smoke(tmp_path)
 
     assert evidence["status"] == "passed"
     assert "--dry-run" in captured["command"]
-    assert captured["env"]["DEEPSEEK_API_KEY"] == "ci-dry-run-placeholder"
+    agent_provider_index = captured["command"].index("--agent-provider")
+    plan_provider_index = captured["command"].index("--agent-plan-first-provider")
+    assert captured["command"][agent_provider_index + 1] == "mock"
+    assert captured["command"][plan_provider_index + 1] == "mock"
+    assert "DEEPSEEK_API_KEY" not in captured["env"]
+    assert "AUTO_HARNESS_LLM_API_KEY" not in captured["env"]

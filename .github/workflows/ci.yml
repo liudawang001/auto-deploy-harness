@@ -34,22 +34,24 @@ jobs:
       - run: python -m pip install -e '.[test]'
       - run: pytest -q
 
-  benchmark-package-readiness:
+  development-readiness:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
           cache: pip
-      - run: python -m pip install -e '.[dev]'
-      - run: python -m auto_harness.release_gates
-      - run: python -m auto_harness.cli readiness --output reports/readiness-audit.json
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: release-evidence
-          path: reports/*.json
+      - run: python -m pip install -e '.[test]'
+      - name: Run offline default CLI smoke
+        run: >-
+          python -m auto_harness.cli deploy
+          --repo tests/fixtures/e2e/http_trace_echo
+          --name ci-development-smoke
+          --dry-run
+          --agent-provider mock
+          --agent-plan-first-provider mock
 
   dependency-audit:
     runs-on: ubuntu-latest

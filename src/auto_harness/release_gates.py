@@ -146,14 +146,16 @@ def _default_cli_smoke(root: Path) -> Dict[str, object]:
         command = [
             sys.executable, "-m", "auto_harness.cli", "deploy",
             "--repo", str(fixture), "--name", "release-default-smoke", "--dry-run",
+            "--agent-provider", "mock",
+            "--agent-plan-first-provider", "mock",
         ]
         env = dict(os.environ)
         env["PYTHONPATH"] = str(root / "src")
-        # The default provider requires a key during CLI preflight, even
-        # though this smoke is an isolated dry-run and never calls DeepSeek.
-        # Always replace any inherited real key with a clearly non-secret
-        # placeholder so CI can validate the default path safely.
-        env["DEEPSEEK_API_KEY"] = "ci-dry-run-placeholder"
+        # This packaging/CLI smoke must remain fully offline. Explicit mock
+        # providers resolve planner_mode=auto to the deterministic planner;
+        # remove inherited credentials so no real key enters the subprocess.
+        env.pop("DEEPSEEK_API_KEY", None)
+        env.pop("AUTO_HARNESS_LLM_API_KEY", None)
         completed = _run(command, work, env)
         states = list((work / "runs").glob("*/state.json"))
         terminal = read_json(states[0]).get("status") if len(states) == 1 else "missing"
