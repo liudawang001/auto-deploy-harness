@@ -694,23 +694,27 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(captured["url"], "http://127.0.0.1:8000/api/check")
             self.assertIn("verify_", captured["body"])
 
-    def test_verify_accepts_trace_tagged_health_endpoint_2xx(self):
-        trace = "verify_trace_123"
-        analysis = {
-            "verify_hint": {
-                "expected_output": "Response status 200 indicates service is healthy",
-            },
-        }
-        response = {"status_code": 200}
+    def test_verify_rejects_trace_tagged_health_endpoint_without_response_trace(self):
+        def fake_urlopen(req, timeout):
+            return FakeHttpResponse("healthy")
 
-        self.assertTrue(
-            VerifyModule._accepts_fresh_status(
-                analysis,
-                "http://127.0.0.1:8088/api/healthz?trace=%s" % trace,
-                trace,
-                response,
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / "workspace" / "repo").mkdir(parents=True)
+            result = VerifyModule(urlopen=fake_urlopen).verify(
+                run_dir,
+                analysis={
+                    "verify_hint": {
+                        "endpoint": "http://127.0.0.1:8088/api/healthz",
+                        "expected_output": "Response status 200 indicates service is healthy",
+                    },
+                },
+                runner_result={"pid": 1234, "expected_port": 8088, "service_ready": True},
             )
-        )
+
+        self.assertEqual(result.status, "uncertain")
+        checks = {check["name"]: check for check in result.data["checks"]}
+        self.assertEqual(checks["http_trace_response"]["status"], "uncertain")
 
     def test_verify_discovers_gradio_config_request(self):
         captured = {"config_called": False}

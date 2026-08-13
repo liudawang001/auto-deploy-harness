@@ -201,7 +201,7 @@ class DeterministicDeploymentPlanner:
                     "method": "GET",
                     "path": "/?_auto_harness_trace={{trace_id}}",
                 },
-                "success_evidence": "fresh 2xx response to current trace-tagged request",
+                "success_evidence": "response contains current trace_id",
             },
             "risks": [],
             "fallbacks": [],

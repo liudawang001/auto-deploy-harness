@@ -266,9 +266,6 @@ class VerifyModule:
                 if trace_id in body:
                     status = "pass"
                     reason = "HTTP response contains trace id"
-                elif self._accepts_fresh_status(analysis, traced_url, trace_id, response_record):
-                    status = "pass"
-                    reason = "fresh successful response to trace-tagged request"
                 elif request_plan.get("follow_up_url_template"):
                     self._progress("http_trace_follow_up_started", {"trace_id": trace_id})
                     follow_up_record = self._execute_follow_up_trace(
@@ -341,27 +338,15 @@ class VerifyModule:
                     code = getattr(resp, "status", None) or getattr(resp, "code", None)
                 attempt = {"url": url, "status_code": code, "body_tail": body[-2000:]}
                 attempts.append(attempt)
-                if isinstance(code, int) and 200 <= code < 300:
+                # A successful status only proves that a health endpoint is
+                # reachable.  Strong deployment evidence still requires the
+                # service response to demonstrate that it processed this
+                # verification attempt's trace id.
+                if isinstance(code, int) and 200 <= code < 300 and trace_id in body:
                     return {"trace_found": True, "attempts": attempts, "selected_url": url}
             except Exception as exc:  # noqa: BLE001 - bounded local fallback evidence
                 attempts.append({"url": url, "error": str(exc)})
         return {"trace_found": False, "attempts": attempts}
-
-    @staticmethod
-    def _accepts_fresh_status(analysis: Dict, url: str, trace_id: str, response: Dict) -> bool:
-        verify_hint = analysis.get("verify_hint", {}) if isinstance(analysis, dict) else {}
-        expected = str(verify_hint.get("expected_output") or "").lower()
-        code = response.get("status_code")
-        parsed = urllib.parse.urlparse(url)
-        health_like = parsed.path.rstrip("/").endswith(
-            ("/health", "/healthz", "/ready", "/readiness")
-        )
-        return (
-            (health_like or all(token in expected for token in ("fresh", "trace", "2xx")))
-            and trace_id in url
-            and isinstance(code, int)
-            and 200 <= code < 300
-        )
 
     def _execute_streamlit_probe(self, trace_id: str, service: Dict, analysis: Dict, evidence_dir: Path) -> Optional[Dict]:
         frameworks = set(analysis.get("frameworks") or []) if isinstance(analysis, dict) else set()
