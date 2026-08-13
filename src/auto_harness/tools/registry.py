@@ -53,6 +53,15 @@ class ToolRegistry:
             # read_only tools - no side effects, safe in any mode
             ToolSchema(
                 name="inspect_repo_tree",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "default": "."},
+                        "max_depth": {"type": "integer", "minimum": 1, "maximum": 8},
+                        "max_entries": {"type": "integer", "minimum": 1},
+                        "path_glob": {"type": "string", "default": "**/*"},
+                    },
+                },
                 risk_level="low",
                 side_effects=[],
                 requires_policy=False,
@@ -64,6 +73,25 @@ class ToolRegistry:
             ),
             ToolSchema(
                 name="read_selected_files",
+                input_schema={
+                    "type": "object",
+                    "required": ["files"],
+                    "properties": {
+                        "files": {
+                            "type": "array",
+                            "minItems": 1,
+                            "items": {
+                                "type": "object",
+                                "required": ["path"],
+                                "properties": {
+                                    "path": {"type": "string"},
+                                    "start_line": {"type": "integer", "minimum": 1},
+                                    "end_line": {"type": "integer", "minimum": 1},
+                                },
+                            },
+                        },
+                    },
+                },
                 risk_level="low",
                 side_effects=[],
                 requires_policy=False,
@@ -75,6 +103,16 @@ class ToolRegistry:
             ),
             ToolSchema(
                 name="search_repo",
+                input_schema={
+                    "type": "object",
+                    "required": ["query"],
+                    "properties": {
+                        "query": {"type": "string", "minLength": 1, "maxLength": 500},
+                        "path_glob": {"type": "string", "default": "**/*"},
+                        "case_sensitive": {"type": "boolean", "default": False},
+                        "max_results": {"type": "integer", "minimum": 1},
+                    },
+                },
                 risk_level="low",
                 side_effects=[],
                 requires_policy=False,
@@ -86,6 +124,16 @@ class ToolRegistry:
             ),
             ToolSchema(
                 name="parse_dependency_files",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "paths": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "maxItems": 16,
+                        },
+                    },
+                },
                 risk_level="low",
                 side_effects=[],
                 requires_policy=False,

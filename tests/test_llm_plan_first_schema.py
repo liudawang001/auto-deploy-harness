@@ -252,6 +252,123 @@ class TestProjectSnapshotBuilder(unittest.TestCase):
             # Check sha256
             self.assertTrue(snapshot["selected_files"]["app.py"]["sha256"])
 
+    def test_snapshot_detects_console_script_and_documented_run_command(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "pyproject.toml").write_text(
+                '[project]\nname = "demo"\nrequires-python = ">=3.12"\n'
+                '[project.scripts]\ndemo = "demo.cli:main"\n'
+            )
+            (root / "README.md").write_text(
+                "```bash\ndemo init\ndemo run --host 0.0.0.0 --port 8088 # dashboard\n```\n"
+            )
+            snapshot = ProjectSnapshotBuilder().build(root)
+            signals = snapshot["detected_signals"]
+            self.assertEqual(signals["python_requires"], ">=3.12")
+            self.assertEqual(signals["console_scripts"][0]["name"], "demo")
+            self.assertEqual(
+                signals["documented_run_commands"][0]["cmd"],
+                ["demo", "run", "--host", "0.0.0.0", "--port", "8088"],
+            )
+            self.assertEqual(signals["documented_run_commands"][0]["expected_port"], 8088)
+
+    def test_snapshot_detects_required_locked_frontend_source_build(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "dashboard").mkdir()
+            (root / "dashboard" / "package.json").write_text('{}\n')
+            (root / "dashboard" / "package-lock.json").write_text('{}\n')
+            (root / "Makefile").write_text(
+                "DASHBOARD_DIR := dashboard\n"
+                "build-frontend:\n"
+                "\tcd $(DASHBOARD_DIR) && npm ci\n"
+                "\tcd $(DASHBOARD_DIR) && npm run build\n"
+            )
+            snapshot = ProjectSnapshotBuilder().build(root)
+            assert snapshot["detected_signals"]["source_build_commands"] == [
+                {
+                    "cmd": ["npm", "--prefix", "dashboard", "ci"],
+                    "source": "Makefile",
+                    "reason": "lockfile-backed frontend dependencies required by build-frontend",
+                },
+                {
+                    "cmd": ["npm", "--prefix", "dashboard", "run", "build"],
+                    "source": "Makefile",
+                    "reason": "build missing production dashboard artifact",
+                },
+            ]
+
+            built = root / "src" / "octop" / "dashboard"
+            built.mkdir(parents=True)
+            (built / "index.html").write_text("built\n")
+            snapshot = ProjectSnapshotBuilder().build(root)
+            assert snapshot["detected_signals"]["source_build_commands"] == []
+
+    def test_snapshot_detects_console_build_setup_and_app_command(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "console").mkdir()
+            (root / "deploy").mkdir()
+            (root / "console" / "package.json").write_text('{}\n')
+            (root / "console" / "package-lock.json").write_text('{}\n')
+            (root / "deploy" / "entrypoint.sh").write_text(
+                "#!/bin/sh\npaw init --defaults --accept-security\n",
+            )
+            (root / "pyproject.toml").write_text(
+                '[project]\nname = "paw"\nrequires-python = ">=3.11,<3.14"\n'
+                '[project.scripts]\npaw = "paw.cli:main"\n'
+            )
+            (root / "README.md").write_text(
+                "```bash\n"
+                "paw init --defaults\n"
+                "paw app\n"
+                "```\n"
+                "Open http://127.0.0.1:8088/ after startup.\n\n"
+                "From source: `cd console && npm ci && npm run build`.\n"
+            )
+            signals = ProjectSnapshotBuilder(
+                context_mode="layered", core_budget_tokens=12000,
+            ).build(root)["detected_signals"]
+            assert signals["console_scripts"][0]["name"] == "paw"
+            assert signals["documented_setup_commands"][0]["cmd"] == [
+                "paw", "init", "--defaults", "--accept-security",
+            ]
+            assert signals["documented_setup_commands"][0]["source"] == (
+                "deploy/entrypoint.sh"
+            )
+            assert signals["documented_run_commands"][0]["cmd"] == ["paw", "app"]
+            assert signals["documented_run_commands"][0]["expected_port"] == 8088
+            assert signals["source_build_commands"][-1]["cmd"] == [
+                "npm", "--prefix", "console", "run", "build",
+            ]
+
+    def test_long_readme_keeps_late_deployment_evidence(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "pyproject.toml").write_text(
+                '[project]\nname = "paw"\nrequires-python = ">=3.11"\n'
+                '[project.scripts]\npaw = "paw.cli:main"\n'
+            )
+            (root / "README.md").write_text(
+                "# Paw\n" + ("feature overview text\n" * 1000)
+                + "## Quick Start\n```bash\npaw init --defaults\npaw app\n```\n"
+                + "Open http://127.0.0.1:8088/ after startup.\n"
+            )
+            snapshot = ProjectSnapshotBuilder(
+                max_file_chars=6000,
+                context_mode="layered",
+                core_budget_tokens=12000,
+            ).build(root)
+            content = snapshot["selected_files"]["README.md"]["content"]
+            assert "paw init --defaults" in content
+            assert "paw app" in content
+            signals = snapshot["detected_signals"]
+            assert signals["documented_setup_commands"][0]["cmd"] == [
+                "paw", "init", "--defaults",
+            ]
+            assert signals["documented_setup_commands"][0]["line"] > 1000
+            assert signals["documented_run_commands"][0]["expected_port"] == 8088
+
     def test_snapshot_redacts_secrets(self):
         """Snapshot should redact secret patterns from file content."""
         with tempfile.TemporaryDirectory() as tmpdir:

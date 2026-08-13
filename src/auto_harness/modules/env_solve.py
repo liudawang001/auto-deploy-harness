@@ -143,8 +143,15 @@ class EnvSolveModule:
             effective_resource_plan["torch_variant"] = "cpu"
         elif decision.get("torch_variant") in ("cpu", "cu118", "cu121"):
             effective_resource_plan["torch_variant"] = decision["torch_variant"]
+        torch_frameworks = set(frameworks)
+        model_policy = analysis.get("model_assets")
+        if isinstance(model_policy, dict) and model_policy.get("required") is not True:
+            # Repository-wide source/docs may mention optional inference
+            # backends. Without a required model asset, only an actual declared
+            # torch dependency should cause an eager wheel installation.
+            torch_frameworks.difference_update({"torch", "transformers", "diffusers"})
         torch_solution = self._torch_solution(
-            requirements, frameworks, effective_resource_plan,
+            requirements, torch_frameworks, effective_resource_plan,
             local_environment, base_plan,
         )
         gpu_package_matrix = self._gpu_package_matrix(
@@ -157,9 +164,11 @@ class EnvSolveModule:
             requirements, frameworks, effective_resource_plan,
             torch_solution, gpu_package_matrix,
         )
+        backend = str(decision.get("backend") or self._selected_backend(environment_strategy, conda_file))
+        if backend == "venv":
+            install_plan = self._normalize_venv_install_plan(install_plan)
         solved_analysis = dict(analysis)
         solved_analysis["install_plan"] = install_plan
-        backend = str(decision.get("backend") or self._selected_backend(environment_strategy, conda_file))
         if decision:
             environment_strategy.update({
                 "backend": backend,
@@ -347,6 +356,29 @@ class EnvSolveModule:
             python_cmd = ".venv/bin/python" if any(".venv" in " ".join(cmd) for cmd in plan) else "python3"
             plan.append([python_cmd, "-m", "pip", "install"] + constraints)
         return plan
+
+    @staticmethod
+    def _normalize_venv_install_plan(plan: List[List[str]]) -> List[List[str]]:
+        """Pin Python package mutations to the Harness-owned virtualenv."""
+        normalized: List[List[str]] = []
+        has_bootstrap = False
+        for raw in plan:
+            cmd = list(raw)
+            if (
+                len(cmd) >= 4
+                and cmd[1:3] == ["-m", "venv"]
+                and cmd[-1] == ".venv"
+            ):
+                has_bootstrap = True
+                cmd[0] = "python3"
+            elif cmd and cmd[0] == "pip":
+                cmd = [".venv/bin/python", "-m", "pip"] + cmd[1:]
+            elif len(cmd) >= 3 and re.fullmatch(r"python(?:3(?:\.\d+)?)?", cmd[0]) and cmd[1:3] == ["-m", "pip"]:
+                cmd[0] = ".venv/bin/python"
+            normalized.append(cmd)
+        if not has_bootstrap:
+            normalized.insert(0, ["python3", "-m", "venv", ".venv"])
+        return normalized
 
     def _apply_torch_solution(self, install_plan: List[List[str]], torch_solution: Dict) -> List[List[str]]:
         selected = torch_solution.get("selected") or {}

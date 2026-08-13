@@ -100,6 +100,7 @@ def read_selected_files(tool_input: Dict, context: Dict) -> ToolResult:
     root = Path(context["repo_dir"]).resolve()
     max_chars = _cfg(context.get("config"), "agent_repo_max_chars_per_read", 12000)
     results: List[Dict] = []
+    errors: List[Dict] = []
     for item in tool_input["files"]:
         try:
             path = safe_repo_path(root, item["path"])
@@ -108,7 +109,11 @@ def read_selected_files(tool_input: Dict, context: Dict) -> ToolResult:
             after = path.stat()
             confirmation = path.read_bytes()
         except OSError as exc:
-            return _failed("read_selected_files", "repository read failed: %s" % str(exc)[:120])
+            errors.append({
+                "path": item["path"],
+                "error": "repository read failed: %s" % str(exc)[:120],
+            })
+            continue
         if (
             (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
             != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
@@ -125,7 +130,11 @@ def read_selected_files(tool_input: Dict, context: Dict) -> ToolResult:
         start = min(max(1, int(item["start_line"])), max(1, len(lines)))
         end = min(int(item["end_line"]), len(lines))
         content = "\n".join(lines[start - 1:end])
-        truncated = len(content) > max_chars or end < len(lines)
+        # A caller-requested line window is complete evidence for that window;
+        # it is not "truncated" merely because the file has later lines, nor
+        # when the requested window extends beyond EOF and all remaining lines
+        # were returned. Mark only actual byte clipping.
+        truncated = len(content) > max_chars
         content = content[:max_chars]
         scan = AgentInputSanitizer().scan_text(content)
         results.append({
@@ -139,7 +148,10 @@ def read_selected_files(tool_input: Dict, context: Dict) -> ToolResult:
             "untrusted_content_risks": scan["risks"],
             "trust_level": "untrusted_repository",
         })
-    return _passed("read_selected_files", {"files": results})
+    if not results:
+        detail = errors[0]["error"] if errors else "no readable repository files"
+        return _failed("read_selected_files", detail)
+    return _passed("read_selected_files", {"files": results, "errors": errors})
 
 
 def parse_dependency_files(tool_input: Dict, context: Dict) -> ToolResult:

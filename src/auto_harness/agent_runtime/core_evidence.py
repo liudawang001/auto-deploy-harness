@@ -6,6 +6,7 @@ from typing import Callable, Dict, Iterable, List, Optional, Tuple
 _MANIFESTS = {
     "pyproject.toml", "requirements.txt", "setup.py", "setup.cfg",
     "environment.yml", "environment.yaml", "poetry.lock", "Pipfile",
+    "Makefile", "package.json",
 }
 _DEPLOY_FILES = {
     "Dockerfile", "docker-compose.yml", "docker-compose.yaml", "compose.yml",
@@ -39,14 +40,27 @@ class CoreEvidenceSelector:
             name = Path(rel).name
             suffix = Path(rel).suffix.lower()
             score = 0
-            if name in _MANIFESTS:
-                score = 100
+            if rel.lower() in {"readme.md", "readme"}:
+                score = 120
+            elif "/" not in rel and name in _MANIFESTS:
+                score = 115
+            elif rel.lower() in {"deploy/entrypoint.sh", "docker/entrypoint.sh"}:
+                # Container entrypoints are authoritative evidence for
+                # unattended initialization flags that READMEs may omit.
+                score = 114
+            elif rel.lower().startswith("scripts/") and name.lower().startswith("readme"):
+                score = 110
+            elif name in _MANIFESTS:
+                score = 105
+            elif name.lower().startswith("readme"):
+                # Public launch examples are often the only authoritative
+                # entrypoint for packaged applications. Keep them in the
+                # compact core evidence before lower-value deploy files.
+                score = 99
             elif name in _DEPLOY_FILES:
                 score = 95
             elif rel in entrypoints or name in _ENTRYPOINTS:
                 score = 90
-            elif name.lower().startswith("readme"):
-                score = 80
             elif ".github/workflows/" in rel and suffix in {".yml", ".yaml"}:
                 score = 70
             elif suffix in {".py", ".toml", ".yml", ".yaml", ".cfg", ".ini"}:

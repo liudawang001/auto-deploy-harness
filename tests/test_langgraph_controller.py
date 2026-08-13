@@ -333,6 +333,174 @@ class TestLangGraphControllerPolicyReject:
 
 
 class TestLangGraphLayeredRepositoryObservation:
+    def test_empty_provider_content_gets_one_bounded_retry(self, tmp_path):
+        import json
+        from auto_harness.agent_runtime.repository_inventory import RepositoryInventoryBuilder
+
+        deps, _, _, _ = make_fake_deps(tmp_path)
+
+        class EmptyThenFinalPlanner:
+            def __init__(self):
+                self.calls = []
+
+            def turn(self, snapshot, **kwargs):
+                self.calls.append(kwargs)
+                if len(self.calls) == 1:
+                    raise ValueError("deepseek returned empty content")
+                assert kwargs["observation_budget"]["provider_retry"] == "previous_response_empty"
+                result = MagicMock()
+                result.context = {}
+                result.text = json.dumps({
+                    "protocol_version": 1,
+                    "kind": "final",
+                    "plan": {"status": "no_safe_plan"},
+                })
+                return result
+
+        planner = EmptyThenFinalPlanner()
+        deps.planner = planner
+        from auto_harness.agent_runtime.deployment_plan import DeploymentPlanParser
+        deps.parser = DeploymentPlanParser()
+        ctx = make_context(tmp_path, dry_run=True)
+        repo = Path(ctx.repo_dir)
+        repo.mkdir(parents=True)
+        (repo / "app.py").write_text("print('ok')\n", encoding="utf-8")
+
+        def layered_snapshot(state):
+            inventory = RepositoryInventoryBuilder().build(
+                repo, ["app.py"], detected_signals={}, total_file_count=1,
+            )
+            return {
+                "task_id": state["task_id"],
+                "context_mode": "layered",
+                "file_tree": ["app.py"],
+                "file_tree_summary": {"total_file_count": 1, "truncated": False},
+                "selected_files": {},
+                "detected_signals": {},
+                "repository_fingerprint": inventory["repository_fingerprint"],
+                "repository_inventory": inventory,
+                "skill_context": {},
+            }
+
+        deps.build_snapshot = layered_snapshot
+        result = LangGraphController(FakeControllerDependencies(deps)).run(ctx)
+        assert len(planner.calls) == 2
+        assert result.stop_reason == "plan_not_ok"
+
+    def test_truncated_provider_json_uses_same_bounded_retry(self, tmp_path):
+        import json
+        from auto_harness.agent_runtime.repository_inventory import RepositoryInventoryBuilder
+
+        deps, _, _, _ = make_fake_deps(tmp_path)
+
+        class InvalidThenFinalPlanner:
+            def __init__(self):
+                self.calls = 0
+
+            def turn(self, snapshot, **kwargs):
+                self.calls += 1
+                if self.calls == 1:
+                    raise ValueError(
+                        "deepseek returned invalid response: response is not valid JSON"
+                    )
+                result = MagicMock()
+                result.context = {}
+                result.text = json.dumps({
+                    "protocol_version": 1,
+                    "kind": "final",
+                    "plan": {"status": "no_safe_plan"},
+                })
+                return result
+
+        planner = InvalidThenFinalPlanner()
+        deps.planner = planner
+        from auto_harness.agent_runtime.deployment_plan import DeploymentPlanParser
+        deps.parser = DeploymentPlanParser()
+        ctx = make_context(tmp_path, dry_run=True)
+        repo = Path(ctx.repo_dir)
+        repo.mkdir(parents=True)
+        (repo / "app.py").write_text("print('ok')\n", encoding="utf-8")
+
+        def layered_snapshot(state):
+            inventory = RepositoryInventoryBuilder().build(
+                repo, ["app.py"], detected_signals={}, total_file_count=1,
+            )
+            return {
+                "task_id": state["task_id"],
+                "context_mode": "layered",
+                "file_tree": ["app.py"],
+                "file_tree_summary": {"total_file_count": 1, "truncated": False},
+                "selected_files": {},
+                "detected_signals": {},
+                "repository_fingerprint": inventory["repository_fingerprint"],
+                "repository_inventory": inventory,
+                "skill_context": {},
+            }
+
+        deps.build_snapshot = layered_snapshot
+        result = LangGraphController(FakeControllerDependencies(deps)).run(ctx)
+        assert planner.calls == 2
+        assert result.stop_reason == "plan_not_ok"
+
+    def test_invalid_planner_turn_gets_one_bounded_correction(self, tmp_path):
+        import json
+        from auto_harness.agent_runtime.repository_inventory import RepositoryInventoryBuilder
+
+        deps, _, _, _ = make_fake_deps(tmp_path)
+
+        class CorrectingPlanner:
+            def __init__(self):
+                self.calls = []
+
+            def turn(self, snapshot, **kwargs):
+                self.calls.append(kwargs)
+                result = MagicMock()
+                result.context = {}
+                if len(self.calls) == 1:
+                    result.text = json.dumps({
+                        "protocol_version": 1,
+                        "kind": "observe",
+                        "requests": [{"tool": "", "input": {}}],
+                    })
+                else:
+                    assert "protocol_correction" in kwargs["observation_budget"]
+                    result.text = json.dumps({
+                        "protocol_version": 1,
+                        "kind": "final",
+                        "plan": {"status": "no_safe_plan"},
+                    })
+                return result
+
+        planner = CorrectingPlanner()
+        deps.planner = planner
+        from auto_harness.agent_runtime.deployment_plan import DeploymentPlanParser
+        deps.parser = DeploymentPlanParser()
+        ctx = make_context(tmp_path, dry_run=True)
+        repo = Path(ctx.repo_dir)
+        repo.mkdir(parents=True)
+        (repo / "app.py").write_text("print('ok')\n", encoding="utf-8")
+
+        def layered_snapshot(state):
+            inventory = RepositoryInventoryBuilder().build(
+                repo, ["app.py"], detected_signals={}, total_file_count=1,
+            )
+            return {
+                "task_id": state["task_id"],
+                "context_mode": "layered",
+                "file_tree": ["app.py"],
+                "file_tree_summary": {"total_file_count": 1, "truncated": False},
+                "selected_files": {},
+                "detected_signals": {},
+                "repository_fingerprint": inventory["repository_fingerprint"],
+                "repository_inventory": inventory,
+                "skill_context": {},
+            }
+
+        deps.build_snapshot = layered_snapshot
+        result = LangGraphController(FakeControllerDependencies(deps)).run(ctx)
+        assert len(planner.calls) == 2
+        assert result.stop_reason == "plan_not_ok"
+
     def test_observe_turn_reads_repository_then_finalizes(self, tmp_path):
         import json
         from auto_harness.agent_runtime.repository_inventory import RepositoryInventoryBuilder

@@ -73,7 +73,11 @@ class PlannerTurnParser:
         if "kind" not in data and "status" in data:
             return PlannerTurn(kind="final", plan=data, raw_response=raw_text)
 
-        if data.get("protocol_version") != 1:
+        # JSON-mode providers occasionally omit this metadata-only field even
+        # when the response otherwise matches the current schema.  Missing
+        # means the sole supported version; explicit unknown versions remain
+        # fail-closed.
+        if data.get("protocol_version", 1) != 1:
             raise PlannerTurnValidationError("unsupported planner turn protocol_version")
         kind = str(data.get("kind", ""))
         if kind not in {"observe", "final"}:
@@ -95,17 +99,31 @@ class PlannerTurnParser:
             raise PlannerTurnValidationError("planner turn exceeds request limit")
         requests = []
         seen = set()
+        explicit_ids = {
+            str(item.get("request_id", ""))
+            for item in raw_requests
+            if isinstance(item, dict) and str(item.get("request_id", ""))
+        }
         for index, item in enumerate(raw_requests):
             if not isinstance(item, dict):
                 raise PlannerTurnValidationError(
                     "requests[%d] must be an object" % index
                 )
             request_id = str(item.get("request_id", ""))
+            if not request_id:
+                # request_id is only an internal correlation key.  Some
+                # otherwise valid JSON-mode providers omit it, so derive a
+                # stable value instead of aborting the whole deployment plan.
+                suffix = index + 1
+                request_id = "auto_request_%d" % suffix
+                while request_id in explicit_ids or request_id in seen:
+                    suffix += 1
+                    request_id = "auto_request_%d" % suffix
             tool = str(item.get("tool", ""))
             tool_input = item.get("input", {})
-            if not request_id or request_id in seen:
+            if request_id in seen:
                 raise PlannerTurnValidationError(
-                    "request_id must be non-empty and unique"
+                    "request_id must be unique"
                 )
             if not tool or not isinstance(tool_input, dict):
                 raise PlannerTurnValidationError(

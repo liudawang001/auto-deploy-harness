@@ -122,9 +122,11 @@ class ProjectAnalyzer:
         plan: List[List[str]] = []
         if "requirements.txt" in files:
             plan.append(["python3", "-m", "venv", ".venv"])
+            plan.append([".venv/bin/python", "-m", "pip", "install", "--upgrade", "pip"])
             plan.append([".venv/bin/python", "-m", "pip", "install", "-r", "requirements.txt"])
         elif "pyproject.toml" in files:
             plan.append(["python3", "-m", "venv", ".venv"])
+            plan.append([".venv/bin/python", "-m", "pip", "install", "--upgrade", "pip"])
             plan.append([".venv/bin/python", "-m", "pip", "install", "."])
         elif "package.json" in files:
             plan.append(["npm", "install"])

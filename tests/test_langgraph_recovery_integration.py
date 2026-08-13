@@ -227,6 +227,34 @@ class TestRecoveryGateNode:
         assert result["recovery_decision"] == "stop"
         assert "conflict" in result.get("stop_reason", "")
 
+    def test_failed_dependency_without_observed_resource_requests_retry(self):
+        """A no-resource dependency failure must not request cleanup."""
+        from auto_harness.graph.nodes import make_recovery_gate_node
+
+        mock_adapter = MagicMock()
+        mock_adapter.prepare_or_reconcile.return_value = RecoveryDecision(
+            decision="approval",
+            operation={"operation_id": "op3", "observed_resource": {}},
+            reconcile_result={"decision": "manual"},
+            hydrated_stage_result={},
+            stop_reason="failed_operation_requires_operator_decision",
+        )
+
+        class MockDeps:
+            recovery_adapter = mock_adapter
+            runtime_config = None
+
+        result = make_recovery_gate_node("env_deploy", MockDeps())({
+            "run_dir": "/tmp",
+            "task_id": "t1",
+            "repo_dir": "/tmp/repo",
+            "runtime_policy": {},
+            "compiled_analysis": {},
+        })
+
+        assert result["pending_approval"]["requested_action"] == "retry"
+        assert result["pending_approval"]["risk"] == "medium"
+
 
 class TestRouteAfterRecovery:
     """Recovery gate 路由测试。"""

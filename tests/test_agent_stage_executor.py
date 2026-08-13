@@ -69,6 +69,52 @@ class TestStageExecutorCallsModules(unittest.TestCase):
         self.assertIn(result.after_status, ("passed", "uncertain"))
         self.assertIn("constraints", result.result.get("data", {}))
 
+    def test_resource_plan_defers_optional_models_when_plan_marks_not_required(self):
+        (self.repo_dir / "README.md").write_text(
+            "Optional local model: CUDA https://huggingface.co/org/demo-model\n",
+            encoding="utf-8",
+        )
+        result = AgentStageExecutor().execute_stage(
+            task_id="test",
+            run_dir=self.run_dir,
+            repo_dir=self.repo_dir,
+            stage="resource_plan",
+            state={},
+            analysis={
+                "frameworks": ["transformers"],
+                "model_assets": {"required": False, "strategy": "none"},
+            },
+            resource_data={},
+            deploy_analysis={},
+            runner_data={},
+            dry_run=True,
+        )
+        data = result.result["data"]
+        self.assertEqual(result.after_status, "passed")
+        self.assertFalse(data["gpu_required"])
+        self.assertEqual(data["model_assets"], [])
+        self.assertEqual(data["external_tokens"], [])
+
+    def test_resource_plan_treats_empty_model_assets_as_no_required_download(self):
+        (self.repo_dir / "README.md").write_text(
+            "Optional CUDA model https://huggingface.co/org/demo-model\n",
+            encoding="utf-8",
+        )
+        result = AgentStageExecutor().execute_stage(
+            task_id="test",
+            run_dir=self.run_dir,
+            repo_dir=self.repo_dir,
+            stage="resource_plan",
+            state={},
+            analysis={"frameworks": ["transformers"], "model_assets": {}},
+            resource_data={},
+            deploy_analysis={},
+            runner_data={},
+            dry_run=True,
+        )
+        self.assertFalse(result.result["data"]["gpu_required"])
+        self.assertEqual(result.result["data"]["model_assets"], [])
+
     def test_stage_executor_calls_env_deploy_module(self):
         """env_deploy should delegate to EnvDeployModule.deploy()."""
         executor = AgentStageExecutor()

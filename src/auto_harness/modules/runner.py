@@ -22,7 +22,7 @@ class RunnerModule:
         repo_dir: Path,
         analysis: Dict,
         execute: bool = False,
-        wait_seconds: int = 10,
+        wait_seconds: int = 30,
         allowed_commands=None,
         execution_backend: str = "local",
         docker_image: str = "python:3.10-slim",
@@ -67,7 +67,33 @@ class RunnerModule:
                 },
             )
         allowed_commands = allowed_commands or []
-        if not is_allowed_command(effective_candidate["cmd"], allowed_commands):
+        allowed = is_allowed_command(effective_candidate["cmd"], allowed_commands)
+        command_path = Path(effective_candidate["cmd"][0]) if effective_candidate.get("cmd") else Path()
+        if not command_path.is_absolute():
+            command_path = repo_dir / command_path
+        if not allowed and command_path.is_file():
+            try:
+                command_path.resolve().relative_to(repo_dir.resolve())
+                # A console script created by the accepted install plan lives
+                # under the Harness-owned project virtualenv.  Treat it like
+                # the small built-in project entrypoint allowlist while still
+                # rejecting arbitrary repository executables.
+                in_project_venv = False
+                try:
+                    command_path.resolve().relative_to(
+                        (repo_dir / ".venv" / "bin").resolve()
+                    )
+                    in_project_venv = command_path.name not in {
+                        "bash", "sh", "zsh", "fish", "csh", "tcsh",
+                    }
+                except ValueError:
+                    pass
+                allowed = in_project_venv or command_path.name in {
+                    "python", "python3", "octop", "uvicorn", "streamlit",
+                }
+            except ValueError:
+                allowed = False
+        if not allowed:
             return StageResult(
                 "runner",
                 "failed",
@@ -86,8 +112,12 @@ class RunnerModule:
         logs_dir = repo_dir.parent.parent / "logs"
         logs_dir.mkdir(parents=True, exist_ok=True)
         log_path = logs_dir / "runner.log"
+        # Install-time initialization and runtime must share the same
+        # task-scoped HOME.  Otherwise commands such as `qwenpaw init` write
+        # configuration that the deployed process cannot see.  Provider
+        # credentials are still filtered by ChildEnvironmentPolicy.
         child_env = self.child_environment_policy.build_for_service(
-            home_dir=logs_dir / "runtime_home",
+            home_dir=repo_dir.parent / "install_home",
         )
         log_file = log_path.open("a", encoding="utf-8")
         proc = subprocess.Popen(
@@ -97,11 +127,26 @@ class RunnerModule:
             stdout=log_file,
             stderr=subprocess.STDOUT,
             text=True,
+            # A deployed service must outlive the short-lived Harness CLI
+            # process and its controlling terminal/session.
+            start_new_session=True,
         )
         log_file.close()
-        time.sleep(wait_seconds)
         port = int(candidate.get("expected_port") or 0)
+        deadline = time.monotonic() + max(0, float(wait_seconds))
         ready = bool(port and is_port_open("127.0.0.1", port))
+        while proc.poll() is None and port and not ready and time.monotonic() < deadline:
+            time.sleep(min(0.25, max(0, deadline - time.monotonic())))
+            ready = is_port_open("127.0.0.1", port)
+        # A pre-existing listener can make the first port probe look ready
+        # before the child finishes binding.  Require a short survival window
+        # after readiness so an address-in-use exit cannot be reported as a
+        # successful deployment.
+        if proc.poll() is None and ready:
+            stability_deadline = time.monotonic() + 1.0
+            while proc.poll() is None and time.monotonic() < stability_deadline:
+                time.sleep(min(0.1, stability_deadline - time.monotonic()))
+            ready = proc.poll() is None and is_port_open("127.0.0.1", port)
         status = "passed" if proc.poll() is None else "failed"
         data = {
             "pid": proc.pid,
@@ -162,9 +207,12 @@ class RunnerModule:
             effective = dict(candidate)
             env_solution = candidate.get("env_solution") or {}
             if env_solution.get("backend") in ("conda", "mamba") and env_solution.get("environment_prefix"):
-                spec = CondaBackend(backend=env_solution["backend"]).build_spec(repo_dir, env_solution, conda_file=(env_solution.get("conda_file") or {}))
-                spec.prefix = env_solution["environment_prefix"]
-                effective["cmd"] = CondaBackend(backend=env_solution["backend"]).run_cmd(spec, candidate.get("cmd", []))
+                raw_cmd = candidate.get("cmd", [])
+                executable = repo_dir / raw_cmd[0] if raw_cmd else None
+                if executable is None or not executable.is_file():
+                    spec = CondaBackend(backend=env_solution["backend"]).build_spec(repo_dir, env_solution, conda_file=(env_solution.get("conda_file") or {}))
+                    spec.prefix = env_solution["environment_prefix"]
+                    effective["cmd"] = CondaBackend(backend=env_solution["backend"]).run_cmd(spec, raw_cmd)
             return effective, {"backend": "local", "environment_backend": env_solution.get("backend", "venv")}
         port = int(candidate.get("expected_port") or 0)
         container_name = "auto-harness-%s-%s" % (short_hash(str(repo_dir), 8), port or "svc")

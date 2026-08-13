@@ -14,7 +14,9 @@ Key invariants:
 - committed operation -> reuse and hydrate prior result; never duplicate execute
 """
 from dataclasses import dataclass
+import hashlib
 from pathlib import Path
+import sys
 from typing import Any, Dict, Optional
 
 from auto_harness.recovery.journal import OperationJournal
@@ -399,13 +401,23 @@ class GraphRecoveryAdapter:
             solution = self._environment_solution(state)
             conda = solution.get("conda") or {}
             spec = conda.get("spec") or {}
-            return {
+            install_plan = self._environment_install_plan(state)
+            normalized = {
                 "backend": solution.get("backend") or state.get("runtime_policy", {}).get("env_backend", "auto"),
                 "action": conda.get("action") or (solution.get("compatibility_decision") or {}).get("action", ""),
                 "package_specs": list(spec.get("conda_dependencies") or []) + list(spec.get("pip_dependencies") or []),
                 "python_version": str(spec.get("python") or solution.get("python") or ""),
                 "spec_hash": str(spec.get("spec_hash") or (solution.get("compatibility_decision") or {}).get("spec_hash", "")),
             }
+            if solution.get("backend", "venv") == "venv":
+                # Bind venv recovery identity to the accepted command plan
+                # without persisting command arguments that could contain
+                # secrets. Conda already has a canonical spec hash shared
+                # with EnvDeployModule.
+                normalized["install_plan_hash"] = hashlib.sha256(
+                    canonical_json(install_plan).encode("utf-8")
+                ).hexdigest()
+            return normalized
         elif stage == "model_prepare":
             compiled = state.get("compiled_analysis", {})
             assets = compiled.get("model_assets", {})
@@ -438,16 +450,27 @@ class GraphRecoveryAdapter:
             solution = self._environment_solution(state)
             conda = solution.get("conda") or {}
             decision = solution.get("compatibility_decision") or {}
-            return {
-                "environment_path": str(
+            backend = solution.get("backend", "venv")
+            if backend == "venv":
+                environment_path = Path(state.get("repo_dir", "")) / ".venv"
+                python_version = "%s.%s" % (
+                    sys.version_info.major, sys.version_info.minor,
+                )
+            else:
+                environment_path = (
                     decision.get("target_prefix")
                     or conda.get("environment_prefix")
                     or solution.get("environment_prefix")
                     or (Path(state["run_dir"]) / "workspace")
-                ),
-                "backend": solution.get("backend", "venv"),
+                )
+                python_version = str(
+                    decision.get("python") or solution.get("python") or ""
+                )
+            return {
+                "environment_path": str(environment_path),
+                "backend": backend,
                 "tool": decision.get("tool") or conda.get("tool", ""),
-                "python_version": str(decision.get("python") or solution.get("python") or ""),
+                "python_version": python_version,
                 "project_id": decision.get("project_id", ""),
                 "repo_fingerprint": decision.get("repo_fingerprint", ""),
                 "spec_hash": decision.get("spec_hash", ""),
@@ -477,6 +500,14 @@ class GraphRecoveryAdapter:
         if solution:
             return solution
         return (state.get("compiled_analysis") or {}).get("env_solution") or {}
+
+    @staticmethod
+    def _environment_install_plan(state: dict) -> list:
+        result = (state.get("stage_results") or {}).get("env_solve") or {}
+        data = result.get("data") or {}
+        analysis = data.get("analysis") or {}
+        plan = analysis.get("install_plan") or data.get("install_plan") or []
+        return [list(command) for command in plan if isinstance(command, list)]
 
     def _get_reconciler(self, resource_type: str):
         """Get reconciler for a resource type."""

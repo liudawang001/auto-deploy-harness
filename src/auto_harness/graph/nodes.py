@@ -126,12 +126,24 @@ def make_recovery_gate_node(stage, deps):
                     update["pending_approval"] = existing
                 else:
                     from auto_harness.graph.approval import build_approval_request
+                    retry_without_cleanup = (
+                        decision.stop_reason
+                        == "failed_operation_requires_operator_decision"
+                        and not decision.operation.get("observed_resource")
+                    )
                     update["pending_approval"] = build_approval_request(
                         approval_id="recovery-%s-%s" % (stage, operation_id[:8]),
                         operation_id=operation_id,
                         approval_kind="recovery",
-                        requested_action="cleanup_then_retry",
-                        risk="high",
+                        # A failed dependency operation with no observed
+                        # external resource has nothing to clean. Ask for an
+                        # exact idempotent retry instead of routing to the
+                        # process/container-only cleanup executor.
+                        requested_action=(
+                            "retry" if retry_without_cleanup
+                            else "cleanup_then_retry"
+                        ),
+                        risk="medium" if retry_without_cleanup else "high",
                         reason=decision.stop_reason or "manual_recovery_required",
                     )
             else:
@@ -257,7 +269,7 @@ def merge_plan_analysis(deterministic, compiled):
     plan_owned_keys = (
         "install_plan", "run_candidates", "verify_hint", "environment_strategy",
         "selected_candidate", "selection_source", "llm_plan", "llm_candidates",
-        "merged_candidates", "llm_required_reason",
+        "merged_candidates", "llm_required_reason", "model_assets",
     )
     for key in plan_owned_keys:
         if key in compiled:
@@ -404,15 +416,47 @@ class DeploymentGraphNodes:
             else:
                 raw = self.deps.planner.plan(snapshot, skill_context=snapshot.get("skill_context", {}))
         except Exception as exc:
-            return {
-                "llm_error": _sanitize_error(exc),
-                "llm_context": safe_context_telemetry(
-                    getattr(exc, "context", {})
-                ),
-                "stop_reason": "llm_plan_failed",
-                "raw_plan_path": "",
-                "current_stage": "plan",
-            }
+            # A provider may occasionally return an HTTP-success response with
+            # no assistant content. Retry that transient condition once at
+            # the Agent boundary; all other failures remain fail-closed.
+            transient_response_error = any(
+                marker in str(exc).lower()
+                for marker in (
+                    "empty content",
+                    "invalid response",
+                    "not valid json",
+                )
+            )
+            if layered and transient_response_error:
+                try:
+                    raw = self.deps.planner.turn(
+                        snapshot,
+                        observations=ObservationLedger(
+                            Path(state["observation_ledger_path"])
+                        ).load(),
+                        observation_budget={
+                            **observation_budget,
+                            "provider_retry": "previous_response_empty",
+                        },
+                        skill_context=snapshot.get("skill_context", {}),
+                        phase=state.get("planner_phase", "plan"),
+                        failure_context=state.get("failure_context", {})
+                        if state.get("planner_phase") == "replan" else None,
+                    )
+                except Exception as retry_exc:
+                    exc = retry_exc
+                else:
+                    exc = None
+            if exc is not None:
+                return {
+                    "llm_error": _sanitize_error(exc),
+                    "llm_context": safe_context_telemetry(
+                        getattr(exc, "context", {})
+                    ),
+                    "stop_reason": "llm_plan_failed",
+                    "raw_plan_path": "",
+                    "current_stage": "plan",
+                }
         if not layered:
             raw_text = raw.text
             if snapshot.get("context_mode") == "layered":
@@ -434,16 +478,45 @@ class DeploymentGraphNodes:
             return {"raw_plan_path": str(path), "current_stage": "plan", "planner_turn_kind": "final"}
 
         from auto_harness.agent_runtime.planner_turn import PlannerTurnParser
+        parser = PlannerTurnParser(
+            max_requests=self._cfg("agent_repo_max_requests_per_round", 4)
+        )
         try:
-            turn = PlannerTurnParser(
-                max_requests=self._cfg("agent_repo_max_requests_per_round", 4)
-            ).parse(raw.text)
-        except ValueError as exc:
-            return {
-                "llm_error": _sanitize_error(exc),
-                "stop_reason": "planner_turn_invalid",
-                "current_stage": "plan",
+            turn = parser.parse(raw.text)
+        except ValueError as first_exc:
+            # One bounded correction attempt keeps transient JSON/schema
+            # mistakes recoverable without relaxing any tool or plan policy.
+            correction_budget = dict(observation_budget)
+            correction_budget["protocol_correction"] = {
+                "previous_response_rejected": _sanitize_error(first_exc),
+                "required_action": (
+                    "Return one complete PlannerTurn JSON object. Preserve "
+                    "force_final. Every observe request needs an allowed tool "
+                    "and an object input matching its input_schema."
+                ),
             }
+            try:
+                raw = self.deps.planner.turn(
+                    snapshot,
+                    observations=ObservationLedger(
+                        Path(state["observation_ledger_path"])
+                    ).load(),
+                    observation_budget=correction_budget,
+                    skill_context=snapshot.get("skill_context", {}),
+                    phase=state.get("planner_phase", "plan"),
+                    failure_context=state.get("failure_context", {})
+                    if state.get("planner_phase") == "replan" else None,
+                )
+                turn = parser.parse(raw.text)
+            except Exception as retry_exc:
+                return {
+                    "llm_error": _sanitize_error(retry_exc),
+                    "llm_context": safe_context_telemetry(
+                        getattr(retry_exc, "context", {})
+                    ),
+                    "stop_reason": "planner_turn_invalid",
+                    "current_stage": "plan",
+                }
         turn_number = int(state.get("planner_turn_count", 0)) + 1
         turn_dir = Path(state["run_dir"]) / "reports" / "planner_turns"
         turn_dir.mkdir(parents=True, exist_ok=True)

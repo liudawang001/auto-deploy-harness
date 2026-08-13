@@ -53,6 +53,8 @@ class EnvironmentPreflightPolicy:
     ) -> Dict:
         if not command:
             return {"allowed": False, "reason": "empty command"}
+        if Path(command[0]).name == "npm":
+            return self._validate_npm_build(command, repo_dir)
         tool = str(Path(command[0]).resolve()) if Path(command[0]).is_absolute() else command[0]
         expected_tool = decision.get("tool") or decision.get("backend")
         if tool != expected_tool:
@@ -78,8 +80,37 @@ class EnvironmentPreflightPolicy:
                 return package_result
         return {"allowed": True, "reason": "typed environment command allowed"}
 
+    @staticmethod
+    def _validate_npm_build(command: List[str], repo_dir: Path) -> Dict:
+        if len(command) not in (4, 5) or command[:2] != ["npm", "--prefix"]:
+            return {"allowed": False, "reason": "invalid npm build command"}
+        prefix = str(command[2])
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*", prefix):
+            return {"allowed": False, "reason": "npm prefix is not repository-local"}
+        if command[3:] not in (["ci"], ["run", "build"]):
+            return {"allowed": False, "reason": "npm command is not an allowed build step"}
+        project_dir = (Path(repo_dir) / prefix).resolve()
+        try:
+            project_dir.relative_to(Path(repo_dir).resolve())
+        except ValueError:
+            return {"allowed": False, "reason": "npm prefix escapes repository"}
+        if not (project_dir / "package.json").is_file():
+            return {"allowed": False, "reason": "npm project manifest is missing"}
+        if command[3:] == ["ci"] and not (project_dir / "package-lock.json").is_file():
+            return {"allowed": False, "reason": "npm ci requires a repository lockfile"}
+        return {"allowed": True, "reason": "repository-local locked npm build"}
+
     def _validate_run(self, command, decision, repo_dir):
         prefix = self._argument(command, "-p")
+        uv_expected = [
+            command[0], "run", "-p", prefix,
+            "uv", "sync", "--frozen", "--no-dev",
+        ]
+        if command == uv_expected:
+            return {
+                "allowed": command.count("-p") == 1 and prefix == decision.get("target_prefix"),
+                "reason": "fixed-prefix frozen uv sync",
+            }
         expected = [command[0], "run", "-p", prefix, "python", "-m", "pip", "install"]
         allowed = (
             command.count("-p") == 1
@@ -94,6 +125,14 @@ class EnvironmentPreflightPolicy:
         package_count = 0
         while index < len(arguments):
             token = str(arguments[index])
+            if token == "--upgrade" and index + 1 < len(arguments) and arguments[index + 1] == "pip":
+                package_count += 1
+                index += 2
+                continue
+            if token == "-e" and index + 1 < len(arguments) and arguments[index + 1] == ".":
+                package_count += 1
+                index += 2
+                continue
             if token in ("-r", "--requirement"):
                 if index + 1 >= len(arguments):
                     return {"allowed": False, "reason": "requirement path is missing"}
@@ -140,6 +179,9 @@ class EnvironmentPreflightPolicy:
                     return {"allowed": False, "reason": "Conda channel is missing"}
                 channels.append(str(command[index + 1]))
                 index += 2
+                continue
+            if token == "--override-channels":
+                index += 1
                 continue
             if token.startswith("-"):
                 return {"allowed": False, "reason": "unsupported Conda option"}

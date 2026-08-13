@@ -1,3 +1,5 @@
+import sys
+import os
 from pathlib import Path
 from typing import Dict, List
 
@@ -157,7 +159,26 @@ class EnvDeployModule:
                     config,
                 )
             elif not is_allowed_command(cmd, allowed_commands):
-                policy_result = {"allowed": False, "reason": "global command allowlist failed"}
+                command_path = Path(cmd[0]) if cmd else Path()
+                if not command_path.is_absolute():
+                    command_path = repo_dir / command_path
+                project_cli_allowed = False
+                if command_path.is_file():
+                    try:
+                        command_path.resolve().relative_to((repo_dir / ".venv" / "bin").resolve())
+                        project_cli_allowed = command_path.name not in {
+                            "bash", "sh", "zsh", "fish", "csh", "tcsh",
+                        }
+                    except ValueError:
+                        project_cli_allowed = False
+                policy_result = {
+                    "allowed": project_cli_allowed,
+                    "reason": (
+                        "project-local generated console script"
+                        if project_cli_allowed
+                        else "global command allowlist failed"
+                    ),
+                }
             if not policy_result.get("allowed"):
                 self._fail_owned_operation(
                     journal,
@@ -188,6 +209,15 @@ class EnvDeployModule:
                 child_env = self.child_environment_policy.build_for_install(
                     home_dir=repo_dir.parent / "install_home",
                 )
+                # Retain the host's reusable pip download/build cache even
+                # though the target process gets a task-scoped HOME.  This is
+                # operational state, not a credential, and substantially
+                # reduces safe retries after an interrupted install.
+                cache_root = os.environ.get("PIP_CACHE_DIR", "").strip()
+                if not cache_root:
+                    cache_root = str(Path.home() / "Library" / "Caches" / "pip")
+                if Path(cache_root).is_dir():
+                    child_env["PIP_CACHE_DIR"] = cache_root
                 result = self.command_runner(
                     cmd,
                     repo_dir,
@@ -429,7 +459,20 @@ class EnvDeployModule:
         docker_security_options: Dict = None,
     ):
         if execution_backend != "docker":
-            return [list(cmd) for cmd in plan], {"backend": "local"}
+            effective_plan = []
+            for command in plan:
+                effective = list(command)
+                if len(effective) >= 3 and effective[:3] == ["python3", "-m", "venv"]:
+                    # ChildEnvironmentPolicy deliberately uses a minimal PATH,
+                    # which can resolve python3 to macOS' legacy system Python.
+                    # Build venvs with the already validated Harness runtime so
+                    # the effective interpreter matches host preflight.
+                    effective[0] = sys.executable
+                effective_plan.append(effective)
+            return effective_plan, {
+                "backend": "local",
+                "venv_bootstrap_python": sys.executable,
+            }
         backend = DockerSandboxBackend.for_phase(
             "install",
             image=docker_image,

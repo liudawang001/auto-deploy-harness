@@ -85,6 +85,70 @@ class TestPlanPolicyGate(unittest.TestCase):
         self.assertTrue(result["allowed"])
         self.assertIn("run", result["accepted_sections"])
 
+    def test_declared_console_script_is_pinned_to_owned_venv(self):
+        plan = json.loads(json.dumps(SAFE_PLAN))
+        plan["environment"]["install_commands"].append(
+            ["demo", "init", "--defaults"],
+        )
+        plan["run"] = {
+            "candidates": [{
+                "id": "cli", "cmd": ["demo", "app"],
+                "expected_port": 8088, "reason": "documented CLI",
+            }],
+            "selected_candidate_id": "cli",
+        }
+        snapshot = dict(SAFE_SNAPSHOT)
+        snapshot["detected_signals"] = {
+            "console_scripts": [{"name": "demo", "target": "demo.cli:main"}],
+        }
+        result = self.gate.validate(plan, snapshot, config=self.config)
+        self.assertTrue(result["allowed"])
+        self.assertIn(
+            [".venv/bin/demo", "init", "--defaults"],
+            result["normalized_plan"]["environment"]["install_commands"],
+        )
+        self.assertEqual(
+            result["normalized_plan"]["run"]["candidates"][0]["cmd"],
+            [".venv/bin/demo", "app"],
+        )
+
+    def test_documented_noninteractive_setup_is_appended_when_model_omits_it(self):
+        plan = json.loads(json.dumps(SAFE_PLAN))
+        snapshot = dict(SAFE_SNAPSHOT)
+        snapshot["detected_signals"] = {
+            "console_scripts": [{"name": "demo", "target": "demo.cli:main"}],
+            "documented_setup_commands": [{
+                "cmd": ["demo", "init", "--defaults", "--accept-security"],
+                "source": "deploy/entrypoint.sh", "line": 40,
+            }],
+        }
+        result = self.gate.validate(plan, snapshot, config=self.config)
+        self.assertTrue(result["allowed"])
+        self.assertIn(
+            [".venv/bin/demo", "init", "--defaults", "--accept-security"],
+            result["normalized_plan"]["environment"]["install_commands"],
+        )
+
+    def test_existing_frontend_artifact_skips_redundant_npm_build(self):
+        plan = json.loads(json.dumps(SAFE_PLAN))
+        plan["environment"]["install_commands"] = [
+            ["npm", "--prefix", "console", "ci"],
+            ["npm", "--prefix", "console", "run", "build"],
+            [".venv/bin/python", "-m", "pip", "install", "."],
+        ]
+        snapshot = dict(SAFE_SNAPSHOT)
+        snapshot["detected_signals"] = {
+            "source_frontend_build_required": False,
+        }
+
+        result = self.gate.validate(plan, snapshot, config=self.config)
+
+        self.assertTrue(result["allowed"])
+        self.assertEqual(
+            result["normalized_plan"]["environment"]["install_commands"],
+            [[".venv/bin/python", "-m", "pip", "install", "."]],
+        )
+
     def test_bash_lc_rejected(self):
         """bash -lc should be rejected."""
         plan = json.loads(json.dumps(SAFE_PLAN))

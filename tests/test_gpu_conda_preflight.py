@@ -168,7 +168,7 @@ def test_environment_policy_enforces_tool_prefix_channel_and_package(tmp_path):
     }
     policy = EnvironmentPreflightPolicy()
     allowed = policy.validate_mutation_command(
-        ["/opt/conda/bin/conda", "create", "-y", "-p", str(prefix), "-c", "conda-forge", "python=3.10"],
+        ["/opt/conda/bin/conda", "create", "-y", "-p", str(prefix), "--override-channels", "-c", "conda-forge", "python=3.10", "pip"],
         decision,
         tmp_path,
         config,
@@ -191,6 +191,26 @@ def test_environment_policy_enforces_tool_prefix_channel_and_package(tmp_path):
         tmp_path,
         config,
     )
+    pip_upgrade = policy.validate_mutation_command(
+        [decision["tool"], "run", "-p", str(prefix), "python", "-m", "pip", "install", "--upgrade", "pip"],
+        decision, tmp_path, config,
+    )
+    editable_repo = policy.validate_mutation_command(
+        [decision["tool"], "run", "-p", str(prefix), "python", "-m", "pip", "install", "-e", "."],
+        decision, tmp_path, config,
+    )
+    editable_outside = policy.validate_mutation_command(
+        [decision["tool"], "run", "-p", str(prefix), "python", "-m", "pip", "install", "-e", "../outside"],
+        decision, tmp_path, config,
+    )
+    uv_sync = policy.validate_mutation_command(
+        [decision["tool"], "run", "-p", str(prefix), "uv", "sync", "--frozen", "--no-dev"],
+        decision, tmp_path, config,
+    )
+    uv_unlocked = policy.validate_mutation_command(
+        [decision["tool"], "run", "-p", str(prefix), "uv", "sync"],
+        decision, tmp_path, config,
+    )
     arbitrary_run = policy.validate_mutation_command(
         ["/opt/conda/bin/conda", "run", "-p", str(prefix), "python", "-c", "print('unsafe')"],
         decision,
@@ -201,7 +221,33 @@ def test_environment_policy_enforces_tool_prefix_channel_and_package(tmp_path):
     assert unsafe["allowed"] is False
     assert outside["allowed"] is False
     assert pip_install["allowed"] is True
+    assert pip_upgrade["allowed"] is True
+    assert editable_repo["allowed"] is True
+    assert editable_outside["allowed"] is False
+    assert uv_sync["allowed"] is True
+    assert uv_unlocked["allowed"] is False
     assert arbitrary_run["allowed"] is False
+
+
+def test_environment_policy_allows_only_locked_repository_local_npm_build(tmp_path):
+    dashboard = tmp_path / "dashboard"
+    dashboard.mkdir()
+    (dashboard / "package.json").write_text('{}\n', encoding="utf-8")
+    (dashboard / "package-lock.json").write_text('{}\n', encoding="utf-8")
+    policy = EnvironmentPreflightPolicy()
+
+    assert policy.validate_mutation_command(
+        ["npm", "--prefix", "dashboard", "ci"], {}, tmp_path, HarnessConfig(),
+    )["allowed"] is True
+    assert policy.validate_mutation_command(
+        ["npm", "--prefix", "dashboard", "run", "build"], {}, tmp_path, HarnessConfig(),
+    )["allowed"] is True
+    assert policy.validate_mutation_command(
+        ["npm", "--prefix", "dashboard", "install"], {}, tmp_path, HarnessConfig(),
+    )["allowed"] is False
+    assert policy.validate_mutation_command(
+        ["npm", "--prefix", "../outside", "ci"], {}, tmp_path, HarnessConfig(),
+    )["allowed"] is False
 
 
 def test_environment_policy_rejects_conda_source_bypasses_and_allows_safe_requirement_file(tmp_path):

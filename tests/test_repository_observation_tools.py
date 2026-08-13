@@ -19,6 +19,47 @@ def test_read_selected_files_is_bounded_and_redacted(tmp_path):
     assert item["sha256"]
 
 
+def test_requested_line_window_is_not_reported_as_truncated(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "README.md").write_text(
+        "\n".join("line %d" % number for number in range(1, 201)),
+        encoding="utf-8",
+    )
+    result = RepositoryToolExecutor().execute(ToolCall(
+        name="read_selected_files",
+        input={"files": [{"path": "README.md", "start_line": 110, "end_line": 125}]},
+    ), {"repo_dir": str(repo)})
+    assert result.status == "passed"
+    item = result.evidence["files"][0]
+    assert item["line_start"] == 110
+    assert item["line_end"] == 125
+    assert item["truncated"] is False
+
+    beyond_eof = RepositoryToolExecutor().execute(ToolCall(
+        name="read_selected_files",
+        input={"files": [{"path": "README.md", "start_line": 190, "end_line": 400}]},
+    ), {"repo_dir": str(repo)})
+    assert beyond_eof.evidence["files"][0]["line_end"] == 200
+    assert beyond_eof.evidence["files"][0]["truncated"] is False
+
+
+def test_multi_file_read_preserves_valid_evidence_when_one_path_is_missing(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "README.md").write_text("run it\n", encoding="utf-8")
+    result = RepositoryToolExecutor().execute(ToolCall(
+        name="read_selected_files",
+        input={"files": [
+            {"path": "README.md", "start_line": 1, "end_line": 10},
+            {"path": "missing.py", "start_line": 1, "end_line": 10},
+        ]},
+    ), {"repo_dir": str(repo)})
+    assert result.status == "passed"
+    assert result.evidence["files"][0]["path"] == "README.md"
+    assert result.evidence["errors"] == []
+
+
 def test_sensitive_and_escape_paths_are_rejected(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()

@@ -23,6 +23,7 @@ COMMAND_ROOT_ALLOWLIST = frozenset({
     ".venv/bin/streamlit", ".venv/bin/uvicorn",
     "streamlit", "uvicorn", "gradio",
     "conda", "mamba", "micromamba",
+    "uv", "npm",
 })
 
 # High-risk commands that are always rejected
@@ -110,11 +111,37 @@ class PlanPolicyGate:
             if isinstance(cmd, str):
                 rejected_items.append({"section": "environment.install_commands", "item_index": i, "reason": "command must be a list of strings, not a shell string"})
                 continue
+            cmd = self._normalize_declared_console_script(cmd, snapshot)
             result = self._validate_command(cmd, "environment.install_commands", i)
             if result["allowed"]:
                 safe_install_commands.append(cmd)
             else:
                 rejected_items.append(result["rejection"])
+        # A model may select the documented application launcher but omit its
+        # separate non-interactive initializer. Append only setup commands
+        # deterministically extracted from repository evidence and validated
+        # by the same command policy.
+        documented_setup = (
+            snapshot.get("detected_signals", {}).get("documented_setup_commands", [])
+            or []
+        )
+        for item in documented_setup[:1]:
+            if not isinstance(item, dict) or not item.get("cmd"):
+                continue
+            cmd = self._normalize_declared_console_script(item["cmd"], snapshot)
+            if cmd in safe_install_commands:
+                continue
+            result = self._validate_command(
+                cmd, "environment.documented_setup_commands", len(safe_install_commands),
+            )
+            if result["allowed"]:
+                safe_install_commands.append(cmd)
+            else:
+                rejected_items.append(result["rejection"])
+        safe_install_commands = self._prefer_existing_source_artifacts(
+            safe_install_commands,
+            snapshot,
+        )
         if safe_install_commands:
             accepted_sections.append("environment")
         normalized_env = dict(env)
@@ -126,6 +153,10 @@ class PlanPolicyGate:
         candidates = run.get("candidates", [])
         safe_candidates = []
         for i, cand in enumerate(candidates):
+            cand = dict(cand)
+            cand["cmd"] = self._normalize_declared_console_script(
+                cand.get("cmd", []), snapshot,
+            )
             result = self._validate_candidate(cand, snapshot, i)
             if result["allowed"]:
                 safe_candidates.append(cand)
@@ -231,6 +262,11 @@ class PlanPolicyGate:
         root = cmd[0]
         root_basename = root.split("/")[-1] if "/" in root else root
 
+        if root_basename == "uv" and cmd[1:] != ["sync", "--frozen", "--no-dev"]:
+            return {"allowed": False, "rejection": {"section": section, "item_index": index, "reason": "only frozen production uv sync is allowed"}}
+        if root_basename == "npm" and not self._safe_npm_build_command(cmd):
+            return {"allowed": False, "rejection": {"section": section, "item_index": index, "reason": "only lockfile-backed repository-local npm builds are allowed"}}
+
         # Reject dangerous commands
         if root_basename in DANGEROUS_COMMANDS:
             return {"allowed": False, "rejection": {"section": section, "item_index": index, "reason": "dangerous command: %s" % root_basename}}
@@ -261,6 +297,58 @@ class PlanPolicyGate:
                     return {"allowed": False, "rejection": {"section": section, "item_index": index, "reason": "forbidden path component '%s' in command[%d]" % (forbidden, j)}}
 
         return {"allowed": True}
+
+    @staticmethod
+    def _normalize_declared_console_script(cmd: Any, snapshot: Dict) -> Any:
+        """Resolve a repository-declared CLI into the owned virtualenv.
+
+        The model may correctly use the public command documented by the
+        project (for example ``qwenpaw app``). Execution must nevertheless be
+        pinned to the environment Harness creates. Only exact PEP 621 console
+        script names detected from the repository are eligible.
+        """
+        if not isinstance(cmd, list) or not cmd or not isinstance(cmd[0], str):
+            return cmd
+        root = cmd[0]
+        if "/" in root:
+            return cmd
+        declared = {
+            str(item.get("name"))
+            for item in (snapshot.get("detected_signals", {}).get("console_scripts", []) or [])
+            if isinstance(item, dict) and item.get("name")
+        }
+        if root not in declared:
+            return cmd
+        return [".venv/bin/%s" % root] + list(cmd[1:])
+
+    @staticmethod
+    def _safe_npm_build_command(cmd: List[str]) -> bool:
+        if len(cmd) not in (4, 5) or cmd[:2] != ["npm", "--prefix"]:
+            return False
+        prefix = cmd[2]
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*", prefix):
+            return False
+        return cmd[3:] in (["ci"], ["run", "build"])
+
+    @staticmethod
+    def _prefer_existing_source_artifacts(
+        commands: List[List[str]], snapshot: Dict,
+    ) -> List[List[str]]:
+        """Avoid redundant source builds when the snapshot proved outputs exist."""
+        signals = (
+            snapshot.get("detected_signals", {})
+            if isinstance(snapshot, dict) else {}
+        )
+        if signals.get("source_frontend_build_required") is not False:
+            return commands
+        return [
+            command
+            for command in commands
+            if command not in (
+                ["npm", "--prefix", "console", "ci"],
+                ["npm", "--prefix", "console", "run", "build"],
+            )
+        ]
 
     def _validate_candidate(self, cand: Dict, snapshot: Dict, index: int) -> Dict:
         """Validate a run candidate."""

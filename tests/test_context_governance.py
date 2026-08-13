@@ -106,6 +106,11 @@ class _AuditedProvider:
 
 
 class ContextGovernanceTest(unittest.TestCase):
+    def test_planning_profile_caps(self):
+        self.assertEqual(get_context_profile("plan").total_input_cap_tokens, 50000)
+        self.assertEqual(get_context_profile("replan").total_input_cap_tokens, 30000)
+        self.assertEqual(get_context_profile("diagnose").total_input_cap_tokens, 30000)
+
     def test_provider_request_context_and_audit_metadata_are_preserved(self):
         provider = _AuditedProvider()
         call = LLMCallExecutor(_Config()).execute(
@@ -238,7 +243,7 @@ class ContextGovernanceTest(unittest.TestCase):
                 envelope=PromptEnvelope(
                     messages=[
                         Message(role="system", content="trusted guardrail"),
-                        Message(role="user", content="x" * 12000),
+                        Message(role="user", content="x" * 20000),
                     ],
                     candidate_messages=[
                         Message(role="user", content="task")
@@ -292,7 +297,7 @@ class ContextGovernanceTest(unittest.TestCase):
                     messages=[
                         Message(role="system", content="trusted guardrail"),
                         Message(role="user", content="required output contract"),
-                        Message(role="user", content="x" * 12000),
+                        Message(role="user", content="x" * 20000),
                     ],
                     candidate_messages=[
                         Message(role="system", content="trusted guardrail"),

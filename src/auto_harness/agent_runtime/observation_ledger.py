@@ -286,17 +286,31 @@ def enrich_plan_grounding(plan: Dict, snapshot: Dict, records: List[Dict]) -> Di
     grounding = []
     for raw in result.get("grounding", []) or []:
         item = dict(raw) if isinstance(raw, dict) else raw
-        if isinstance(item, dict) and not item.get("observation_id"):
+        if isinstance(item, dict):
             candidates = observed_by_path.get(str(item.get("file", "")), [])
             if candidates:
                 observed = max(
                     candidates,
                     key=lambda value: int(value.get("line_end", 0)) - int(value.get("line_start", 1)),
                 )
+                # Proof metadata is authoritative framework data. Replace
+                # missing, aliased, or stale model-supplied values only after
+                # an exact observed repository path match.
                 item["observation_id"] = observed.get("observation_id", "")
                 item["sha256"] = observed.get("sha256", "")
-                item["line_start"] = int(observed.get("line_start", 1))
-                item["line_end"] = int(observed.get("line_end", item["line_start"]))
+                observed_start = int(observed.get("line_start", 1))
+                observed_end = int(observed.get("line_end", observed_start))
+                requested_start = item.get("line_start")
+                requested_end = item.get("line_end")
+                if (
+                    not isinstance(requested_start, int)
+                    or not isinstance(requested_end, int)
+                    or requested_start < observed_start
+                    or requested_end > observed_end
+                    or requested_start > requested_end
+                ):
+                    item["line_start"] = observed_start
+                    item["line_end"] = observed_end
         grounding.append(item)
     result["grounding"] = grounding
     return result

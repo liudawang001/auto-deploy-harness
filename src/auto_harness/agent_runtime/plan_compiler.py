@@ -129,7 +129,9 @@ class PlanCompiler:
 
         # Compile model_assets
         model_assets = normalized_plan.get("model_assets", {})
-        if model_assets:
+        # Presence is meaningful even for an empty object: the accepted plan
+        # considered model assets and declared none required for startup.
+        if "model_assets" in normalized_plan:
             analysis["model_assets"] = model_assets
 
         # Add LLM plan metadata

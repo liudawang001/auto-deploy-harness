@@ -91,12 +91,22 @@ class RepositoryReadPolicy:
         for item in files:
             if not isinstance(item, dict):
                 raise ValueError("each files item must be an object")
-            path = self._relative_path(item.get("path", ""), repo_dir)
+            try:
+                path = self._relative_path(item.get("path", ""), repo_dir)
+            except ValueError as exc:
+                # LLMs may guess one stale path alongside valid evidence.
+                # Preserve safe, existing files in the same batch; denied or
+                # malformed paths still reject the complete request.
+                if str(exc) == "repository path does not exist":
+                    continue
+                raise
             start = self._bounded_int(item.get("start_line", 1), 1, 10_000_000, "start_line")
             end = self._bounded_int(item.get("end_line", start + max_lines - 1), start, 10_000_000, "end_line")
             if end - start + 1 > max_lines:
                 end = start + max_lines - 1
             normalized.append({"path": path, "start_line": start, "end_line": end})
+        if not normalized:
+            raise ValueError("no requested repository paths exist")
         return {"files": normalized}
 
     def _dependency_input(self, value: Dict, repo_dir: Path) -> Dict:

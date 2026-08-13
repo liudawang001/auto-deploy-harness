@@ -26,7 +26,11 @@ class EnvironmentCompatibilityResolver:
         runtimes = capabilities.get("environment_runtimes") or {}
         gpu = capabilities.get("gpu") or {}
         requested = str(getattr(config, "env_backend", "auto") or "auto").lower()
-        python = str(conda_file.get("python") or getattr(config, "conda_python_default", "3.10"))
+        python = str(
+            conda_file.get("python")
+            or self._minimum_python(resource_plan.get("python_range"))
+            or getattr(config, "conda_python_default", "3.10")
+        )
         reasons = []
         warnings = []
         if conda_file.get("rejected_channels"):
@@ -148,6 +152,14 @@ class EnvironmentCompatibilityResolver:
                 return "micromamba", runtimes["micromamba"]
             return "conda", {}
         return "venv", {}
+
+    @staticmethod
+    def _minimum_python(constraint):
+        matches = re.findall(r">=?\s*(\d+)\.(\d+)", str(constraint or ""))
+        if not matches:
+            return ""
+        major, minor = max((int(major), int(minor)) for major, minor in matches)
+        return "%d.%d" % (major, minor)
 
     def _select_gpu(self, devices, minimum):
         candidates = [item for item in devices if int(item.get("memory_free_mb") or 0) >= minimum]

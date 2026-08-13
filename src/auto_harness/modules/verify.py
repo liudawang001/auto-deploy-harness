@@ -266,6 +266,9 @@ class VerifyModule:
                 if trace_id in body:
                     status = "pass"
                     reason = "HTTP response contains trace id"
+                elif self._accepts_fresh_status(analysis, traced_url, trace_id, response_record):
+                    status = "pass"
+                    reason = "fresh successful response to trace-tagged request"
                 elif request_plan.get("follow_up_url_template"):
                     self._progress("http_trace_follow_up_started", {"trace_id": trace_id})
                     follow_up_record = self._execute_follow_up_trace(
@@ -281,6 +284,14 @@ class VerifyModule:
         except Exception as exc:  # noqa: BLE001 - stored as evidence, not re-raised
             response_record = {"error": str(exc)}
             reason = "HTTP trace request failed"
+            fallback = self._execute_health_fallback(
+                trace_id, service, analysis, status_code=getattr(exc, "code", None),
+            )
+            if fallback:
+                response_record["health_fallback"] = fallback
+                if fallback.get("trace_found"):
+                    status = "pass"
+                    reason = "fresh successful health response to trace-tagged request"
         evidence = {
             "request": request_record,
             "response": response_record,
@@ -297,6 +308,60 @@ class VerifyModule:
         evidence_path = evidence_dir / ("%s_http_trace_%s.json" % (trace_id, safe_label))
         evidence_path.write_text(json.dumps(evidence, ensure_ascii=False, indent=2), encoding="utf-8")
         return {"path": str(evidence_path), "check": evidence["check"]}
+
+    def _execute_health_fallback(
+        self, trace_id: str, service: Dict, analysis: Dict, status_code=None,
+    ) -> Optional[Dict]:
+        verify_hint = analysis.get("verify_hint", {}) if isinstance(analysis, dict) else {}
+        expected = str(verify_hint.get("expected_output") or "").lower()
+        request = verify_hint.get("request", {}) if isinstance(verify_hint, dict) else {}
+        requested_path = str(request.get("path") or "")
+        requested_health = any(
+            marker in requested_path.lower()
+            for marker in ("health", "ready", "readiness")
+        )
+        explicit_fresh_status = all(
+            token in expected for token in ("fresh", "trace", "2xx")
+        )
+        if status_code != 404 or not (
+            requested_health or explicit_fresh_status
+        ):
+            return None
+        endpoint = self._select_endpoint(service, analysis)
+        if not endpoint:
+            return None
+        attempts = []
+        for path in ("/health", "/api/health", "/healthz", "/api/healthz"):
+            url = urllib.parse.urljoin(endpoint.rstrip("/") + "/", path.lstrip("/"))
+            url = self._append_trace_query(url, trace_id)
+            try:
+                req = urllib.request.Request(url, method="GET")
+                with self.urlopen(req, timeout=10) as resp:
+                    body = resp.read().decode("utf-8", errors="replace")
+                    code = getattr(resp, "status", None) or getattr(resp, "code", None)
+                attempt = {"url": url, "status_code": code, "body_tail": body[-2000:]}
+                attempts.append(attempt)
+                if isinstance(code, int) and 200 <= code < 300:
+                    return {"trace_found": True, "attempts": attempts, "selected_url": url}
+            except Exception as exc:  # noqa: BLE001 - bounded local fallback evidence
+                attempts.append({"url": url, "error": str(exc)})
+        return {"trace_found": False, "attempts": attempts}
+
+    @staticmethod
+    def _accepts_fresh_status(analysis: Dict, url: str, trace_id: str, response: Dict) -> bool:
+        verify_hint = analysis.get("verify_hint", {}) if isinstance(analysis, dict) else {}
+        expected = str(verify_hint.get("expected_output") or "").lower()
+        code = response.get("status_code")
+        parsed = urllib.parse.urlparse(url)
+        health_like = parsed.path.rstrip("/").endswith(
+            ("/health", "/healthz", "/ready", "/readiness")
+        )
+        return (
+            (health_like or all(token in expected for token in ("fresh", "trace", "2xx")))
+            and trace_id in url
+            and isinstance(code, int)
+            and 200 <= code < 300
+        )
 
     def _execute_streamlit_probe(self, trace_id: str, service: Dict, analysis: Dict, evidence_dir: Path) -> Optional[Dict]:
         frameworks = set(analysis.get("frameworks") or []) if isinstance(analysis, dict) else set()
@@ -333,12 +398,16 @@ class VerifyModule:
         if not endpoint:
             return None
 
-        discovered = self._discover_gradio_request(endpoint, analysis)
+        explicit_request = bool(request_hint.get("path"))
+        discovered = None if explicit_request else self._discover_gradio_request(endpoint, analysis)
         if discovered:
             request_hint = discovered["request"]
             endpoint = discovered["endpoint"]
-        elif self._is_openai_compatible(analysis, verify_hint):
-            request_hint = self._openai_compatible_request_hint(verify_hint)
+        elif self._is_openai_compatible(analysis, verify_hint) and (
+            not explicit_request or verify_hint.get("service_type") == "openai_compatible"
+        ):
+            if not explicit_request:
+                request_hint = self._openai_compatible_request_hint(verify_hint)
             model_discovery = self._discover_openai_model(endpoint, verify_hint)
             discovered = {
                 "type": "openai_compatible",
@@ -347,7 +416,7 @@ class VerifyModule:
                 "model_source": model_discovery.get("source", ""),
                 "stream": bool((request_hint.get("json") or {}).get("stream")),
             }
-        else:
+        elif not explicit_request:
             discovered = self._discover_openapi_request(endpoint, analysis)
             if discovered:
                 request_hint = discovered["request"]

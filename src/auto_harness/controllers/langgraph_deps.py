@@ -240,8 +240,16 @@ class LangGraphControllerDependencies:
         """Phase 5: factory creating AgentVerifyPlanner per call."""
         def factory():
             from auto_harness.agent import AgentVerifyPlanner, AgentTraceWriter
+            try:
+                provider = self.runner._create_plan_first_provider()
+            except Exception:
+                # Deterministic verification must remain usable when a task is
+                # resumed after its intentionally ephemeral provider secret is
+                # gone.  The planner is only consulted if deterministic trace
+                # probes are uncertain.
+                return None
             return AgentVerifyPlanner(
-                self.runner._create_plan_first_provider(),
+                provider,
                 config=self.runner.config,
                 trace_writer=AgentTraceWriter(Path("/tmp/_verify_traces")),
             )
@@ -251,12 +259,16 @@ class LangGraphControllerDependencies:
         """Phase 5: factory creating agent verify config dict."""
         def factory():
             config = self.runner.config
+            try:
+                provider = self.runner._create_plan_first_provider()
+            except Exception:
+                provider = None
             return {
                 "agent_mode": "gated_actor",
                 "agent_enable_verify": getattr(config, "langgraph_enable_agent_verify", True),
                 "agent_verify_max_steps": getattr(config, "agent_verify_max_steps", 5),
                 "agent_allowed_hosts": getattr(config, "agent_allowed_hosts", ["localhost", "127.0.0.1"]),
-                "provider": self.runner._create_plan_first_provider(),
+                "provider": provider,
                 "agent_context_mode": getattr(config, "agent_context_mode", "enforce"),
                 "agent_context_window_tokens": getattr(config, "agent_context_window_tokens", None),
                 "agent_context_reserved_output_tokens": getattr(config, "agent_context_reserved_output_tokens", 4096),

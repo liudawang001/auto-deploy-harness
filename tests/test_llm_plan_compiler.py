@@ -165,6 +165,13 @@ class TestPlanCompiler(unittest.TestCase):
         self.assertEqual(len(analysis["run_candidates"]), 2)
         self.assertEqual(analysis["selection_source"], "llm_plan_first")
 
+    def test_empty_model_assets_override_repository_wide_optional_detections(self):
+        plan = json.loads(json.dumps(NORMALIZED_PLAN))
+        plan["model_assets"] = {}
+        result = self.compiler.compile(plan, DETERMINISTIC_ANALYSIS)
+        self.assertIn("model_assets", result["analysis"])
+        self.assertEqual(result["analysis"]["model_assets"], {})
+
     def test_duplicate_candidates_deduped(self):
         """Deterministic candidates duplicating LLM candidates should be removed."""
         # Deterministic has same cmd as LLM candidate

@@ -8,6 +8,7 @@ import tempfile
 import threading
 import urllib.request
 import unittest
+from unittest import mock
 from contextlib import redirect_stdout
 from pathlib import Path
 
@@ -237,6 +238,10 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(result.status, "passed")
             self.assertIn("gradio", result.data["frameworks"])
             self.assertTrue(result.data["install_plan"])
+            self.assertIn(
+                [".venv/bin/python", "-m", "pip", "install", "--upgrade", "pip"],
+                result.data["install_plan"],
+            )
             self.assertTrue(result.data["run_candidates"])
             self.assertEqual(result.data["verify_hint"]["request"]["method"], "POST")
 
@@ -688,6 +693,24 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(captured["method"], "POST")
             self.assertEqual(captured["url"], "http://127.0.0.1:8000/api/check")
             self.assertIn("verify_", captured["body"])
+
+    def test_verify_accepts_trace_tagged_health_endpoint_2xx(self):
+        trace = "verify_trace_123"
+        analysis = {
+            "verify_hint": {
+                "expected_output": "Response status 200 indicates service is healthy",
+            },
+        }
+        response = {"status_code": 200}
+
+        self.assertTrue(
+            VerifyModule._accepts_fresh_status(
+                analysis,
+                "http://127.0.0.1:8088/api/healthz?trace=%s" % trace,
+                trace,
+                response,
+            )
+        )
 
     def test_verify_discovers_gradio_config_request(self):
         captured = {"config_called": False}
@@ -1161,6 +1184,27 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(result.status, "failed")
             self.assertEqual(result.summary, "service process exited")
 
+    def test_runner_rejects_process_that_exits_during_readiness_stability_window(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "workspace" / "repo"
+            repo.mkdir(parents=True)
+            (repo / "app.py").write_text(
+                "import time\ntime.sleep(0.35)\nraise SystemExit(48)\n",
+                encoding="utf-8",
+            )
+            with mock.patch(
+                "auto_harness.modules.runner.is_port_open", return_value=True,
+            ):
+                result = RunnerModule().run(
+                    repo,
+                    {"run_candidates": [{"cmd": ["python3", "app.py"], "expected_port": 7860}]},
+                    execute=True,
+                    wait_seconds=0.2,
+                    allowed_commands=["python3"],
+                )
+            self.assertEqual(result.status, "failed")
+            self.assertFalse(result.data["service_ready"])
+
     def test_skill_registry_selects_verify_skill(self):
         with tempfile.TemporaryDirectory() as tmp:
             skill_dir = Path(tmp) / "skills" / "verify-evidence"
@@ -1480,6 +1524,51 @@ class CoreTests(unittest.TestCase):
             self.assertIn("torch framework detected but requirements do not pin torch", result.data["risk_reasons"])
             self.assertIn("flash-attn may require CUDA toolkit and build isolation tuning", result.data["risk_reasons"])
 
+    def test_env_solve_does_not_inject_torch_for_optional_model_catalog(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "pyproject.toml").write_text(
+                '[project]\ndependencies = ["transformers>=4.30"]\n',
+                encoding="utf-8",
+            )
+            result = EnvSolveModule().solve(
+                repo,
+                {
+                    "frameworks": ["torch", "transformers"],
+                    "model_assets": {},
+                    "install_plan": [["pip", "install", "."]],
+                },
+                {"gpu_required": False, "torch_variant": ""},
+            )
+            self.assertFalse(result.data["torch_solution"]["required"])
+            self.assertEqual(result.data["install_plan"], [
+                ["python3", "-m", "venv", ".venv"],
+                [".venv/bin/python", "-m", "pip", "install", "."],
+            ])
+
+    def test_env_solve_normalizes_bare_pip_into_owned_venv(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            result = EnvSolveModule(env_backend="venv").solve(
+                repo,
+                {
+                    "frameworks": [],
+                    "model_assets": {},
+                    "install_plan": [
+                        ["npm", "--prefix", "console", "ci"],
+                        ["pip", "install", "."],
+                    ],
+                },
+                {"gpu_required": False},
+            )
+            self.assertEqual(result.data["install_plan"][0], [
+                "python3", "-m", "venv", ".venv",
+            ])
+            self.assertIn(
+                [".venv/bin/python", "-m", "pip", "install", "."],
+                result.data["install_plan"],
+            )
+
     def test_env_solve_selects_cuda_torch_wheel_and_cpu_fallback(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
@@ -1748,6 +1837,46 @@ class CoreTests(unittest.TestCase):
             self.assertIn("%s:/workspace/model_cache" % cache.resolve(), result.data["effective_commands"][0])
             self.assertEqual(result.data["sandbox"]["network"], "none")
             self.assertEqual(result.data["sandbox"]["gpus"], "all")
+
+    def test_env_deploy_local_venv_uses_harness_python(self):
+        import sys
+
+        result = EnvDeployModule().deploy(
+            Path.cwd(),
+            {"install_plan": [["python3", "-m", "venv", ".venv"]]},
+            execute=False,
+            execution_backend="local",
+        )
+
+        assert result.data["effective_commands"][0] == [
+            sys.executable,
+            "-m",
+            "venv",
+            ".venv",
+        ]
+        assert result.data["sandbox"]["venv_bootstrap_python"] == sys.executable
+
+    def test_env_deploy_local_venv_with_options_uses_harness_python(self):
+        import sys
+
+        result = EnvDeployModule().deploy(
+            Path.cwd(),
+            {
+                "install_plan": [[
+                    "python3", "-m", "venv", "--system-site-packages", ".venv",
+                ]],
+            },
+            execute=False,
+            execution_backend="local",
+        )
+
+        assert result.data["effective_commands"][0] == [
+            sys.executable,
+            "-m",
+            "venv",
+            "--system-site-packages",
+            ".venv",
+        ]
 
     def test_runner_docker_backend_requires_docker_allowed(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -3725,7 +3854,14 @@ class CoreTests(unittest.TestCase):
             {"found": True, "name": "demo", "channels": ["pytorch", "nvidia"], "conda_dependencies": ["pip"], "pip_dependencies": ["gradio"]},
         )
         plan = CondaBackend(backend="conda").command_plan(spec)
-        self.assertEqual(plan["commands"][0], ["conda", "create", "-y", "-p", ".conda/envs/demo", "python=3.10"])
+        self.assertEqual(
+            plan["commands"][0],
+            [
+                "conda", "create", "-y", "-p", ".conda/envs/demo",
+                "--override-channels", "-c", "pytorch", "-c", "nvidia",
+                "python=3.10", "pip",
+            ],
+        )
         self.assertIn("pytorch-cuda=12.1", plan["commands"][1])
         self.assertEqual(plan["commands"][-1][:4], ["conda", "run", "-p", ".conda/envs/demo"])
 

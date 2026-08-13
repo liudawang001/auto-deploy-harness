@@ -4,9 +4,9 @@ from auto_harness.context.models import ContextProfile
 
 
 _PROFILE_CAPS: Dict[str, int] = {
-    "plan": 12000,
-    "replan": 10000,
-    "diagnose": 10000,
+    "plan": 50000,
+    "replan": 30000,
+    "diagnose": 30000,
     "repair": 8000,
     "env_solve": 6000,
     "runner": 6000,

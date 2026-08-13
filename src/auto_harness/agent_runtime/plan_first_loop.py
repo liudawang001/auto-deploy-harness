@@ -51,6 +51,10 @@ Rules:
 - Do not read or exfiltrate secrets.
 - Do not require source edits unless explicitly asked.
 - Prefer local files and documented entrypoints.
+- When project metadata or documentation defines a console script or launch
+  command, use that exact public entrypoint. Do not construct an ASGI module
+  path or bypass the project's launcher merely because FastAPI/uvicorn is
+  present as a dependency.
 - Every selected command must be grounded in a project file.
 - Verify request must include {{trace_id}}.
 - If no safe plan exists, return status=no_safe_plan.
@@ -72,10 +76,32 @@ Layered repository protocol:
 - Return exactly one JSON object matching PlannerTurn schema.
 - Return kind=observe when more repository evidence is required.
 - Only request tools shown in available_repository_tools.
+- Every observe request must include a complete, non-empty input object that
+  satisfies that tool's input_schema. Never emit an empty input for
+  read_selected_files or search_repo.
+- Valid examples: read_selected_files input={"files":[{"path":"README.md"}]};
+  search_repo input={"query":"run_foreground","path_glob":"**/*.py"}.
 - Batch related reads and avoid duplicate observations.
+- Do not repeat a cached or rejected observation. Correct rejected arguments
+  or choose a different targeted observation.
+- Passed observations are complete evidence for their reported line ranges.
+  Reuse them directly; do not request overlapping ranges for the same claim.
+- If documented_setup_commands, documented_run_commands, source_build_commands,
+  and their observed source lines are already present, they are sufficient to
+  produce a local deployment plan. A dedicated health route is optional: use
+  the documented Console root path with {{trace_id}} as a query parameter.
 - Return kind=final as soon as evidence is sufficient.
 - When observation_budget.force_final=true, do not request more observations.
-- The final plan remains an untrusted proposal and must include observed grounding."""
+- The final plan remains an untrusted proposal and must include observed grounding.
+- Every grounding.file must be one exact repository path already shown in
+  selected_files or a passed observation; never use globs, descriptions, or
+  synthetic paths.
+- Copy grounding.observation_id exactly from the matching selected_files item
+  or passed observation record. Never invent aliases such as selected_files,
+  inventory, multiple, or inventory_sha256.
+- Copy the matching sha256 and an observed line range exactly. If the command
+  entrypoint is not directly observed, request the file that defines it; do
+  not infer a module path from directory structure."""
 
 
 LAYERED_PLANNER_USER_TEMPLATE = """Repository inventory and core evidence:
@@ -176,7 +202,25 @@ DEPLOYMENT_PLAN_SCHEMA = {
             "type": "object",
             "required": ["candidates", "selected_candidate_id"],
             "properties": {
-                "candidates": {"type": "array"},
+                "candidates": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                        "type": "object",
+                        "required": ["id", "cmd", "expected_port", "reason"],
+                        "properties": {
+                            "id": {"type": "string"},
+                            "cmd": {
+                                "type": "array",
+                                "minItems": 1,
+                                "items": {"type": "string"},
+                                "description": "argv only; do not use a shell string",
+                            },
+                            "expected_port": {"type": "integer", "minimum": 1, "maximum": 65535},
+                            "reason": {"type": "string"},
+                        },
+                    },
+                },
                 "selected_candidate_id": {"type": "string"},
             },
         },
@@ -185,7 +229,22 @@ DEPLOYMENT_PLAN_SCHEMA = {
             "required": ["request"],
             "properties": {
                 "service_type": {"type": "string"},
-                "request": {"type": "object"},
+                "request": {
+                    "type": "object",
+                    "required": ["method", "path"],
+                    "properties": {
+                        "method": {"type": "string", "enum": ["GET", "POST"]},
+                        "path": {
+                            "type": "string",
+                            "pattern": "\\{\\{trace_id\\}\\}",
+                            "description": "local URL path containing the literal {{trace_id}} placeholder; never an external URL",
+                        },
+                        "headers": {"type": "object"},
+                        "json": {"type": "object"},
+                        "expected_status": {"type": "integer"},
+                        "timeout": {"type": "number"},
+                    },
+                },
                 "success_evidence": {"type": "string"},
             },
         },
@@ -375,15 +434,17 @@ class LLMDeploymentPlanner:
                 candidate_messages=candidate_messages,
                 retry_messages=retry_messages,
                 required_fragments=[
-                    json.dumps(PLANNER_TURN_SCHEMA, ensure_ascii=False, indent=2),
-                    json.dumps(DEPLOYMENT_PLAN_SCHEMA, ensure_ascii=False, indent=2),
+                    json.dumps(PLANNER_TURN_SCHEMA, ensure_ascii=False, separators=(",", ":")),
+                    json.dumps(DEPLOYMENT_PLAN_SCHEMA, ensure_ascii=False, separators=(",", ":")),
                 ],
-                sections=self._context_sections(prompt_snapshot, bounded_skills),
+                sections=self._context_sections(
+                    prompt_snapshot, bounded_skills, compact_schema=True
+                ),
                 candidate_sections=self._context_sections(
-                    candidate_snapshot, candidate_skills
+                    candidate_snapshot, candidate_skills, compact_schema=True
                 ),
                 retry_sections=self._context_sections(
-                    retry_snapshot, retry_skills
+                    retry_snapshot, retry_skills, compact_schema=True
                 ),
                 requested_output_tokens=self.max_tokens,
             ),
@@ -515,16 +576,24 @@ class LLMDeploymentPlanner:
             skill_context_section = "Skill context:\n%s" % json.dumps(
                 skill_context, ensure_ascii=False, indent=2
             )
+        tool_contracts = [
+            {
+                "name": item.get("name", ""),
+                "input_schema": item.get("input_schema", {}),
+                "success_signal": item.get("success_signal", ""),
+            }
+            for item in tools
+        ]
         return [
             Message(role="system", content=LAYERED_PLANNER_SYSTEM_PROMPT),
             Message(role="user", content=LAYERED_PLANNER_USER_TEMPLATE.format(
                 snapshot_json=json.dumps(snapshot, ensure_ascii=False, indent=2),
                 observations_json=json.dumps(observations, ensure_ascii=False, indent=2),
                 budget_json=json.dumps(budget, ensure_ascii=False, indent=2),
-                tools_json=json.dumps(tools, ensure_ascii=False, indent=2),
+                tools_json=json.dumps(tool_contracts, ensure_ascii=False, separators=(",", ":")),
                 skill_context_section=skill_context_section,
-                turn_schema_json=json.dumps(PLANNER_TURN_SCHEMA, ensure_ascii=False, indent=2),
-                plan_schema_json=json.dumps(DEPLOYMENT_PLAN_SCHEMA, ensure_ascii=False, indent=2),
+                turn_schema_json=json.dumps(PLANNER_TURN_SCHEMA, ensure_ascii=False, separators=(",", ":")),
+                plan_schema_json=json.dumps(DEPLOYMENT_PLAN_SCHEMA, ensure_ascii=False, separators=(",", ":")),
             )),
         ]
 
@@ -571,14 +640,15 @@ class LLMDeploymentPlanner:
         return result
 
     @staticmethod
-    def _context_sections(snapshot, skill_context):
+    def _context_sections(snapshot, skill_context, compact_schema=False):
         selected_files = snapshot.get("selected_files") or {}
         memories = snapshot.get("memory_hits") or []
         selected_skills = skill_context.get("selected_skills") or []
         schema_text = json.dumps(
             DEPLOYMENT_PLAN_SCHEMA,
             ensure_ascii=False,
-            indent=2,
+            indent=None if compact_schema else 2,
+            separators=(",", ":") if compact_schema else None,
         )
         return [
             ContextSection(

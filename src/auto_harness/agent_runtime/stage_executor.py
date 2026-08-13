@@ -139,7 +139,10 @@ class AgentStageExecutor:
                     before_status, dry_run, repair_overlay, state,
                 )
             elif stage == "model_prepare":
-                return self._execute_model_prepare(task_id, run_dir, repo_dir, resource_data, before_status, dry_run)
+                return self._execute_model_prepare(
+                    task_id, run_dir, repo_dir, resource_data, analysis,
+                    before_status, dry_run,
+                )
             elif stage == "runner":
                 return self._execute_runner(task_id, run_dir, repo_dir, deploy_analysis, before_status, dry_run, stage_hints)
             elif stage == "verify":
@@ -200,6 +203,24 @@ class AgentStageExecutor:
     def _execute_resource_plan(self, task_id, run_dir, repo_dir, analysis, before_status):
         from auto_harness.modules.resource_plan import ResourcePlanner
         result = ResourcePlanner().plan(repo_dir, analysis)
+        model_policy = analysis.get("model_assets")
+        if isinstance(model_policy, dict) and model_policy.get("required") is not True:
+            # The accepted deployment plan explicitly chose a no-model startup
+            # path. Repository-wide detection may still find optional local
+            # models in docs, provider catalogs, or tests; those must not turn
+            # into a GPU requirement or eager download for this deployment.
+            result.data.update({
+                "gpu_required": False,
+                "cuda_required": "",
+                "torch_variant": "",
+                "estimated_vram_gb": 0,
+                "model_assets": [],
+                "external_tokens": [],
+                "risk_level": "low",
+                "risk_reasons": [
+                    "optional model assets deferred by accepted deployment plan",
+                ],
+            })
         return StageExecutionResult(
             stage="resource_plan",
             before_status=before_status,
@@ -312,7 +333,10 @@ class AgentStageExecutor:
             changed=before_status != result.status,
         )
 
-    def _execute_model_prepare(self, task_id, run_dir, repo_dir, resource_data, before_status, dry_run):
+    def _execute_model_prepare(
+        self, task_id, run_dir, repo_dir, resource_data, analysis,
+        before_status, dry_run,
+    ):
         if not self.model_prepare:
             return StageExecutionResult(
                 stage="model_prepare",
@@ -322,9 +346,15 @@ class AgentStageExecutor:
                 changed=False,
                 error="model_prepare module not available",
             )
+        effective_resources = dict(resource_data)
+        declared_assets = analysis.get("model_assets") if isinstance(analysis, dict) else None
+        if isinstance(declared_assets, dict) and declared_assets.get("required") is not True:
+            effective_resources["model_assets"] = []
+            effective_resources["external_tokens"] = []
+            effective_resources["model_asset_decision"] = "deployment plan declared assets optional"
         result = self.model_prepare.prepare(
             run_dir,
-            resource_data,
+            effective_resources,
             execute=not dry_run,
             repo_dir=repo_dir,
             allowed_commands=self.config.allowed_commands if self.config else None,

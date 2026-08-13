@@ -194,8 +194,11 @@ class CondaBackend:
                 "commands": [],
                 "spec": self._spec_dict(spec),
             }
-        create = [tool, "create", "-y", "-p", spec.prefix, "python=%s" % spec.python]
         channels = self._channel_args(spec.channels)
+        create = [tool, "create", "-y", "-p", spec.prefix] + channels + [
+            "python=%s" % spec.python,
+            "pip",
+        ]
         conda_install = self._conda_install(tool, spec, channels)
         pip_commands = self._pip_commands(tool, spec, pip_plan or [])
         commands = [create]
@@ -217,6 +220,8 @@ class CondaBackend:
         raw = list(cmd)
         if raw and raw[0].endswith("/python"):
             raw = ["python"] + raw[1:]
+        elif raw and raw[0].startswith(".venv/bin/"):
+            raw = [Path(raw[0]).name] + raw[1:]
         elif raw and (raw[0] in ("python", "python3") or raw[0].startswith("python")):
             raw = ["python"] + raw[1:]
         return [tool, "run", "-p", spec.prefix] + raw
@@ -247,6 +252,8 @@ class CondaBackend:
 
     def _channel_args(self, channels: List[str]) -> List[str]:
         args: List[str] = []
+        if channels:
+            args.append("--override-channels")
         for channel in channels:
             args.extend(["-c", channel])
         return args
@@ -294,7 +301,24 @@ class CondaBackend:
                     [tool, "run", "-p", spec.prefix, "python", "-m", "pip"]
                     + pip_args
                 )
+            elif cmd and Path(cmd[0]).name == "uv" and cmd[1:] == ["sync", "--frozen", "--no-dev"]:
+                commands.append(
+                    [tool, "run", "-p", spec.prefix, "uv"] + cmd[1:]
+                )
+            elif self._safe_npm_build_command(cmd):
+                # Frontend tools belong to the host project checkout, not the
+                # isolated Python environment.  Keep the exact argv command.
+                commands.append(list(cmd))
         return commands
+
+    @staticmethod
+    def _safe_npm_build_command(cmd: List[str]) -> bool:
+        if len(cmd) not in (4, 5) or cmd[:2] != ["npm", "--prefix"]:
+            return False
+        prefix = str(cmd[2])
+        return bool(re.fullmatch(
+            r"[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*", prefix,
+        )) and cmd[3:] in (["ci"], ["run", "build"])
 
     @staticmethod
     def _is_torch_package(spec: str) -> bool:

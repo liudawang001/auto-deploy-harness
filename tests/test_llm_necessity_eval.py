@@ -54,6 +54,7 @@ class TestDeterministicPlanner:
         result = planner.plan(snapshot)
         plan = json.loads(result.text)
         install_commands = plan["environment"]["install_commands"]
+        assert [".venv/bin/python", "-m", "pip", "install", "--upgrade", "pip"] in install_commands
         assert any("requirements.txt" in " ".join(c) for c in install_commands)
 
     def test_deterministic_planner_uses_pyproject_toml(self):
@@ -68,6 +69,21 @@ class TestDeterministicPlanner:
         install_commands = plan["environment"]["install_commands"]
         assert any("-e" in c and "." in c for c in install_commands)
 
+    def test_deterministic_planner_prefers_frozen_uv_lock(self):
+        planner = DeterministicDeploymentPlanner()
+        snapshot = {
+            "file_tree": ["pyproject.toml", "uv.lock", "app.py"],
+            "detected_signals": {
+                "dependency_files": ["pyproject.toml", "uv.lock"],
+                "entrypoint_candidates": ["app.py"],
+                "ports": [8000],
+            },
+        }
+        plan = json.loads(planner.plan(snapshot).text)
+        assert plan["environment"]["install_commands"][-1] == [
+            ".venv/bin/uv", "sync", "--frozen", "--no-dev",
+        ]
+
     def test_deterministic_planner_no_entrypoint_returns_no_safe_plan(self):
         """No entrypoint candidate should return no_safe_plan."""
         planner = DeterministicDeploymentPlanner()
@@ -78,6 +94,84 @@ class TestDeterministicPlanner:
         result = planner.plan(snapshot)
         plan = json.loads(result.text)
         assert plan["status"] == "no_safe_plan"
+
+    def test_deterministic_planner_uses_documented_console_script(self):
+        planner = DeterministicDeploymentPlanner()
+        snapshot = {
+            "file_tree": ["README.md", "pyproject.toml"],
+            "detected_signals": {
+                "entrypoint_candidates": [],
+                "ports": [5900],
+                "python_requires": ">=3.12",
+                "console_scripts": [
+                    {"name": "demo", "target": "demo.cli:main", "source": "pyproject.toml"},
+                ],
+                "documented_run_commands": [
+                    {"cmd": ["demo", "run", "--port", "8088"], "source": "README.md", "line": 10},
+                ],
+            },
+        }
+        plan = json.loads(planner.plan(snapshot).text)
+        assert plan["status"] == "ok"
+        assert plan["environment"]["python"] == "3.12"
+        assert plan["run"]["candidates"][0]["cmd"] == [
+            ".venv/bin/demo", "run", "--port", "8088",
+        ]
+        assert plan["run"]["candidates"][0]["expected_port"] == 8088
+
+    def test_deterministic_planner_includes_detected_frontend_build(self):
+        planner = DeterministicDeploymentPlanner()
+        snapshot = {
+            "file_tree": [
+                "README.md", "Makefile", "pyproject.toml", "uv.lock",
+                "dashboard/package.json", "dashboard/package-lock.json",
+            ],
+            "detected_signals": {
+                "python_requires": ">=3.12",
+                "console_scripts": [
+                    {"name": "demo", "target": "demo.cli:main", "source": "pyproject.toml"},
+                ],
+                "documented_run_commands": [
+                    {"cmd": ["demo", "run"], "source": "README.md", "line": 10},
+                ],
+                "source_build_commands": [
+                    {"cmd": ["npm", "--prefix", "dashboard", "ci"], "source": "Makefile"},
+                    {"cmd": ["npm", "--prefix", "dashboard", "run", "build"], "source": "Makefile"},
+                ],
+            },
+        }
+        plan = json.loads(planner.plan(snapshot).text)
+        assert plan["environment"]["install_commands"][-2:] == [
+            ["npm", "--prefix", "dashboard", "ci"],
+            ["npm", "--prefix", "dashboard", "run", "build"],
+        ]
+        assert any(item["file"] == "Makefile" for item in plan["grounding"])
+
+    def test_deterministic_planner_runs_documented_setup_before_app(self):
+        planner = DeterministicDeploymentPlanner()
+        snapshot = {
+            "file_tree": ["README.md", "pyproject.toml"],
+            "detected_signals": {
+                "python_requires": ">=3.11,<3.14",
+                "console_scripts": [
+                    {"name": "paw", "target": "paw.cli:main", "source": "pyproject.toml"},
+                ],
+                "documented_setup_commands": [
+                    {"cmd": ["paw", "init", "--defaults"], "source": "README.md", "line": 1},
+                ],
+                "documented_run_commands": [
+                    {"cmd": ["paw", "app"], "source": "README.md", "line": 2, "expected_port": 8088},
+                ],
+            },
+        }
+        plan = json.loads(planner.plan(snapshot).text)
+        assert plan["environment"]["python"] == "3.11"
+        assert plan["environment"]["install_commands"][-1] == [
+            ".venv/bin/paw", "init", "--defaults",
+        ]
+        assert plan["run"]["candidates"][0]["cmd"] == [
+            ".venv/bin/paw", "app",
+        ]
 
     def test_deterministic_planner_default_port_8000(self):
         """No port signal should default to 8000."""

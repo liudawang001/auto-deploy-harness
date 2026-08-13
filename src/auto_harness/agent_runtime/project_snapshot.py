@@ -5,6 +5,7 @@ and performs secret redaction. The snapshot is the input to LLMDeploymentPlanner
 """
 import hashlib
 import re
+import shlex
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -20,6 +21,10 @@ PRIORITY_FILES = (
     "readme.md",
     "requirements.txt",
     "pyproject.toml",
+    "uv.lock",
+    "Makefile",
+    "deploy/entrypoint.sh",
+    "scripts/README.md",
     "setup.py",
     "environment.yml",
     "environment.yaml",
@@ -202,11 +207,19 @@ class ProjectSnapshotBuilder:
                 result.append(name)
                 seen.add(name)
                 seen_files.add(identity)
+        root_parts = len(repo_dir.parts)
         for path in sorted(repo_dir.rglob("*")):
             if path.is_symlink() or path.is_dir():
                 continue
             # Skip files inside skipped directories
-            if any(part in SKIP_DIRS for part in path.parts):
+            relative_parts = path.parts[root_parts:]
+            if any(part in SKIP_DIRS for part in relative_parts):
+                continue
+            # Ignore Harness-owned runtime artifacts created beside a target
+            # checkout.  A cloned repository can legitimately live under a
+            # path that itself contains a directory named ``runs``; only the
+            # target-relative first component is relevant here.
+            if relative_parts and relative_parts[0] in {"runs", ".conda"}:
                 continue
             # Skip binary/weight files by extension
             if path.suffix.lower() in SKIP_EXTENSIONS:
@@ -283,8 +296,57 @@ class ProjectSnapshotBuilder:
         except OSError:
             return None
         if len(text) > self.max_file_chars:
-            text = text[: self.max_file_chars] + "\n\n[truncated]"
+            if path.name.lower().startswith("readme"):
+                text = self._readme_deployment_excerpt(text)
+            else:
+                text = text[: self.max_file_chars] + "\n\n[truncated]"
         return text
+
+    def _readme_deployment_excerpt(self, text: str) -> str:
+        """Keep bounded launch evidence from a long public README.
+
+        Repositories often place Quick Start and source-install instructions
+        after a long feature overview.  Prefix truncation therefore hides the
+        most authoritative deployment evidence.  Preserve the document head
+        plus bounded windows around deployment commands and localhost URLs.
+        """
+        lines = str(text).splitlines()
+        selected = set(range(min(len(lines), 12)))
+        deployment = re.compile(
+            r"(?:pip\s+install|npm\s+(?:ci|run\s+build)|python\s+-m\s+venv|"
+            r"\b(?:init|run|serve|server|start|app)\b|"
+            r"https?://(?:127\.0\.0\.1|localhost):\d+)",
+            re.IGNORECASE,
+        )
+        heading = re.compile(
+            r"^#{1,4}\s+.*(?:quick\s*start|install|deploy|run|source)",
+            re.IGNORECASE,
+        )
+        for index, line in enumerate(lines):
+            if not (deployment.search(line) or heading.search(line.strip())):
+                continue
+            selected.update(range(max(0, index - 1), min(len(lines), index + 3)))
+
+        output: List[str] = []
+        previous = -2
+        ordered = sorted(selected)
+        # Newer/more specific deployment evidence is commonly near the end of
+        # a README (for example "Install From Source").  Allocate half the
+        # bounded output to the front and half to the tail so neither Quick
+        # Start nor source-build instructions can crowd out the other.
+        if len(ordered) > 80:
+            ordered = ordered[:40] + ordered[-40:]
+        for index in ordered:
+            if index != previous + 1:
+                output.append("[...]")
+            output.append(lines[index])
+            previous = index
+            if len("\n".join(output)) >= self.max_file_chars - 64:
+                break
+        bounded = "\n".join(output)
+        if len(bounded) > self.max_file_chars:
+            bounded = bounded[: self.max_file_chars]
+        return bounded + "\n\n[deployment-focused excerpt]\n[truncated]"
 
     def _detect_signals(
         self,
@@ -294,7 +356,25 @@ class ProjectSnapshotBuilder:
     ) -> Dict:
         """Detect frameworks, entrypoint candidates, dependency files, model mentions, ports."""
         file_set = set(file_tree)
-        all_text = "\n".join(selected_files.values()).lower()
+        # Compact README excerpts do not preserve original line numbers. Use
+        # bounded raw authoritative files for deterministic command discovery
+        # so an LLM can request the exact source lines returned in signals.
+        # The snapshot sent to the provider remains compact and sanitized.
+        signal_files = dict(selected_files)
+        for rel in (
+            "README.md", "readme.md", "pyproject.toml", "Makefile",
+            "deploy/entrypoint.sh", "docker/entrypoint.sh",
+        ):
+            path = repo_dir / rel
+            if rel not in file_set or not path.is_file():
+                continue
+            try:
+                signal_files[rel] = path.read_text(
+                    encoding="utf-8", errors="ignore",
+                )[:1_000_000]
+            except OSError:
+                continue
+        all_text = "\n".join(signal_files.values()).lower()
 
         # Framework detection (reuse analyzer patterns)
         frameworks: List[str] = []
@@ -314,7 +394,7 @@ class ProjectSnapshotBuilder:
 
         # Dependency files
         dependency_files = [
-            name for name in ("requirements.txt", "pyproject.toml", "setup.py", "environment.yml", "environment.yaml")
+            name for name in ("requirements.txt", "pyproject.toml", "uv.lock", "setup.py", "environment.yml", "environment.yaml")
             if name in file_set
         ]
 
@@ -347,6 +427,26 @@ class ProjectSnapshotBuilder:
                 except (ValueError, TypeError):
                     continue
 
+        console_scripts = self._console_scripts(signal_files.get("pyproject.toml", ""))
+        documented_run_commands = self._documented_run_commands(
+            signal_files,
+            [item["name"] for item in console_scripts],
+        )
+        documented_ports = self._documented_local_ports(
+            signal_files,
+            [item["name"] for item in console_scripts],
+        )
+        if len(documented_ports) == 1:
+            for item in documented_run_commands:
+                if not int(item.get("expected_port") or 0):
+                    item["expected_port"] = documented_ports[0]
+        documented_setup_commands = self._documented_setup_commands(
+            signal_files,
+            [item["name"] for item in console_scripts],
+        )
+        python_requires = self._python_requires(signal_files.get("pyproject.toml", ""))
+        source_build_commands = self._source_build_commands(file_set, signal_files)
+
         # Other signals
         has_dockerfile = "Dockerfile" in file_set
         has_environment_yml = "environment.yml" in file_set or "environment.yaml" in file_set
@@ -359,4 +459,299 @@ class ProjectSnapshotBuilder:
             "ports": ports[:5],
             "has_dockerfile": has_dockerfile,
             "has_environment_yml": has_environment_yml,
+            "console_scripts": console_scripts,
+            "documented_run_commands": documented_run_commands,
+            "documented_setup_commands": documented_setup_commands,
+            "python_requires": python_requires,
+            "source_build_commands": source_build_commands,
         }
+
+    @staticmethod
+    def _source_build_commands(file_set: set, selected_files: Dict[str, str]) -> List[Dict]:
+        """Detect narrowly-scoped, lockfile-backed frontend source builds.
+
+        A Python source checkout may intentionally omit generated dashboard
+        assets that are present in release wheels.  Only emit commands when
+        repository-owned build instructions, an npm lockfile, and the missing
+        output artifact all agree.  Commands remain argv arrays and never use
+        a shell wrapper.
+        """
+        makefile = str(selected_files.get("Makefile", ""))
+        readmes = "\n".join(
+            content for path, content in selected_files.items()
+            if Path(path).name.lower().startswith("readme")
+        )
+        has_dashboard_source = "dashboard/package.json" in file_set
+        has_lock = "dashboard/package-lock.json" in file_set
+        built_index_missing = "src/octop/dashboard/index.html" not in file_set
+        makefile_declares_build = (
+            "build-frontend:" in makefile
+            and "cd $(DASHBOARD_DIR) && npm ci" in makefile
+            and "npm run build" in makefile
+        )
+        if (
+            has_dashboard_source
+            and has_lock
+            and built_index_missing
+            and makefile_declares_build
+        ):
+            return [
+                {
+                    "cmd": ["npm", "--prefix", "dashboard", "ci"],
+                    "source": "Makefile",
+                    "reason": "lockfile-backed frontend dependencies required by build-frontend",
+                },
+                {
+                    "cmd": ["npm", "--prefix", "dashboard", "run", "build"],
+                    "source": "Makefile",
+                    "reason": "build missing production dashboard artifact",
+                },
+            ]
+
+        # Common source-release layout: a console/ SPA is built into
+        # console/dist before an editable Python package is launched.  Require
+        # both the lockfile and explicit public documentation so an arbitrary
+        # nested package.json cannot introduce build commands.
+        has_console_source = "console/package.json" in file_set
+        has_console_lock = "console/package-lock.json" in file_set
+        console_dist_missing = "console/dist/index.html" not in file_set
+        documented_console_build = bool(re.search(
+            r"cd\s+console\s*&&\s*npm\s+ci\s*&&\s*npm\s+run\s+build",
+            readmes,
+        ))
+        if (
+            has_console_source
+            and has_console_lock
+            and console_dist_missing
+            and documented_console_build
+        ):
+            source = next(
+                (
+                    path for path, content in selected_files.items()
+                    if Path(path).name.lower().startswith("readme")
+                    and re.search(
+                        r"cd\s+console\s*&&\s*npm\s+ci\s*&&\s*npm\s+run\s+build",
+                        content,
+                    )
+                ),
+                "README.md",
+            )
+            return [
+                {
+                    "cmd": ["npm", "--prefix", "console", "ci"],
+                    "source": source,
+                    "reason": "lockfile-backed console dependencies required by source install",
+                },
+                {
+                    "cmd": ["npm", "--prefix", "console", "run", "build"],
+                    "source": source,
+                    "reason": "build missing console/dist production artifact",
+                },
+            ]
+        return []
+
+    @staticmethod
+    def _console_scripts(pyproject: str) -> List[Dict[str, str]]:
+        """Extract PEP 621 console scripts without executing repository code."""
+        in_scripts = False
+        scripts: List[Dict[str, str]] = []
+        for raw in str(pyproject or "").splitlines():
+            line = raw.strip()
+            if line.startswith("[") and line.endswith("]"):
+                in_scripts = line == "[project.scripts]"
+                continue
+            if not in_scripts or not line or line.startswith("#") or "=" not in line:
+                continue
+            name, target = (part.strip() for part in line.split("=", 1))
+            name = name.strip('"\'')
+            target = target.split("#", 1)[0].strip().strip('"\'')
+            if (
+                re.fullmatch(r"[A-Za-z0-9_.-]+", name)
+                and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.]*:[A-Za-z_][A-Za-z0-9_.]*", target)
+            ):
+                scripts.append({"name": name, "target": target, "source": "pyproject.toml"})
+        return scripts[:20]
+
+    @staticmethod
+    def _documented_run_commands(
+        selected_files: Dict[str, str],
+        script_names: List[str],
+    ) -> List[Dict]:
+        """Extract safe service commands whose executable is a declared script."""
+        names = set(script_names)
+        if not names:
+            return []
+        preferred_verbs = {"run", "serve", "server", "start", "web", "api", "app"}
+        commands: List[Dict] = []
+        for path, content in selected_files.items():
+            normalized = str(path).replace("\\", "/").lower()
+            is_readme = Path(path).name.lower().startswith("readme")
+            is_deploy_entrypoint = normalized in {
+                "deploy/entrypoint.sh", "docker/entrypoint.sh",
+            }
+            if not (is_readme or is_deploy_entrypoint):
+                continue
+            lines = str(content).splitlines()
+            for line_number, raw in enumerate(lines, start=1):
+                raw_line = raw.strip()
+                # Markdown examples commonly append an explanatory comment.
+                # It is evidence for the port, but never part of the command.
+                line = re.split(r"\s+#\s+", raw_line, maxsplit=1)[0].strip()
+                if not line or any(token in line for token in (";", "&&", "||", "|", "`", "$(`")):
+                    continue
+                try:
+                    cmd = shlex.split(line, posix=True)
+                except ValueError:
+                    continue
+                if len(cmd) < 2 or cmd[0] not in names or cmd[1].lower() not in preferred_verbs:
+                    continue
+                if any(not isinstance(arg, str) or "\x00" in arg for arg in cmd):
+                    continue
+                commands.append({
+                    "cmd": cmd,
+                    "source": path,
+                    "line": line_number,
+                    "expected_port": ProjectSnapshotBuilder._documented_port(
+                        "\n".join(lines[line_number - 1:line_number + 4]), cmd,
+                    ),
+                })
+        # Prefer explicit ports, then explicit hosts, then shorter commands.
+        commands.sort(key=lambda item: (
+            "--port" not in item["cmd"],
+            "--host" not in item["cmd"],
+            len(item["cmd"]),
+            item["source"],
+            item["line"],
+        ))
+        deduped: List[Dict] = []
+        seen = set()
+        for item in commands:
+            key = tuple(item["cmd"])
+            if key not in seen:
+                deduped.append(item)
+                seen.add(key)
+        return deduped[:10]
+
+    @staticmethod
+    def _documented_setup_commands(
+        selected_files: Dict[str, str],
+        script_names: List[str],
+    ) -> List[Dict]:
+        """Extract non-interactive initialization for a declared project CLI."""
+        names = set(script_names)
+        commands: List[Dict] = []
+        for path, content in selected_files.items():
+            normalized = str(path).replace("\\", "/").lower()
+            is_readme = Path(path).name.lower().startswith("readme")
+            is_deploy_entrypoint = normalized in {
+                "deploy/entrypoint.sh", "docker/entrypoint.sh",
+            }
+            if not (is_readme or is_deploy_entrypoint):
+                continue
+            for line_number, raw in enumerate(str(content).splitlines(), start=1):
+                line = re.split(r"\s+#\s+", raw.strip(), maxsplit=1)[0].strip()
+                if not line or any(token in line for token in (";", "&&", "||", "|", "`", "$(")):
+                    continue
+                try:
+                    cmd = shlex.split(line, posix=True)
+                except ValueError:
+                    continue
+                if (
+                    len(cmd) < 2
+                    or cmd[0] not in names
+                    or cmd[1] not in {"init", "setup"}
+                    or any(
+                        arg not in {
+                            "--defaults", "--non-interactive", "--yes", "-y",
+                            "--accept-security",
+                        }
+                        for arg in cmd[2:]
+                    )
+                ):
+                    continue
+                # Initialization must be explicitly non-interactive.
+                if len(cmd) == 2:
+                    continue
+                commands.append({"cmd": cmd, "source": path, "line": line_number})
+        # Prefer the fully unattended variant when both the README and the
+        # project's own deployment entrypoint document the same initializer.
+        commands.sort(
+            key=lambda item: "--accept-security" in item["cmd"],
+            reverse=True,
+        )
+        deduped: List[Dict] = []
+        seen = set()
+        for item in commands:
+            key = tuple(item["cmd"])
+            if key not in seen:
+                deduped.append(item)
+                seen.add(key)
+        return deduped[:5]
+
+    @staticmethod
+    def _documented_port(raw_line: str, cmd: List[str]) -> int:
+        for index, arg in enumerate(cmd[:-1]):
+            if arg in ("--port", "-p"):
+                try:
+                    port = int(cmd[index + 1])
+                except (TypeError, ValueError):
+                    break
+                if 0 < port <= 65535:
+                    return port
+        match = re.search(r"https?://[^\s/:]+:(\d{2,5})(?:\b|/)", raw_line)
+        if match:
+            port = int(match.group(1))
+            if 0 < port <= 65535:
+                return port
+        # The documented URL may be separated from the command in the compact
+        # README excerpt.  QwenPaw and similar CLIs still use their canonical
+        # local console port when it appears anywhere in public instructions.
+        match = re.search(r"(?:127\.0\.0\.1|localhost):(\d{2,5})", raw_line)
+        if match:
+            port = int(match.group(1))
+            if 0 < port <= 65535:
+                return port
+        return 0
+
+    @staticmethod
+    def _documented_local_ports(
+        selected_files: Dict[str, str],
+        script_names: List[str],
+    ) -> List[int]:
+        ports: List[int] = []
+        names = set(script_names)
+        for path, content in selected_files.items():
+            if not Path(path).name.lower().startswith("readme"):
+                continue
+            normalized_path = str(path).replace("\\", "/")
+            if "/" in normalized_path and not normalized_path.lower().startswith("scripts/readme"):
+                continue
+            # A repository may contain unrelated plugin/service READMEs with
+            # their own ports.  Only use documents that also mention the
+            # declared project CLI.
+            if names and not any(
+                re.search(r"\b%s\b" % re.escape(name), str(content))
+                for name in names
+            ):
+                continue
+            for match in re.finditer(
+                r"https?://(?:127\.0\.0\.1|localhost):(\d{2,5})(?:\b|/)",
+                str(content),
+                re.IGNORECASE,
+            ):
+                port = int(match.group(1))
+                if 0 < port <= 65535 and port not in ports:
+                    ports.append(port)
+        return ports[:5]
+
+    @staticmethod
+    def _python_requires(pyproject: str) -> str:
+        in_project = False
+        for raw in str(pyproject or "").splitlines():
+            line = raw.strip()
+            if line.startswith("[") and line.endswith("]"):
+                in_project = line == "[project]"
+                continue
+            if in_project and re.match(r"^requires-python\s*=", line):
+                return line.split("=", 1)[1].split("#", 1)[0].strip().strip('"\'')
+        return ""

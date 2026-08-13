@@ -126,7 +126,7 @@
   "max_skill_chars": 6000,
   "max_memory_items": 5,
   "verify_workspace_name": "verify_workspace",
-  "allowed_commands": ["python", "python3", "pip", "curl", "git", "streamlit", "conda", "mamba", "micromamba"],
+  "allowed_commands": ["python", "python3", "pip", "curl", "git", "streamlit", "conda", "mamba", "micromamba", "uv", "npm"],
   "default_controller": "langgraph",
   "langgraph_require_llm": false,
   "langgraph_planner_mode": "auto",

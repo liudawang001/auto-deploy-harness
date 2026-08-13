@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from auto_harness.modules.env_deploy import EnvDeployModule
 from auto_harness.modules.runner import RunnerModule
 from auto_harness.runtime.environment import (
     ChildEnvironmentPolicy,
@@ -108,3 +109,76 @@ def test_runner_target_process_cannot_read_parent_provider_secret(monkeypatch):
                     os.kill(pid, signal.SIGTERM)
                 except ProcessLookupError:
                     pass
+
+
+def test_runner_allows_project_venv_console_script_and_reuses_install_home(
+    tmp_path, monkeypatch,
+):
+    repo = tmp_path / "workspace" / "repo"
+    command = repo / ".venv" / "bin" / "demo-cli"
+    command.parent.mkdir(parents=True)
+    command.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    command.chmod(0o755)
+    captured = {}
+
+    class FakeProcess:
+        pid = 321
+
+        @staticmethod
+        def poll():
+            return None
+
+    def fake_popen(cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured["env"] = kwargs["env"]
+        return FakeProcess()
+
+    monkeypatch.setattr("auto_harness.modules.runner.subprocess.Popen", fake_popen)
+
+    result = RunnerModule().run(
+        repo,
+        {"run_candidates": [{"cmd": [str(command)], "expected_port": 0}]},
+        execute=True,
+        wait_seconds=0,
+        allowed_commands=["python3"],
+    )
+
+    assert result.status == "passed"
+    assert captured["cmd"] == [str(command)]
+    assert captured["env"]["HOME"] == str(repo.parent / "install_home")
+
+
+def test_env_deploy_retains_host_pip_cache_with_task_scoped_home(
+    tmp_path, monkeypatch,
+):
+    repo = tmp_path / "workspace" / "repo"
+    repo.mkdir(parents=True)
+    pip_cache = tmp_path / "pip-cache"
+    pip_cache.mkdir()
+    captured = {}
+
+    class Result:
+        cmd = ["python3", "-m", "pip", "--version"]
+        exit_code = 0
+        stdout = "pip"
+        stderr = ""
+        timed_out = False
+
+    def fake_runner(cmd, cwd, timeout_seconds, env):
+        captured["env"] = env
+        return Result()
+
+    monkeypatch.setenv("PIP_CACHE_DIR", str(pip_cache))
+    monkeypatch.setattr(
+        "auto_harness.modules.env_deploy.run_command", fake_runner,
+    )
+    result = EnvDeployModule().deploy(
+        repo,
+        {"install_plan": [["python3", "-m", "pip", "--version"]]},
+        execute=True,
+        allowed_commands=["python3"],
+    )
+
+    assert result.status == "passed"
+    assert captured["env"]["HOME"] == str(repo.parent / "install_home")
+    assert captured["env"]["PIP_CACHE_DIR"] == str(pip_cache)
