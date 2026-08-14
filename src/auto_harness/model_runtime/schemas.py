@@ -363,3 +363,255 @@ DTYPE_ELEMENT_BYTES = {
     "float32": 4,
     "float": 4,
 }
+
+
+# ----------------------------------------------------------------------
+# Document B runtime schemas (additive; Document A schemas above are frozen).
+# ----------------------------------------------------------------------
+
+
+@dataclass
+class InferenceRuntimePlan:
+    """Deterministic vLLM runtime plan consumed by the managed container.
+
+    Produced only by the built-in adapter (never by the LLM). The plan hash
+    binds model/file/cache/resource hashes, image digest, command, port, GPU
+    index and security profile. It excludes timestamps, dynamic container IDs,
+    secrets, and the local absolute model host path.
+    """
+    schema_version: int = SCHEMA_VERSION
+    runtime: str = "vllm"
+    deployment_mode: str = "managed_vllm"
+    image: str = ""
+    image_digest: str = ""
+    model_identity: str = ""
+    resolved_model_hash: str = ""
+    file_plan_hash: str = ""
+    cache_marker_hash: str = ""
+    resource_decision_hash: str = ""
+    model_host_path: str = ""
+    model_container_path: str = "/models/current"
+    served_model_name: str = ""
+    command: List[str] = field(default_factory=list)
+    expected_host: str = "127.0.0.1"
+    expected_port: int = 8000
+    startup_timeout_seconds: int = 900
+    request_timeout_seconds: int = 120
+    health_path: str = "/v1/models"
+    container_name: str = ""
+    gpu_indexes: List[int] = field(default_factory=list)
+    security_profile: str = "model_runtime_v1"
+    plan_hash: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "InferenceRuntimePlan":
+        _reject_unknown_keys(cls, data)
+        _require_schema_version(data, cls.__name__)
+        command = data.get("command")
+        if not isinstance(command, list) or any(not isinstance(a, str) for a in command):
+            raise ValueError("InferenceRuntimePlan.command must be a list of strings")
+        gpu_indexes = data.get("gpu_indexes")
+        if not isinstance(gpu_indexes, list) or any(not isinstance(i, int) or isinstance(i, bool) for i in gpu_indexes):
+            raise ValueError("InferenceRuntimePlan.gpu_indexes must be a list of integers")
+        for key in ("expected_port", "startup_timeout_seconds", "request_timeout_seconds"):
+            value = data.get(key)
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ValueError("InferenceRuntimePlan.%s must be a positive integer" % key)
+        return cls(**data)
+
+    def plan_payload(self) -> Dict[str, Any]:
+        """Deterministic payload for plan_hash (no host path/container name/secret)."""
+        return {
+            "schema_version": self.schema_version,
+            "runtime": self.runtime,
+            "deployment_mode": self.deployment_mode,
+            "image": self.image,
+            "image_digest": self.image_digest,
+            "model_identity": self.model_identity,
+            "resolved_model_hash": self.resolved_model_hash,
+            "file_plan_hash": self.file_plan_hash,
+            "cache_marker_hash": self.cache_marker_hash,
+            "resource_decision_hash": self.resource_decision_hash,
+            "model_container_path": self.model_container_path,
+            "served_model_name": self.served_model_name,
+            "command": list(self.command),
+            "expected_host": self.expected_host,
+            "expected_port": self.expected_port,
+            "startup_timeout_seconds": self.startup_timeout_seconds,
+            "request_timeout_seconds": self.request_timeout_seconds,
+            "health_path": self.health_path,
+            "gpu_indexes": list(self.gpu_indexes),
+            "security_profile": self.security_profile,
+        }
+
+    def compute_plan_hash(self) -> str:
+        return hash_payload(self.plan_payload())
+
+
+@dataclass
+class ModelRuntimeStartupEvidence:
+    """Evidence that a managed container reached a verified ready state."""
+    schema_version: int = SCHEMA_VERSION
+    status: str = "ready"
+    task_id: str = ""
+    operation_id: str = ""
+    runtime_plan_hash: str = ""
+    container_id: str = ""
+    container_name: str = ""
+    container_created_at: str = ""
+    container_labels: Dict[str, Any] = field(default_factory=dict)
+    image_digest: str = ""
+    model_identity: str = ""
+    served_model_name: str = ""
+    started_at: str = ""
+    ready_at: str = ""
+    startup_latency_ms: int = 0
+    models_endpoint_status: int = 0
+    models_endpoint_match: bool = False
+    gpu_before: Dict[str, Any] = field(default_factory=dict)
+    gpu_ready: Dict[str, Any] = field(default_factory=dict)
+    log_tail_hash: str = ""
+    evidence_paths: List[str] = field(default_factory=list)
+    failure_reason: str = ""
+
+    ALLOWED_STATUSES = frozenset({"ready", "failed", "timed_out", "container_exited"})
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "ModelRuntimeStartupEvidence":
+        _reject_unknown_keys(cls, data)
+        _require_schema_version(data, cls.__name__)
+        status = data.get("status")
+        if status not in cls.ALLOWED_STATUSES:
+            raise ValueError("ModelRuntimeStartupEvidence.status %r not allowed" % status)
+        return cls(**data)
+
+    def deterministic_payload(self) -> Dict[str, Any]:
+        """Hash-relevant fields (no timestamps, container id, or evidence paths)."""
+        return {
+            "schema_version": self.schema_version,
+            "status": self.status,
+            "task_id": self.task_id,
+            "operation_id": self.operation_id,
+            "runtime_plan_hash": self.runtime_plan_hash,
+            "container_name": self.container_name,
+            "container_labels": self.container_labels,
+            "image_digest": self.image_digest,
+            "model_identity": self.model_identity,
+            "served_model_name": self.served_model_name,
+            "startup_latency_ms": self.startup_latency_ms,
+            "models_endpoint_status": self.models_endpoint_status,
+            "models_endpoint_match": self.models_endpoint_match,
+            "gpu_before": self.gpu_before,
+            "gpu_ready": self.gpu_ready,
+            "log_tail_hash": self.log_tail_hash,
+        }
+
+    def compute_evidence_hash(self) -> str:
+        return hash_payload(self.deterministic_payload())
+
+
+@dataclass
+class ModelInferenceEvidence:
+    """Evidence that a current-trace inference request was genuinely processed."""
+    schema_version: int = SCHEMA_VERSION
+    status: str = "passed"
+    task_id: str = ""
+    operation_id: str = ""
+    container_id: str = ""
+    container_created_at: str = ""
+    runtime_plan_hash: str = ""
+    model_identity: str = ""
+    served_model_name: str = ""
+    trace_id: str = ""
+    request_started_at: str = ""
+    first_token_at: str = ""
+    response_completed_at: str = ""
+    http_status: int = 0
+    stream: bool = False
+    trace_found: bool = False
+    response_model: str = ""
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    ttft_ms: int = 0
+    total_latency_ms: int = 0
+    request_sha256: str = ""
+    response_body_sha256: str = ""
+    gpu_before: Dict[str, Any] = field(default_factory=dict)
+    gpu_after: Dict[str, Any] = field(default_factory=dict)
+    evidence_paths: List[str] = field(default_factory=list)
+    failure_reason: str = ""
+
+    ALLOWED_STATUSES = frozenset({"passed", "uncertain", "failed"})
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "ModelInferenceEvidence":
+        _reject_unknown_keys(cls, data)
+        _require_schema_version(data, cls.__name__)
+        status = data.get("status")
+        if status not in cls.ALLOWED_STATUSES:
+            raise ValueError("ModelInferenceEvidence.status %r not allowed" % status)
+        return cls(**data)
+
+    def deterministic_payload(self) -> Dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "status": self.status,
+            "task_id": self.task_id,
+            "operation_id": self.operation_id,
+            "runtime_plan_hash": self.runtime_plan_hash,
+            "model_identity": self.model_identity,
+            "served_model_name": self.served_model_name,
+            "trace_id": self.trace_id,
+            "http_status": self.http_status,
+            "stream": self.stream,
+            "trace_found": self.trace_found,
+            "response_model": self.response_model,
+            "prompt_tokens": self.prompt_tokens,
+            "completion_tokens": self.completion_tokens,
+            "ttft_ms": self.ttft_ms,
+            "total_latency_ms": self.total_latency_ms,
+            "request_sha256": self.request_sha256,
+            "response_body_sha256": self.response_body_sha256,
+        }
+
+    def compute_evidence_hash(self) -> str:
+        return hash_payload(self.deterministic_payload())
+
+
+@dataclass
+class ModelDeploymentPerformanceSummary:
+    """Aggregate performance/identity summary for a model deployment run."""
+    schema_version: int = SCHEMA_VERSION
+    model_identity: str = ""
+    cold_cache: bool = True
+    downloaded_bytes: int = 0
+    download_duration_ms: int = 0
+    cache_validation_ms: int = 0
+    startup_latency_ms: int = 0
+    non_stream_latency_ms: int = 0
+    stream_ttft_ms: int = 0
+    stream_total_latency_ms: int = 0
+    gpu_peak_memory_bytes: int = 0
+    git_sha: str = ""
+    target_repo_sha: str = ""
+    model_revision: str = ""
+    image_digest: str = ""
+    evidence_hashes: List[str] = field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "ModelDeploymentPerformanceSummary":
+        _reject_unknown_keys(cls, data)
+        _require_schema_version(data, cls.__name__)
+        return cls(**data)
