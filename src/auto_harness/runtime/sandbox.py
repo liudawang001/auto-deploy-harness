@@ -52,6 +52,11 @@ DockerSandboxBackend_FORBIDDEN_SECRETS = frozenset({
     "AWS_DEFAULT_REGION",
 })
 
+# Managed model-runtime constants (Document B Phase B3).
+MODEL_RUNTIME_SECURITY_PROFILE = "model_runtime_v1"
+MODEL_RUNTIME_CONTAINER_MODEL_PATH = "/models/current"
+MODEL_RUNTIME_CONTAINER_PORT = 8000
+
 
 class DockerSandboxBackend:
     """Builds Docker command wrappers for isolated dependency install and service startup.
@@ -95,7 +100,7 @@ class DockerSandboxBackend:
             raise ValueError("pids_limit must be positive, got: %s" % pids_limit)
         if repo_mount_mode not in ("ro", "rw"):
             raise ValueError("repo_mount_mode must be 'ro' or 'rw', got: %s" % repo_mount_mode)
-        if phase not in ("custom", "install", "runtime", "verify"):
+        if phase not in ("custom", "install", "runtime", "verify", "model_runtime"):
             raise ValueError("unsupported sandbox phase: %s" % phase)
         if model_cache_mount_mode not in ("ro", "rw"):
             raise ValueError(
@@ -140,6 +145,115 @@ class DockerSandboxBackend:
         if phase == "verify":
             effective["gpus"] = "none"
         return cls(**effective)
+
+    @classmethod
+    def for_model_runtime(cls, *, image, gpu_index, **options):
+        """Build a backend for the managed vLLM runtime phase.
+
+        Enforces the ``model_runtime_v1`` security profile: single-GPU device
+        selection, detached service (no ``--rm``), read-only model mount, and
+        no host network.
+        """
+        network = options.get("network", "bridge")
+        if network == "host":
+            raise ValueError("host network is not allowed")
+        if isinstance(gpu_index, bool) or not isinstance(gpu_index, int) or gpu_index < 0:
+            raise ValueError("gpu_index must be a non-negative integer")
+        effective = dict(options)
+        effective["phase"] = "model_runtime"
+        effective["cap_drop_all"] = True
+        effective["no_new_privileges"] = True
+        effective["read_only_rootfs"] = True
+        effective["gpus"] = "device=%d" % gpu_index
+        effective["network"] = network
+        return cls(image=image, **effective)
+
+    def wrap_model_runtime(
+        self,
+        *,
+        model_host_dir: str,
+        host_port: int,
+        command=None,
+        container_name: str = "",
+        labels=None,
+        repo_dir=None,
+        container_port: int = MODEL_RUNTIME_CONTAINER_PORT,
+        shm_size: str = "8g",
+    ) -> SandboxCommand:
+        """Build the managed vLLM container command (detached, no ``--rm``).
+
+        Mounts only the selected model directory read-only at
+        ``/models/current``, pins the GPU to a device index, and binds the
+        port to loopback only. No model-source tokens are inherited.
+        """
+        if int(host_port) <= 0:
+            raise ValueError("host_port must be positive")
+        model_host = Path(model_host_dir).resolve()
+        effective = ["docker", "run", "-d"]
+        for key, value in sorted((labels or {}).items()):
+            effective.extend(["--label", "%s=%s" % (key, value)])
+        if self.cap_drop_all:
+            effective.extend(["--cap-drop", "ALL"])
+        if self.no_new_privileges:
+            effective.extend(["--security-opt", "no-new-privileges"])
+        effective.extend(["--memory", self.memory])
+        effective.extend(["--cpus", str(self.cpus)])
+        effective.extend(["--pids-limit", str(self.pids_limit)])
+        effective.extend(["--tmpfs", "/tmp:rw,noexec,nosuid,size=%s" % self.tmpfs_size])
+        if shm_size:
+            effective.extend(["--shm-size", shm_size])
+        if self.user:
+            effective.extend(["--user", self.user])
+        if self.read_only_rootfs:
+            effective.append("--read-only")
+        # Only the selected model directory is mounted, and read-only.
+        effective.extend(["-v", "%s:%s:ro" % (model_host, MODEL_RUNTIME_CONTAINER_MODEL_PATH)])
+        if repo_dir:
+            effective.extend(["-v", "%s:/workspace/repo:ro" % Path(repo_dir).resolve()])
+        if container_name:
+            effective.extend(["--name", container_name])
+        if self.network:
+            effective.extend(["--network", self.network])
+        if self.gpus and self.gpus != "none":
+            effective.extend(["--gpus", self.gpus])
+        effective.extend(["-p", "127.0.0.1:%s:%s" % (int(host_port), int(container_port))])
+        effective.append(self.image)
+        effective.extend(command or [])
+
+        security_options = {
+            "cap_drop_all": self.cap_drop_all,
+            "no_new_privileges": self.no_new_privileges,
+            "memory": self.memory,
+            "cpus": self.cpus,
+            "pids_limit": self.pids_limit,
+            "tmpfs_size": self.tmpfs_size,
+            "shm_size": shm_size,
+            "read_only_rootfs": self.read_only_rootfs,
+            "user": self.user,
+            "phase": self.phase,
+            "security_profile": MODEL_RUNTIME_SECURITY_PROFILE,
+            "model_mount": {
+                "host_path": str(model_host),
+                "container_path": MODEL_RUNTIME_CONTAINER_MODEL_PATH,
+                "mount_mode": "ro",
+            },
+        }
+
+        return SandboxCommand(
+            backend="docker",
+            image=self.image,
+            original_cmd=list(command or []),
+            effective_cmd=effective,
+            workdir=MODEL_RUNTIME_CONTAINER_MODEL_PATH,
+            ports=[int(host_port)],
+            network=self.network,
+            gpus=self.gpus,
+            model_cache_mount={},
+            container_name=container_name,
+            log_command=["docker", "logs", container_name] if container_name else [],
+            cleanup_command=["docker", "rm", "-f", container_name] if container_name else [],
+            security_options=security_options,
+        )
 
     def wrap(self, repo_dir: Path, cmd: List[str], ports: Optional[List[int]] = None, container_name: str = "", auto_remove: bool = True, detached: bool = False, labels: Optional[Dict[str, str]] = None) -> SandboxCommand:
         ports = [int(port) for port in (ports or []) if int(port) > 0]
