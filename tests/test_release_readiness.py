@@ -3,7 +3,7 @@ import subprocess
 from pathlib import Path
 
 from auto_harness import release_gates
-from auto_harness.readiness import ReadinessAuditor
+from auto_harness.readiness import CapabilityMatrix, ModelRuntimeReadiness, ReadinessAuditor
 from auto_harness.release_evidence import build_evidence, evidence_hash
 from auto_harness.resources.installer import initialize_workspace
 from auto_harness.models.base import write_json
@@ -89,3 +89,66 @@ def test_default_cli_smoke_uses_offline_mock_without_llm_keys(monkeypatch, tmp_p
     assert captured["command"][plan_provider_index + 1] == "mock"
     assert "DEEPSEEK_API_KEY" not in captured["env"]
     assert "AUTO_HARNESS_LLM_API_KEY" not in captured["env"]
+
+
+# ------------------------------------------------------------------
+# Model runtime readiness (Document B Phase B9)
+# ------------------------------------------------------------------
+
+def _fresh_manifest(**overrides):
+    from datetime import datetime, timezone
+
+    data = {
+        "schema_version": 1,
+        "git_sha": "a" * 40,
+        "target_repo_sha": "b" * 40,
+        "model_revision": "c" * 40,
+        "image_digest": "sha256:" + "d" * 64,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "cold_cache": True,
+        "non_stream_passed": True,
+        "sse_passed": True,
+        "warm_resume_passed": True,
+        "weight_total_bytes": 15000000000,
+        "evidence_paths": ["docs/evidence/gpu-e2e.json"],
+    }
+    data.update(overrides)
+    return data
+
+
+def test_model_runtime_not_validated_without_evidence(tmp_path):
+    result = ModelRuntimeReadiness(tmp_path).assess()
+    assert result["status"] in ("implemented", "integrated")
+    assert result["status"] != "validated"
+
+
+def test_model_runtime_validated_with_fresh_evidence(tmp_path):
+    result = ModelRuntimeReadiness(tmp_path).assess(manifest=_fresh_manifest(), git_sha="a" * 40)
+    assert result["status"] == "validated"
+    assert all(g["status"] == "validated" for g in result["external_gates"])
+
+
+def test_model_runtime_rejects_wrong_sha(tmp_path):
+    result = ModelRuntimeReadiness(tmp_path).assess(manifest=_fresh_manifest(), git_sha="f" * 40)
+    assert result["status"] == "failed"
+    assert "git_sha_mismatch" in result["problems"]
+
+
+def test_model_runtime_rejects_stale_evidence(tmp_path):
+    from datetime import datetime, timedelta, timezone
+
+    stale = (datetime.now(timezone.utc) - timedelta(days=60)).isoformat()
+    result = ModelRuntimeReadiness(tmp_path).assess(manifest=_fresh_manifest(generated_at=stale), git_sha="a" * 40)
+    assert result["status"] == "failed"
+    assert "evidence_stale" in result["problems"]
+
+
+def test_model_runtime_rejects_floating_image(tmp_path):
+    result = ModelRuntimeReadiness(tmp_path).assess(manifest=_fresh_manifest(image_digest="v0.6.1"), git_sha="a" * 40)
+    assert result["status"] == "failed"
+    assert "image_digest_not_fixed" in result["problems"]
+
+
+def test_capability_matrix_model_runtime_never_validated_without_gpu(tmp_path):
+    matrix = CapabilityMatrix(tmp_path).generate()
+    assert matrix["capabilities"]["model_runtime"]["status"] != "validated"

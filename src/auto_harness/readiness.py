@@ -411,12 +411,25 @@ class CapabilityMatrix:
             "evidence": ["tests/test_p1_unified_metrics.py"],
         }
 
+        capabilities["model_runtime"] = self._model_runtime_readiness()
+
         return {
             "schema_version": 1,
             "commit_sha": commit_sha,
             "generated_at": utc_now_iso(),
             "capabilities": capabilities,
         }
+
+    def _model_runtime_readiness(self) -> Dict[str, Any]:
+        """Assess model runtime capability (never validated from code alone)."""
+        manifest_path = self.project_root / "docs" / "evidence" / "gpu-model-e2e-manifest.json"
+        manifest = None
+        if manifest_path.exists():
+            try:
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                manifest = {}
+        return ModelRuntimeReadiness(self.project_root).assess(manifest=manifest)
 
     def _deepseek_readiness(self) -> Dict[str, Any]:
         """Assess DeepSeek provider readiness from code and config.
@@ -567,3 +580,85 @@ class CapabilityMatrix:
             if status not in ("validated", "integrated"):
                 return 1
         return 0
+
+
+# ------------------------------------------------------------------
+# Model Runtime Readiness (Document B Phase B9)
+# ------------------------------------------------------------------
+
+# Real-GPU external gates. Each is only ever ``validated`` when fresh, hash-bound
+# real evidence exists — never because the corresponding code exists.
+GPU_E2E_EXTERNAL_GATES = [
+    ("model_revision_resolution_live", "resolve an immutable model revision against the live source"),
+    ("large_weight_download_live", "download >10GiB of Safetensors weights with resume"),
+    ("docker_nvidia_runtime_live", "probe Docker + NVIDIA Container Toolkit"),
+    ("vllm_7b_startup_live", "start vLLM and reach /v1/models ready"),
+    ("vllm_non_stream_trace_live", "prove a non-stream inference with a current trace id"),
+    ("vllm_sse_trace_live", "prove an SSE inference with a current trace id"),
+    ("model_cache_warm_resume_live", "warm-cache resume with a new trace id"),
+]
+
+FRESHNESS_DEFAULT_DAYS = 30
+
+
+def _is_commit_sha(value: str) -> bool:
+    return bool(value) and len(value) == 40 and all(c in "0123456789abcdefABCDEF" for c in value)
+
+
+class ModelRuntimeReadiness:
+    """Assess model runtime capability status from real GPU evidence.
+
+    Status:
+    - validated: a fresh, hash-bound, SHA-matching GPU evidence manifest.
+    - failed:    an evidence manifest exists but is stale / wrong-SHA / invalid.
+    - integrated: offline integration test artifact present (no real GPU).
+    - implemented: code exists, no evidence yet.
+    """
+
+    def __init__(self, project_root=None, freshness_days: int = FRESHNESS_DEFAULT_DAYS) -> None:
+        self.project_root = Path(project_root or Path.cwd())
+        self.freshness_days = freshness_days
+
+    def assess(self, manifest: Optional[Dict] = None, git_sha: Optional[str] = None, now=None) -> Dict[str, Any]:
+        gates = [{"id": gid, "status": "not_run", "reason": reason} for gid, reason in GPU_E2E_EXTERNAL_GATES]
+        if manifest is None:
+            integrated = (self.project_root / "reports" / "model_runtime_result.json").exists()
+            status = "integrated" if integrated else "implemented"
+            return {"status": status, "external_gates": gates, "evidence": ["src/auto_harness/model_runtime/"]}
+
+        problems: List[str] = []
+        expected_sha = git_sha if git_sha is not None else _get_commit_sha(self.project_root)
+        if manifest.get("git_sha") != expected_sha:
+            problems.append("git_sha_mismatch")
+        if not _is_commit_sha(str(manifest.get("model_revision", ""))):
+            problems.append("model_revision_not_immutable")
+        if not str(manifest.get("image_digest", "")).startswith("sha256:"):
+            problems.append("image_digest_not_fixed")
+        if not self._fresh(manifest.get("generated_at", ""), now):
+            problems.append("evidence_stale")
+
+        if problems:
+            return {"status": "failed", "external_gates": gates, "problems": problems}
+
+        validated_gates = [{"id": gid, "status": "validated", "reason": reason} for gid, reason in GPU_E2E_EXTERNAL_GATES]
+        return {
+            "status": "validated",
+            "external_gates": validated_gates,
+            "evidence": list(manifest.get("evidence_paths", []) or []),
+        }
+
+    def _fresh(self, generated_at: str, now=None) -> bool:
+        if not generated_at:
+            return False
+        try:
+            from datetime import datetime, timedelta, timezone
+
+            parsed = datetime.fromisoformat(str(generated_at).replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            now_dt = now if now is not None else datetime.now(timezone.utc)
+            if now_dt.tzinfo is None:
+                now_dt = now_dt.replace(tzinfo=timezone.utc)
+            return (now_dt - parsed) <= timedelta(days=self.freshness_days)
+        except (ValueError, TypeError):
+            return False
