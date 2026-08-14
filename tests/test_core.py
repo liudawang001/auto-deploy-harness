@@ -2955,7 +2955,7 @@ class CoreTests(unittest.TestCase):
     def test_benchmark_runner_executes_all_fixture_cases(self):
         report = BenchmarkRunner().run(Path("tests/fixtures/benchmarks/manifest.json"))
         self.assertIn(report["status"], ("passed", "partial"))
-        self.assertEqual(len(report["cases"]), 76)
+        self.assertEqual(len(report["cases"]), 86)
         self.assertFalse(any(case["status"] == "failed" for case in report["cases"]))
         if report["status"] == "partial":
             blocked = [case for case in report["cases"] if case["status"] == "not_run"]

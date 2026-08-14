@@ -612,6 +612,86 @@
       "case_id": "conda_postcheck_recovery",
       "test_level": "module_integration",
       "requires": []
+    },
+    {
+      "id": "vllm_runtime_plan_binding",
+      "purpose": "验证 vLLM Runtime Plan 将 --model 绑定到本地只读缓存并生成稳定 plan hash",
+      "expected_signal": "vLLM plan --model=/models/current with stable plan hash",
+      "case_id": "vllm_runtime_plan_binding",
+      "test_level": "unit_simulation",
+      "requires": []
+    },
+    {
+      "id": "vllm_runtime_policy_rejects_tamper",
+      "purpose": "验证 Runtime Policy 拒绝被篡改的 vLLM 命令",
+      "expected_signal": "tampered command is denied with command_mismatch",
+      "case_id": "vllm_runtime_policy_rejects_tamper",
+      "test_level": "unit_simulation",
+      "requires": []
+    },
+    {
+      "id": "vllm_model_cache_read_only_mount",
+      "purpose": "验证模型缓存以只读方式挂载到 /models/current",
+      "expected_signal": "model cache mount is read-only",
+      "case_id": "vllm_model_cache_read_only_mount",
+      "test_level": "unit_simulation",
+      "requires": []
+    },
+    {
+      "id": "vllm_managed_container_reconcile",
+      "purpose": "验证受管容器对账在配置匹配时复用容器",
+      "expected_signal": "reconciler returns reuse for a matching container",
+      "case_id": "vllm_managed_container_reconcile",
+      "test_level": "unit_simulation",
+      "requires": []
+    },
+    {
+      "id": "vllm_delayed_readiness",
+      "purpose": "验证 readiness 等待 /v1/models 就绪才判定 ready",
+      "expected_signal": "readiness only turns ready after /v1/models serves the model",
+      "case_id": "vllm_delayed_readiness",
+      "test_level": "unit_simulation",
+      "requires": []
+    },
+    {
+      "id": "vllm_wrong_model_not_ready",
+      "purpose": "验证 /v1/models 返回错误模型时不判定 ready",
+      "expected_signal": "wrong served model never reaches ready",
+      "case_id": "vllm_wrong_model_not_ready",
+      "test_level": "unit_simulation",
+      "requires": []
+    },
+    {
+      "id": "vllm_non_stream_trace_evidence",
+      "purpose": "验证非流式推理当前 trace 证据通过",
+      "expected_signal": "non-stream response contains current trace",
+      "case_id": "vllm_non_stream_trace_evidence",
+      "test_level": "unit_simulation",
+      "requires": []
+    },
+    {
+      "id": "vllm_sse_trace_evidence",
+      "purpose": "验证 SSE 流式推理当前 trace 证据通过",
+      "expected_signal": "SSE reconstruction contains current trace",
+      "case_id": "vllm_sse_trace_evidence",
+      "test_level": "unit_simulation",
+      "requires": []
+    },
+    {
+      "id": "vllm_historical_evidence_rejected",
+      "purpose": "验证历史 trace 证据不能让本轮通过",
+      "expected_signal": "stale trace is rejected",
+      "case_id": "vllm_historical_evidence_rejected",
+      "test_level": "unit_simulation",
+      "requires": []
+    },
+    {
+      "id": "vllm_checkpoint_resume_new_trace",
+      "purpose": "验证 resume 每次生成全新不可预测 trace",
+      "expected_signal": "fresh unpredictable trace per verify",
+      "case_id": "vllm_checkpoint_resume_new_trace",
+      "test_level": "unit_simulation",
+      "requires": []
     }
   ]
 }

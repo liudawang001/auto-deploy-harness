@@ -421,6 +421,26 @@ class BenchmarkRunner:
                 return self._case_conda_environment_policy(case)
             if case_id == "conda_postcheck_recovery":
                 return self._case_conda_postcheck_recovery(case)
+            if case_id == "vllm_runtime_plan_binding":
+                return self._case_vllm_runtime_plan_binding(case)
+            if case_id == "vllm_runtime_policy_rejects_tamper":
+                return self._case_vllm_runtime_policy_rejects_tamper(case)
+            if case_id == "vllm_model_cache_read_only_mount":
+                return self._case_vllm_model_cache_read_only_mount(case)
+            if case_id == "vllm_managed_container_reconcile":
+                return self._case_vllm_managed_container_reconcile(case)
+            if case_id == "vllm_delayed_readiness":
+                return self._case_vllm_delayed_readiness(case)
+            if case_id == "vllm_wrong_model_not_ready":
+                return self._case_vllm_wrong_model_not_ready(case)
+            if case_id == "vllm_non_stream_trace_evidence":
+                return self._case_vllm_non_stream_trace_evidence(case)
+            if case_id == "vllm_sse_trace_evidence":
+                return self._case_vllm_sse_trace_evidence(case)
+            if case_id == "vllm_historical_evidence_rejected":
+                return self._case_vllm_historical_evidence_rejected(case)
+            if case_id == "vllm_checkpoint_resume_new_trace":
+                return self._case_vllm_checkpoint_resume_new_trace(case)
             return self._result(case, "skipped", "unknown benchmark case")
         except PermissionError as exc:
             return self._environment_blocked(case, "permission_denied", str(exc))
@@ -2767,6 +2787,312 @@ class BenchmarkRunner:
             "artifact_paths": [],
             "duration_ms": 0,
         }
+
+    # ---- Document B vLLM benchmark cases (offline) ----
+
+    @staticmethod
+    def _vllm_bundle():
+        from auto_harness.model_runtime.preparation_gate import PreparationBundle
+        from auto_harness.model_runtime.schemas import InferenceResourceDecision, ResolvedModelSpec
+
+        commit = "c" * 40
+        model_id = "huggingface:org/model@" + commit
+        spec = ResolvedModelSpec(
+            status="resolved", source="huggingface", repo_id="org/model",
+            resolved_revision=commit, model_identity=model_id, model_type="qwen2",
+            architectures=["Qwen2ForCausalLM"], dtype="float16",
+            source_metadata_hash="sha256:model",
+        )
+        decision = InferenceResourceDecision(
+            status="allowed", model_identity=model_id, runtime="vllm",
+            gpu_indexes=[0], required_vram_bytes=18450000000, selected_dtype="float16",
+            max_model_len=4096, max_num_seqs=1, gpu_memory_utilization=0.9,
+            tensor_parallel_size=1,
+        )
+        cache_root = Path(tempfile.gettempdir()) / "bench-model-cache"
+        return PreparationBundle(
+            status="ready", spec=spec, decision=decision,
+            resolved_model_hash="sha256:model", file_plan_hash="sha256:fp",
+            cache_marker_hash="sha256:cm", resource_decision_hash="sha256:rd",
+            model_host_path=str(cache_root / "huggingface" / "key"),
+            cache_root=str(cache_root), gpu_indexes=[0],
+        )
+
+    @staticmethod
+    def _vllm_config():
+        from auto_harness.config import HarnessConfig
+
+        digest = "sha256:" + "d" * 64
+        return HarnessConfig(model_inference_enabled=True, model_runtime_image="vllm/vllm-openai:v0.6.1@" + digest)
+
+    def _case_vllm_runtime_plan_binding(self, case):
+        from auto_harness.model_runtime.vllm_adapter import VllmRuntimeAdapter
+
+        plan = VllmRuntimeAdapter().build(self._vllm_bundle(), self._vllm_config(), task_id="bench")
+        args = plan.command
+        ok = args[args.index("--model") + 1] == "/models/current" and bool(plan.plan_hash)
+        return self._result(case, "passed" if ok else "failed", "vLLM plan binds --model to local cache path")
+
+    def _case_vllm_runtime_policy_rejects_tamper(self, case):
+        from auto_harness.model_runtime.policy import ModelRuntimePolicy
+        from auto_harness.model_runtime.vllm_adapter import VllmRuntimeAdapter
+
+        bundle = self._vllm_bundle()
+        config = self._vllm_config()
+        plan = VllmRuntimeAdapter().build(bundle, config, task_id="bench")
+        plan.command.append("--trust-remote-code")
+        plan.plan_hash = plan.compute_plan_hash()
+        decision = ModelRuntimePolicy().authorize(
+            plan, bundle, config, execute=True, allow_start=True, execution_backend="docker",
+        )
+        return self._result(case, "passed" if decision["reason_code"] == "command_mismatch" else "failed", "policy rejects a tampered runtime command")
+
+    def _case_vllm_model_cache_read_only_mount(self, case):
+        from auto_harness.runtime import DockerSandboxBackend
+
+        model = Path(tempfile.gettempdir()) / "bench-model"
+        backend = DockerSandboxBackend.for_model_runtime(
+            image="vllm/vllm-openai@sha256:" + "d" * 64, gpu_index=0,
+        )
+        sandbox = backend.wrap_model_runtime(
+            model_host_dir=str(model), host_port=8000, command=["python3"],
+            container_name="c", labels={},
+        )
+        ok = "%s:/models/current:ro" % model.resolve() in sandbox.effective_cmd
+        return self._result(case, "passed" if ok else "failed", "model cache mounted read-only at /models/current")
+
+    def _case_vllm_managed_container_reconcile(self, case):
+        import json
+
+        from auto_harness.recovery.docker import DockerReconciler
+
+        plan = None
+        from auto_harness.model_runtime.vllm_adapter import VllmRuntimeAdapter
+
+        plan = VllmRuntimeAdapter().build(self._vllm_bundle(), self._vllm_config(), task_id="bench")
+        op = {
+            "operation_id": "op-bench", "task_id": "bench", "stage": "runner",
+            "action": "start_service", "resource_type": "docker_service",
+            "resource_identity": {
+                "container_name": plan.container_name, "plan_hash": plan.plan_hash,
+                "runtime_plan_hash": plan.plan_hash, "image": plan.image,
+                "image_digest": plan.image_digest, "model_hash": plan.resolved_model_hash,
+                "model_identity": plan.model_identity, "model_host_path": plan.model_host_path,
+                "gpu_indexes": [0], "ports": [8000], "network": "bridge", "gpus": "device=0",
+                "shm_size": "8g", "memory": "32g", "cpus": 8.0, "pids_limit": 1024,
+                "read_only_rootfs": True, "user": "",
+            },
+        }
+        inspect = json.dumps([{
+            "Id": "cid", "Config": {"Image": plan.image, "Labels": {
+                "auto-harness.task-id": "bench", "auto-harness.operation-id": "op-bench",
+                "auto-harness.plan-hash": plan.plan_hash, "auto-harness.model-hash": plan.resolved_model_hash,
+            }},
+            "State": {"Running": True},
+            "Mounts": [{"Source": plan.model_host_path, "Destination": "/models/current", "Mode": "ro"}],
+            "HostConfig": {
+                "PortBindings": {"8000/tcp": [{"HostIp": "127.0.0.1", "HostPort": "8000"}]},
+                "NetworkMode": "bridge", "DeviceRequests": [{"Driver": "nvidia", "DeviceIDs": ["0"]}],
+                "ShmSize": 8 * 1024 ** 3, "Memory": 32 * 1024 ** 3, "NanoCpus": int(8.0 * 1e9),
+                "PidsLimit": 1024, "ReadonlyRootfs": True, "User": "",
+            },
+        }])
+
+        def runner(cmd):
+            if cmd[:2] == ["docker", "ps"]:
+                return {"exit_code": 0, "stdout": "cid\n", "stderr": ""}
+            if cmd[:2] == ["docker", "inspect"]:
+                return {"exit_code": 0, "stdout": inspect, "stderr": ""}
+            return {"exit_code": 1, "stdout": "", "stderr": ""}
+
+        result = DockerReconciler(runner).reconcile(op)
+        return self._result(case, "passed" if result["decision"] == "reuse" else "failed", "managed container is reused when config matches")
+
+    def _case_vllm_delayed_readiness(self, case):
+        import json
+
+        from auto_harness.model_runtime.readiness import ModelRuntimeReadiness
+        from auto_harness.model_runtime.vllm_adapter import VllmRuntimeAdapter
+
+        plan = VllmRuntimeAdapter().build(self._vllm_bundle(), self._vllm_config(), task_id="bench")
+        clock = {"v": 0.0}
+        labels = {"auto-harness.task-id": "bench", "auto-harness.operation-id": "op", "auto-harness.plan-hash": plan.plan_hash, "auto-harness.model-hash": plan.resolved_model_hash}
+
+        def sleeper(interval):
+            clock["v"] += 1.0
+
+        class Resp:
+            status = 200
+            code = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def read(self):
+                return json.dumps({"data": [{"id": "org/model"}]}).encode()
+
+        def urlopen(req, timeout=5):
+            if clock["v"] < 2.0:
+                raise OSError("not ready")
+            return Resp()
+
+        def runner(cmd):
+            if cmd[:2] == ["docker", "inspect"]:
+                return {"exit_code": 0, "stdout": json.dumps([{"State": {"Running": True}, "Config": {"Labels": labels}}]), "stderr": ""}
+            if cmd[:2] == ["docker", "logs"]:
+                return {"exit_code": 0, "stdout": "", "stderr": ""}
+            return {"exit_code": 1, "stdout": "", "stderr": ""}
+
+        ev = ModelRuntimeReadiness(command_runner=runner, urlopen=urlopen, clock=lambda: clock["v"], sleeper=sleeper).wait(
+            runtime_plan=plan, task_id="bench", operation_id="op", container_id="cid", labels=labels,
+        )
+        return self._result(case, "passed" if ev.status == "ready" else "failed", "readiness waits for /v1/models to serve the model")
+
+    def _case_vllm_wrong_model_not_ready(self, case):
+        import json
+
+        from auto_harness.model_runtime.readiness import ModelRuntimeReadiness
+        from auto_harness.model_runtime.vllm_adapter import VllmRuntimeAdapter
+
+        plan = VllmRuntimeAdapter().build(self._vllm_bundle(), self._vllm_config(), task_id="bench")
+        labels = {"auto-harness.task-id": "bench", "auto-harness.operation-id": "op", "auto-harness.plan-hash": plan.plan_hash, "auto-harness.model-hash": plan.resolved_model_hash}
+
+        class Resp:
+            status = 200
+            code = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def read(self):
+                return json.dumps({"data": [{"id": "wrong/model"}]}).encode()
+
+        def runner(cmd):
+            if cmd[:2] == ["docker", "inspect"]:
+                return {"exit_code": 0, "stdout": json.dumps([{"State": {"Running": True}, "Config": {"Labels": labels}}]), "stderr": ""}
+            if cmd[:2] == ["docker", "logs"]:
+                return {"exit_code": 0, "stdout": "", "stderr": ""}
+            return {"exit_code": 1, "stdout": "", "stderr": ""}
+
+        ev = ModelRuntimeReadiness(command_runner=runner, urlopen=lambda req, timeout=5: Resp(), sleeper=lambda i: None).wait(
+            runtime_plan=plan, task_id="bench", operation_id="op", container_id="cid", labels=labels, max_rounds=3,
+        )
+        return self._result(case, "passed" if ev.status != "ready" else "failed", "wrong served model never reaches ready")
+
+    def _case_vllm_non_stream_trace_evidence(self, case):
+        import json
+
+        from auto_harness.model_runtime.evidence import ModelInferenceGate
+        from auto_harness.model_runtime.schemas import ModelRuntimeStartupEvidence
+        from auto_harness.model_runtime.vllm_adapter import VllmRuntimeAdapter
+
+        plan = VllmRuntimeAdapter().build(self._vllm_bundle(), self._vllm_config(), task_id="bench")
+        startup = ModelRuntimeStartupEvidence(status="ready", ready_at="2000-01-01T00:00:00Z", container_id="cid", served_model_name="org/model")
+        trace = "infer_bench_12345678"
+
+        class Resp:
+            status = 200
+            code = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def read(self):
+                return json.dumps({
+                    "model": "org/model",
+                    "choices": [{"message": {"content": "token %s" % trace}}],
+                    "usage": {"prompt_tokens": 18, "completion_tokens": 6},
+                }).encode()
+
+        ev = ModelInferenceGate(urlopen=lambda req, timeout=5: Resp(), now=lambda: "2000-01-01T01:00:00Z").verify_non_stream(
+            runtime_plan=plan, startup_evidence=startup, task_id="bench", operation_id="op", trace_id=trace,
+        )
+        return self._result(case, "passed" if ev.status == "passed" else "failed", "non-stream current trace evidence passed")
+
+    def _case_vllm_sse_trace_evidence(self, case):
+        import json
+
+        from auto_harness.model_runtime.evidence import ModelInferenceGate
+        from auto_harness.model_runtime.schemas import ModelRuntimeStartupEvidence
+        from auto_harness.model_runtime.vllm_adapter import VllmRuntimeAdapter
+
+        plan = VllmRuntimeAdapter().build(self._vllm_bundle(), self._vllm_config(), task_id="bench")
+        startup = ModelRuntimeStartupEvidence(status="ready", ready_at="2000-01-01T00:00:00Z", container_id="cid", served_model_name="org/model")
+        trace = "infer_bench_12345678"
+        lines = [
+            "data: " + json.dumps({"choices": [{"delta": {"content": trace}}]}),
+            "",
+            "data: " + json.dumps({"choices": [], "usage": {"prompt_tokens": 18, "completion_tokens": 6}}),
+            "",
+            "data: [DONE]",
+            "",
+        ]
+
+        class Resp:
+            status = 200
+            code = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def __iter__(self):
+                return iter(lines)
+
+        ev = ModelInferenceGate(urlopen=lambda req, timeout=5: Resp(), now=lambda: "2000-01-01T01:00:00Z").verify_stream(
+            runtime_plan=plan, startup_evidence=startup, task_id="bench", operation_id="op", trace_id=trace,
+        )
+        return self._result(case, "passed" if ev.status == "passed" else "failed", "SSE current trace evidence passed")
+
+    def _case_vllm_historical_evidence_rejected(self, case):
+        import json
+
+        from auto_harness.model_runtime.evidence import ModelInferenceGate
+        from auto_harness.model_runtime.schemas import ModelRuntimeStartupEvidence
+        from auto_harness.model_runtime.vllm_adapter import VllmRuntimeAdapter
+
+        plan = VllmRuntimeAdapter().build(self._vllm_bundle(), self._vllm_config(), task_id="bench")
+        startup = ModelRuntimeStartupEvidence(status="ready", ready_at="2000-01-01T00:00:00Z", container_id="cid", served_model_name="org/model")
+
+        class Resp:
+            status = 200
+            code = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def read(self):
+                return json.dumps({
+                    "model": "org/model",
+                    "choices": [{"message": {"content": "token infer_STALE_00000000"}}],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+                }).encode()
+
+        ev = ModelInferenceGate(urlopen=lambda req, timeout=5: Resp(), now=lambda: "2000-01-01T01:00:00Z").verify_non_stream(
+            runtime_plan=plan, startup_evidence=startup, task_id="bench", operation_id="op", trace_id="infer_NOW_99999999",
+        )
+        return self._result(case, "passed" if ev.status == "failed" else "failed", "historical trace does not satisfy the current gate")
+
+    def _case_vllm_checkpoint_resume_new_trace(self, case):
+        from auto_harness.model_runtime.evidence import ModelInferenceGate
+
+        gate = ModelInferenceGate()
+        traces = {gate.generate_trace_id() for _ in range(50)}
+        return self._result(case, "passed" if len(traces) == 50 else "failed", "resume always generates a fresh unpredictable trace")
 
     def _environment_blocked(self, case: Dict, reason: str, detail: str = "") -> Dict:
         result = self._result(case, "not_run", reason)
