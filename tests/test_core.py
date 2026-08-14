@@ -1842,6 +1842,28 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(result.data["sandbox"]["network"], "none")
             self.assertEqual(result.data["sandbox"]["gpus"], "all")
 
+    def test_env_deploy_docker_wrapper_authorizes_original_command(self):
+        captured = []
+
+        def command_runner(cmd, cwd, timeout_seconds):
+            captured.append(cmd)
+            return CommandResult(
+                cmd=cmd, cwd=str(cwd), exit_code=0, stdout="", stderr=""
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            result = EnvDeployModule(command_runner=command_runner).deploy(
+                Path(tmp),
+                {"install_plan": [["python3", "-m", "venv", ".venv"]]},
+                execute=True,
+                allowed_commands=["python3"],
+                execution_backend="docker",
+            )
+
+        self.assertEqual(result.status, "passed")
+        self.assertEqual(captured[0][0], "docker")
+        self.assertEqual(result.data["commands"][0]["original_cmd"][0], "python3")
+
     def test_env_deploy_local_venv_uses_harness_python(self):
         import sys
 

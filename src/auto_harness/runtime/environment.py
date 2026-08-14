@@ -7,6 +7,7 @@ parent environment implicitly.
 
 import os
 import re
+import subprocess
 from pathlib import Path
 from typing import Dict, Mapping, Optional
 
@@ -77,6 +78,41 @@ def is_secret_environment_name(name: str) -> bool:
     )
 
 
+def local_docker_environment(
+    environ: Optional[Mapping[str, str]] = None,
+) -> Dict[str, str]:
+    """Resolve a local Docker socket without exposing the user's Docker HOME."""
+    source = dict(os.environ if environ is None else environ)
+    host = str(source.get("DOCKER_HOST") or "").strip()
+    if not host:
+        try:
+            context_env = {
+                name: source[name]
+                for name in (
+                    "PATH", "HOME", "USERPROFILE", "DOCKER_CONFIG", "DOCKER_CONTEXT",
+                )
+                if source.get(name)
+            }
+            completed = subprocess.run(
+                [
+                    "docker", "context", "inspect", "--format",
+                    "{{.Endpoints.docker.Host}}",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+                env=context_env,
+            )
+            if completed.returncode == 0:
+                host = completed.stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            host = ""
+    if host.startswith(("unix://", "npipe://")):
+        return {"DOCKER_HOST": host}
+    return {}
+
+
 class ChildEnvironmentPolicy:
     """Build fail-closed environments for target-controlled subprocesses."""
 
@@ -143,4 +179,8 @@ class ChildEnvironmentPolicy:
         return child
 
 
-__all__ = ["ChildEnvironmentPolicy", "is_secret_environment_name"]
+__all__ = [
+    "ChildEnvironmentPolicy",
+    "is_secret_environment_name",
+    "local_docker_environment",
+]

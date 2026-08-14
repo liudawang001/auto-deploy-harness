@@ -42,12 +42,13 @@ from auto_harness.models.task import ProjectSpec, RuntimePolicy, TaskSpec
 from auto_harness.providers import LLMResult, MockLLMProvider
 from auto_harness.providers.memory_evolution_mock import MemoryEvolutionMockProvider
 from auto_harness.repair import RepairApplier, RepairLoopController, RepairPlanner, RepairPolicy
+from auto_harness.runtime import DockerSmokeChecker, local_docker_environment
 from auto_harness.orchestrator import TaskRunner
 from auto_harness.queue import DeploymentQueue
 from auto_harness.readiness import ReadinessAuditor
 from auto_harness.release_evidence import build_evidence
 from auto_harness.verify import BrowserVerifier, StreamlitVerifier
-from auto_harness.utils.shell import CommandResult
+from auto_harness.utils.shell import CommandResult, run_command
 
 
 class _PassingRegressionRunner:
@@ -176,7 +177,26 @@ class _ControllerE2EProvider(MockLLMProvider):
                 },
             }
             return LLMResult(text=json.dumps(content), raw=content, usage={}, latency_ms=1)
-        return super().complete(messages, temperature=temperature)
+        result = super().complete(messages, temperature=temperature)
+        content = json.loads(result.text)
+        if content.get("plan_id"):
+            content["environment"]["install_commands"].append([
+                ".venv/bin/python", "-m", "pip", "install", "-e", ".",
+                "--no-build-isolation",
+            ])
+            content["run"] = {
+                "candidates": [{
+                    "id": "llm_declared_cli",
+                    "cmd": [".venv/bin/missing-dependency-repair"],
+                    "expected_port": content["run"]["candidates"][0]["expected_port"],
+                    "reason": "PEP 621 CLI is declared and documented",
+                }],
+                "selected_candidate_id": "llm_declared_cli",
+            }
+            return LLMResult(
+                text=json.dumps(content), raw=content, usage={}, latency_ms=1
+            )
+        return result
 
 
 class BenchmarkRunner:
@@ -2446,18 +2466,64 @@ class BenchmarkRunner:
 
     def _case_langgraph_self_repair_controller_e2e(self, case: Dict) -> Dict:
         """Run the real controller; only LLM and package installation are deterministic."""
+        docker_probe = DockerSmokeChecker().check(
+            probe=True, image="python:3.10-slim", require_gpu=False
+        )
+        if docker_probe.get("status") != "passed":
+            failed_checks = [
+                item for item in docker_probe.get("checks", [])
+                if item.get("status") == "failed"
+            ]
+            detail = failed_checks[0].get("stderr_tail", "") if failed_checks else ""
+            return self._environment_blocked(
+                case, "docker_unavailable", detail or "Docker probe failed"
+            )
         fixture = Path("tests/fixtures/e2e/missing_dependency_repair")
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
             probe.bind(("127.0.0.1", 0))
             port = int(probe.getsockname()[1])
 
-        with tempfile.TemporaryDirectory() as tmp:
+        benchmark_tmp_root = Path(".harness-runtime/benchmarks").resolve()
+        benchmark_tmp_root.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=str(benchmark_tmp_root)) as tmp:
             root = Path(tmp)
             repo = root / "repo"
             shutil.copytree(fixture, repo)
             app_path = repo / "app.py"
             app_path.write_text(
-                app_path.read_text(encoding="utf-8").replace("PORT = 8921", "PORT = %s" % port),
+                app_path.read_text(encoding="utf-8")
+                .replace("PORT = 8921", "PORT = %s" % port)
+                .replace(
+                    'if __name__ == "__main__":\n'
+                    '    with socketserver.TCPServer(("", PORT), Handler) as httpd:\n'
+                    '        print(f"Serving on port {PORT}")\n'
+                    '        httpd.serve_forever()\n',
+                    'def main():\n'
+                    '    with socketserver.TCPServer(("", PORT), Handler) as httpd:\n'
+                    '        print(f"Serving on port {PORT}")\n'
+                    '        httpd.serve_forever()\n\n\n'
+                    'if __name__ == "__main__":\n'
+                    '    main()\n',
+                ),
+                encoding="utf-8",
+            )
+            (repo / "pyproject.toml").write_text(
+                "[build-system]\n"
+                'requires = ["setuptools"]\n'
+                'build-backend = "setuptools.build_meta"\n\n'
+                "[project]\n"
+                'name = "missing-dependency-repair"\n'
+                'version = "0.0.1"\n\n'
+                "[project.scripts]\n"
+                'missing-dependency-repair = "app:main"\n\n'
+                "[tool.setuptools]\n"
+                'py-modules = ["app"]\n',
+                encoding="utf-8",
+            )
+            readme_path = repo / "README.md"
+            readme_path.write_text(
+                readme_path.read_text(encoding="utf-8")
+                + "\n```bash\nmissing-dependency-repair\n```\n",
                 encoding="utf-8",
             )
             config = HarnessConfig(
@@ -2481,7 +2547,12 @@ class BenchmarkRunner:
             class _DeterministicPackageInstaller(RepairApplier):
                 def _execute_command(self, run_dir, action_type, cmd, command_runner, timeout_seconds):
                     repo_dir = run_dir / "workspace" / "repo"
-                    (repo_dir / "requests.py").write_text(
+                    site_packages = sorted(
+                        (repo_dir / ".venv" / "lib").glob("python*/site-packages")
+                    )
+                    if not site_packages:
+                        raise RuntimeError("benchmark venv site-packages missing")
+                    (site_packages[0] / "requests.py").write_text(
                         '"""Deterministic benchmark package stub."""\n',
                         encoding="utf-8",
                     )
@@ -2542,12 +2613,35 @@ class BenchmarkRunner:
             )
             runner_data = pipeline.get("runner", {}).get("data") or {}
             pid = int(runner_data.get("pid") or 0)
-            if pid > 0:
+            cleanup_command = (
+                (runner_data.get("sandbox") or {}).get("cleanup_command") or []
+            )
+            if cleanup_command[:3] == ["docker", "rm", "-f"]:
+                run_command(
+                    cleanup_command,
+                    repo,
+                    timeout_seconds=30,
+                    env={**os.environ, **local_docker_environment()},
+                )
+            elif pid > 0:
                 try:
                     os.kill(pid, signal.SIGTERM)
                 except ProcessLookupError:
                     pass
-        return self._result(case, "passed" if ok else "failed", "real LangGraph self-repair controller E2E verified")
+        reason = "real LangGraph self-repair controller E2E verified"
+        if not ok:
+            reason = (
+                "controller_status=%s verify_status=%s "
+                "repair_verified=%s resume_executed=%s fresh_trace=%s"
+                % (
+                    controller_result.get("status", "missing"),
+                    controller_result.get("verify_status", "missing"),
+                    attempt.get("repair_verified", "missing"),
+                    attempt.get("resume_executed", "missing"),
+                    fresh_trace,
+                )
+            )
+        return self._result(case, "passed" if ok else "failed", reason)
 
     def _stage_update_count(self, run_dir: Path) -> Dict[str, int]:
         counts: Dict[str, int] = {}

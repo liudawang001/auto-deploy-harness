@@ -7,7 +7,11 @@ from typing import Dict, List
 from auto_harness.models.result import StageResult
 from auto_harness.env import CondaBackend
 from auto_harness.diagnostics import LogClassifier
-from auto_harness.runtime import ChildEnvironmentPolicy, DockerSandboxBackend
+from auto_harness.runtime import (
+    ChildEnvironmentPolicy,
+    DockerSandboxBackend,
+    local_docker_environment,
+)
 from auto_harness.utils.commands import is_allowed_command
 from auto_harness.utils.ports import is_port_open
 from auto_harness.utils.files import short_hash
@@ -171,6 +175,10 @@ class RunnerModule:
         # credentials are still filtered by ChildEnvironmentPolicy.
         child_env = self.child_environment_policy.build_for_service(
             home_dir=repo_dir.parent / "install_home",
+            extra=(
+                local_docker_environment()
+                if effective_backend == "docker" else None
+            ),
         )
         log_file = log_path.open("a", encoding="utf-8")
         try:

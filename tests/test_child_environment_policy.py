@@ -13,6 +13,7 @@ from auto_harness.modules.runner import RunnerModule
 from auto_harness.runtime.environment import (
     ChildEnvironmentPolicy,
     is_secret_environment_name,
+    local_docker_environment,
 )
 
 
@@ -41,6 +42,15 @@ def test_child_environment_policy_removes_provider_and_cloud_secrets(tmp_path):
     assert "HF_TOKEN" not in child
     assert "AWS_SECRET_ACCESS_KEY" not in child
     assert "GITHUB_TOKEN" not in child
+
+
+def test_local_docker_environment_allows_only_local_socket_endpoint():
+    assert local_docker_environment({
+        "DOCKER_HOST": "unix:///tmp/docker.sock",
+    }) == {"DOCKER_HOST": "unix:///tmp/docker.sock"}
+    assert local_docker_environment({
+        "DOCKER_HOST": "tcp://docker.example:2376",
+    }) == {}
 
 
 @pytest.mark.parametrize(
