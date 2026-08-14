@@ -50,6 +50,7 @@ class AgentStageExecutor:
         runtime_policy: Dict = None,
         verify_planner_factory: Callable = None,
         agent_verify_config_factory: Callable = None,
+        model_runtime_controller: Callable = None,
     ) -> None:
         self.config = config
         self.store = store
@@ -61,6 +62,8 @@ class AgentStageExecutor:
         # the orchestrator's verify planner/provider config into VerifyModule.
         self.verify_planner_factory = verify_planner_factory
         self.agent_verify_config_factory = agent_verify_config_factory
+        # Document B: model runtime controller (managed vLLM) integration.
+        self.model_runtime_controller = model_runtime_controller
 
     def execute_stage(
         self,
@@ -144,7 +147,7 @@ class AgentStageExecutor:
                     before_status, dry_run,
                 )
             elif stage == "runner":
-                return self._execute_runner(task_id, run_dir, repo_dir, deploy_analysis, before_status, dry_run, stage_hints)
+                return self._execute_runner(task_id, run_dir, repo_dir, deploy_analysis, before_status, dry_run, stage_hints, state)
             elif stage == "verify":
                 return self._execute_verify(
                     task_id,
@@ -155,6 +158,7 @@ class AgentStageExecutor:
                     before_status,
                     stage_hints,
                     skill_context,
+                    state,
                 )
             elif stage == "repair":
                 return self._execute_repair(task_id, run_dir, repo_dir, state, before_status, dry_run)
@@ -368,12 +372,47 @@ class AgentStageExecutor:
             changed=before_status != result.status,
         )
 
-    def _execute_runner(self, task_id, run_dir, repo_dir, deploy_analysis, before_status, dry_run, stage_hints):
-        from auto_harness.modules.runner import RunnerModule
-        # Use runtime_policy for execute flag (set by CLI), fallback to config
+    def _execute_runner(self, task_id, run_dir, repo_dir, deploy_analysis, before_status, dry_run, stage_hints, state=None):
         allow_start = self.runtime_policy.get("allow_service_start",
                                                self.config.allow_service_start if self.config else False)
         execute = not dry_run and allow_start
+        # Document B: when model inference is enabled and a runtime controller
+        # is wired in, the runner stage manages the vLLM container instead of
+        # a repository command.
+        if (
+            self.config
+            and getattr(self.config, "model_inference_enabled", False)
+            and self.model_runtime_controller is not None
+        ):
+            phase = self.model_runtime_controller.run_runtime_phase(
+                run_dir=run_dir,
+                task_id=task_id,
+                config=self.config,
+                cache_root=getattr(self.config, "model_cache_path", None),
+                execute=execute,
+                allow_start=allow_start,
+                operation_id=(state or {}).get("pending_operation_id", ""),
+            )
+            result = {
+                "status": phase.status,
+                "data": {
+                    "runtime_plan": phase.plan.to_dict() if phase.plan else {},
+                    "startup_evidence": phase.startup_evidence.to_dict() if phase.startup_evidence else {},
+                    "container_id": phase.container_id,
+                    "policy": phase.policy,
+                    "errors": phase.errors,
+                },
+            }
+            after = "passed" if phase.status == "passed" else ("failed" if phase.status == "failed" else "uncertain")
+            return StageExecutionResult(
+                stage="runner",
+                before_status=before_status,
+                after_status=after,
+                result=result,
+                changed=before_status != after,
+                error="; ".join(phase.errors),
+            )
+        from auto_harness.modules.runner import RunnerModule
         result = RunnerModule().run(
             repo_dir,
             deploy_analysis,
@@ -410,7 +449,40 @@ class AgentStageExecutor:
         before_status,
         stage_hints,
         skill_context,
+        state=None,
     ):
+        # Document B: verify the managed vLLM runtime via trace inference when
+        # the runner produced a runtime plan + startup evidence.
+        if (
+            self.config
+            and getattr(self.config, "model_inference_enabled", False)
+            and self.model_runtime_controller is not None
+        ):
+            inner = runner_data if isinstance(runner_data, dict) else {}
+            if isinstance(inner, dict) and isinstance(inner.get("data"), dict):
+                inner = inner["data"]
+            if isinstance(inner, dict) and inner.get("runtime_plan"):
+                from auto_harness.model_runtime.schemas import (
+                    InferenceRuntimePlan,
+                    ModelRuntimeStartupEvidence,
+                )
+
+                plan = InferenceRuntimePlan.from_dict(inner["runtime_plan"])
+                startup = ModelRuntimeStartupEvidence.from_dict(inner["startup_evidence"])
+                result = self.model_runtime_controller.verify_phase(
+                    run_dir=run_dir,
+                    task_id=task_id,
+                    runtime_plan=plan,
+                    startup_evidence=startup,
+                )
+                return StageExecutionResult(
+                    stage="verify",
+                    before_status=before_status,
+                    after_status=result.status,
+                    result=to_plain(result),
+                    changed=before_status != result.status,
+                    evidence_paths=list(result.evidence) if hasattr(result, "evidence") and result.evidence else [],
+                )
         from auto_harness.modules.verify import VerifyModule
         # runner_data from agent loop may be a StageResult wrapper with {stage, status, summary, data}
         # VerifyModule._service_discovery expects the inner data (pid, service_ready, expected_port, etc.)

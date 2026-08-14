@@ -99,6 +99,8 @@ class LangGraphControllerDependencies:
             # Phase 5: Agent Verify integration factories
             verify_planner_factory=self._verify_planner_factory(),
             agent_verify_config_factory=self._agent_verify_config_factory(),
+            # Document B: managed vLLM runtime controller (only when enabled).
+            model_runtime_controller=self._model_runtime_controller(),
         )
 
         def build_snapshot(state):
@@ -279,6 +281,14 @@ class LangGraphControllerDependencies:
                 "agent_context_memory_budget_tokens": getattr(config, "agent_context_memory_budget_tokens", 2000),
             }
         return factory
+
+    def _model_runtime_controller(self):
+        """Document B: build a managed vLLM controller only when enabled."""
+        if not getattr(self.runner.config, "model_inference_enabled", False):
+            return None
+        from auto_harness.model_runtime.controller import ModelRuntimeController
+
+        return ModelRuntimeController()
 
     def _build_reconcilers(self):
         """Phase 6: build available reconcilers based on config."""

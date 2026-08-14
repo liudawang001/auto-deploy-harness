@@ -556,6 +556,7 @@ class TaskRunner:
             },
             provider_factory=lambda: self._create_agent_provider(),
             runtime_policy=runtime_policy,
+            model_runtime_controller=self._model_runtime_controller(),
         )
 
         # Create and run the agent loop
@@ -1099,6 +1100,14 @@ class TaskRunner:
     def _create_agent_provider(self):
         """Create LLM provider for the agent runtime loop."""
         return self._agent_provider()
+
+    def _model_runtime_controller(self):
+        """Document B: build a managed vLLM controller only when enabled."""
+        if not getattr(self.config, "model_inference_enabled", False):
+            return None
+        from auto_harness.model_runtime.controller import ModelRuntimeController
+
+        return ModelRuntimeController()
 
     def _agent_trace_writer(self, run_dir: Path) -> AgentTraceWriter:
         return AgentTraceWriter(run_dir / "logs" / "agent_calls")
