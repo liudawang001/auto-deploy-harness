@@ -1,5 +1,6 @@
 import subprocess
 import time
+import json
 from pathlib import Path
 from typing import Dict, List
 
@@ -10,6 +11,8 @@ from auto_harness.runtime import ChildEnvironmentPolicy, DockerSandboxBackend
 from auto_harness.utils.commands import is_allowed_command
 from auto_harness.utils.ports import is_port_open
 from auto_harness.utils.files import short_hash
+from auto_harness.command_auth import CommandAuthorizationEngine, CommandRegistry
+from auto_harness.command_auth.schemas import sandbox_policy_fingerprint
 
 
 class RunnerModule:
@@ -31,6 +34,8 @@ class RunnerModule:
         docker_model_cache_dir: str = "",
         docker_security_options: Dict = None,
         stage_hints: Dict = None,
+        run_dir: Path = None,
+        max_candidate_attempts: int = 3,
     ) -> StageResult:
         candidates: List[Dict] = analysis.get("run_candidates", [])
         if not candidates:
@@ -40,14 +45,47 @@ class RunnerModule:
         prefer_patterns = hints.get("prefer_entrypoint_patterns", [])
         if prefer_patterns:
             candidates = self._reorder_candidates_by_hints(candidates, prefer_patterns)
-        candidate = dict(candidates[0])
+        registry_scoped = bool(
+            isinstance(analysis.get("command_registry"), dict)
+            and analysis.get("command_registry")
+        )
+        authorization_network = "none" if registry_scoped else docker_network
+        candidate, authorization_attempts = self._select_authorized_candidate(
+            repo_dir,
+            candidates,
+            analysis,
+            execution_backend,
+            require_executable=execute,
+            allow_approval_preview=not execute,
+            max_candidate_attempts=max_candidate_attempts,
+            run_dir=run_dir,
+            sandbox_fingerprint=sandbox_policy_fingerprint(
+                phase="runtime", image=docker_image, network=authorization_network,
+                gpus=docker_gpus, model_cache_dir=docker_model_cache_dir,
+                security_options=docker_security_options,
+            ),
+        )
+        self._write_authorization_attempts(run_dir, authorization_attempts)
+        if candidate is None:
+            return StageResult(
+                "runner",
+                "failed" if execute else "uncertain",
+                "no authorized run candidate",
+                {"authorization_attempts": authorization_attempts},
+                error="no_safe_command_candidate" if execute else "",
+            )
         candidate["env_solution"] = analysis.get("env_solution") if isinstance(analysis.get("env_solution"), dict) else {}
+        effective_backend = candidate.get("required_backend") or execution_backend
+        effective_network = (
+            "none" if candidate.get("network_profile") == "none"
+            else docker_network
+        )
         effective_candidate, sandbox = self._effective_candidate(
             repo_dir,
             candidate,
-            execution_backend,
+            effective_backend,
             docker_image,
-            docker_network,
+            effective_network,
             docker_gpus,
             docker_model_cache_dir,
             docker_security_options,
@@ -61,13 +99,15 @@ class RunnerModule:
                     "candidate": candidate,
                     "candidate_selection": self._candidate_selection(candidate),
                     "effective_candidate": effective_candidate,
-                    "execution_backend": execution_backend,
+                    "execution_backend": effective_backend,
                     "sandbox": sandbox,
+                    "authorization_attempts": authorization_attempts,
                     "executed": False,
                 },
             )
         allowed_commands = allowed_commands or []
-        allowed = is_allowed_command(effective_candidate["cmd"], allowed_commands)
+        registry_authorized = bool(candidate.get("command_candidate_id"))
+        allowed = registry_authorized or is_allowed_command(effective_candidate["cmd"], allowed_commands)
         command_path = Path(effective_candidate["cmd"][0]) if effective_candidate.get("cmd") else Path()
         if not command_path.is_absolute():
             command_path = repo_dir / command_path
@@ -89,7 +129,7 @@ class RunnerModule:
                 except ValueError:
                     pass
                 allowed = in_project_venv or command_path.name in {
-                    "python", "python3", "octop", "uvicorn", "streamlit",
+                    "python", "python3", "uvicorn", "streamlit",
                 }
             except ValueError:
                 allowed = False
@@ -103,11 +143,24 @@ class RunnerModule:
                 "original_cmd": candidate["cmd"],
                 "candidate_selection": self._candidate_selection(candidate),
                 "allowed_commands": list(allowed_commands),
-                "execution_backend": execution_backend,
+                "execution_backend": effective_backend,
                 "sandbox": sandbox,
+                "authorization_attempts": authorization_attempts,
                 },
                 error="disallowed command: %s" % effective_candidate["cmd"][0],
             )
+
+        if candidate.get("_requires_command_approval"):
+            consumed = self._consume_command_approval(run_dir, candidate)
+            if not consumed:
+                return self._fallback_after_failure(
+                    repo_dir, analysis, candidates, candidate,
+                    "approval_already_consumed", authorization_attempts,
+                    execute, wait_seconds, allowed_commands, execution_backend,
+                    docker_image, docker_network, docker_gpus,
+                    docker_model_cache_dir, docker_security_options, hints,
+                    run_dir, max_candidate_attempts,
+                )
 
         logs_dir = repo_dir.parent.parent / "logs"
         logs_dir.mkdir(parents=True, exist_ok=True)
@@ -120,17 +173,28 @@ class RunnerModule:
             home_dir=repo_dir.parent / "install_home",
         )
         log_file = log_path.open("a", encoding="utf-8")
-        proc = subprocess.Popen(
-            effective_candidate["cmd"],
-            cwd=str(repo_dir),
-            env=child_env,
-            stdout=log_file,
-            stderr=subprocess.STDOUT,
-            text=True,
-            # A deployed service must outlive the short-lived Harness CLI
-            # process and its controlling terminal/session.
-            start_new_session=True,
-        )
+        try:
+            proc = subprocess.Popen(
+                effective_candidate["cmd"],
+                cwd=str(repo_dir),
+                env=child_env,
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+                text=True,
+                # A deployed service must outlive the short-lived Harness CLI
+                # process and its controlling terminal/session.
+                start_new_session=True,
+            )
+        except OSError as exc:
+            log_file.close()
+            return self._fallback_after_failure(
+                repo_dir, analysis, candidates, candidate,
+                "process_start_failed:%s" % type(exc).__name__, authorization_attempts,
+                execute, wait_seconds, allowed_commands, execution_backend,
+                docker_image, docker_network, docker_gpus,
+                docker_model_cache_dir, docker_security_options, hints,
+                run_dir, max_candidate_attempts,
+            )
         log_file.close()
         port = int(candidate.get("expected_port") or 0)
         deadline = time.monotonic() + max(0, float(wait_seconds))
@@ -156,15 +220,183 @@ class RunnerModule:
             "expected_port": port,
             "service_ready": ready,
             "log_path": str(log_path),
-            "execution_backend": execution_backend,
+            "execution_backend": effective_backend,
             "sandbox": sandbox,
+            "authorization_attempts": authorization_attempts,
         }
         if status == "failed":
             try:
                 data["diagnosis"] = self.log_classifier.classify(log_path.read_text(encoding="utf-8", errors="ignore")[-8000:])
             except OSError:
                 data["diagnosis"] = self.log_classifier.classify("")
+            return self._fallback_after_failure(
+                repo_dir, analysis, candidates, candidate,
+                "service_process_exited", authorization_attempts,
+                execute, wait_seconds, allowed_commands, execution_backend,
+                docker_image, docker_network, docker_gpus,
+                docker_model_cache_dir, docker_security_options, hints,
+                run_dir, max_candidate_attempts,
+                terminal_data=data,
+            )
         return StageResult("runner", status, "service process started" if status == "passed" else "service process exited", data)
+
+    def _select_authorized_candidate(
+        self, repo_dir, candidates, analysis, execution_backend, require_executable,
+        max_candidate_attempts=3, sandbox_fingerprint="", run_dir=None,
+        allow_approval_preview=False,
+    ):
+        registry_data = analysis.get("command_registry")
+        if not isinstance(registry_data, dict) or not registry_data:
+            return dict(candidates[0]), []
+        registry = CommandRegistry.from_dict(registry_data)
+        by_id = {item.candidate_id: item for item in registry.candidates}
+        engine = CommandAuthorizationEngine()
+        attempts = []
+        for raw in candidates[:max(1, int(max_candidate_attempts))]:
+            candidate = dict(raw)
+            declared = by_id.get(candidate.get("command_candidate_id", ""))
+            if declared is None:
+                declared = registry.candidate_for_argv(candidate.get("cmd", []))
+            if declared is None:
+                attempts.append({
+                    "candidate_id": candidate.get("id", ""),
+                    "verdict": "candidate_rejected",
+                    "reason_code": "repository_command_not_declared",
+                })
+                continue
+            approval = analysis.get("command_approval") or None
+            if (
+                declared.source_kind in {"make_target", "repository_script", "python_entrypoint"}
+                and self._command_approval_consumed(
+                    run_dir, declared, registry.repository_fingerprint,
+                )
+                and isinstance(approval, dict)
+            ):
+                approval = {**approval, "execution_count": 1}
+            decision = engine.authorize(
+                declared,
+                registry,
+                repo_dir=Path(repo_dir),
+                execution_backend=execution_backend,
+                sandbox_policy_fingerprint=sandbox_fingerprint,
+                approval=approval,
+                require_executable=require_executable,
+                environment_ownership_marker=(
+                    Path(run_dir) / "environment" / "venv_owner.json"
+                    if run_dir else None
+                ),
+            )
+            attempts.append(decision.to_dict())
+            if decision.verdict == "auto_allowed" or (
+                allow_approval_preview and decision.verdict == "approval_required"
+            ):
+                candidate["cmd"] = list(decision.normalized_argv)
+                candidate["command_candidate_id"] = declared.candidate_id
+                candidate["required_backend"] = decision.effective_backend
+                candidate["network_profile"] = declared.network_profile
+                candidate["filesystem_profile"] = declared.filesystem_profile
+                candidate["_requires_command_approval"] = decision.required_approval
+                candidate["_authorization_operation_id"] = decision.operation_id
+                return candidate, attempts
+        return None, attempts
+
+    @staticmethod
+    def _approval_consumption_path(run_dir, operation_id):
+        return Path(run_dir) / "approvals" / ("consumed_%s.json" % operation_id) if run_dir and operation_id else None
+
+    def _command_approval_consumed(self, run_dir, declared, repository_fingerprint):
+        from auto_harness.command_auth.approval import command_operation_id
+        path = self._approval_consumption_path(
+            run_dir, command_operation_id(declared, repository_fingerprint)
+        )
+        return bool(path and path.exists())
+
+    def _consume_command_approval(self, run_dir, candidate):
+        operation_id = candidate.get("_authorization_operation_id", "")
+        path = self._approval_consumption_path(run_dir, operation_id)
+        if path is None:
+            return False
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with path.open("x", encoding="utf-8") as handle:
+                json.dump({
+                    "operation_id": operation_id,
+                    "candidate_id": candidate.get("command_candidate_id", ""),
+                    "consumed_at": time.time(),
+                }, handle, ensure_ascii=False, sort_keys=True)
+            return True
+        except FileExistsError:
+            return False
+
+    def _fallback_after_failure(
+        self, repo_dir, analysis, candidates, candidate, reason, attempts,
+        execute, wait_seconds, allowed_commands, execution_backend,
+        docker_image, docker_network, docker_gpus, docker_model_cache_dir,
+        docker_security_options, hints, run_dir, max_candidate_attempts,
+        terminal_data=None,
+    ):
+        selected_index = next((
+            index for index, item in enumerate(candidates)
+            if item.get("id") == candidate.get("id")
+            and item.get("cmd") == candidate.get("cmd")
+        ), len(candidates) - 1)
+        remaining = candidates[selected_index + 1:]
+        remaining_budget = max(0, int(max_candidate_attempts) - len(attempts))
+        fallback_record = {
+            "candidate_id": candidate.get("command_candidate_id") or candidate.get("id", ""),
+            "reason": reason,
+        }
+        self._write_fallback(run_dir, fallback_record)
+        if remaining and remaining_budget:
+            next_analysis = dict(analysis)
+            next_analysis["run_candidates"] = remaining
+            result = self.run(
+                repo_dir, next_analysis, execute=execute,
+                wait_seconds=wait_seconds, allowed_commands=allowed_commands,
+                execution_backend=execution_backend, docker_image=docker_image,
+                docker_network=docker_network, docker_gpus=docker_gpus,
+                docker_model_cache_dir=docker_model_cache_dir,
+                docker_security_options=docker_security_options,
+                stage_hints=hints, run_dir=run_dir,
+                max_candidate_attempts=remaining_budget,
+            )
+            result.data["authorization_attempts"] = attempts + list(
+                result.data.get("authorization_attempts", [])
+            )
+            result.data["fallbacks"] = [fallback_record] + list(
+                result.data.get("fallbacks", [])
+            )
+            return result
+        data = dict(terminal_data or {})
+        data.setdefault("authorization_attempts", attempts)
+        data["fallbacks"] = [fallback_record]
+        if terminal_data is not None:
+            return StageResult(
+                "runner", "failed", "service process exited", data,
+            )
+        return StageResult(
+            "runner", "failed", "all authorized run candidates failed",
+            data, error=reason,
+        )
+
+    @staticmethod
+    def _write_authorization_attempts(run_dir, attempts):
+        if not run_dir or not attempts:
+            return
+        path = Path(run_dir) / "reports" / "command_attempts.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            for attempt in attempts:
+                handle.write(json.dumps(attempt, ensure_ascii=False, sort_keys=True) + "\n")
+
+    @staticmethod
+    def _write_fallback(run_dir, fallback):
+        if not run_dir:
+            return
+        path = Path(run_dir) / "reports" / "command_fallbacks.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(fallback, ensure_ascii=False, sort_keys=True) + "\n")
 
     def _reorder_candidates_by_hints(self, candidates: List[Dict], prefer_patterns: List[str]) -> List[Dict]:
         """Reorder candidates based on plan hints.

@@ -86,6 +86,8 @@ def build_initial_state(context: DeploymentContext, max_replans: int, config=Non
         "approval_history": [],
         "approved_operation_id": "",
         "approved_action": "",
+        "approved_command_approval": {},
+        "rejected_command_candidate_ids": [],
         # Agent failure reasoning
         "failure_context": {},
         "failure_signature": "",
@@ -275,7 +277,7 @@ def build_graph(deps, checkpointer):
     )
     builder.add_conditional_edges(
         "policy", route_after_policy,
-        {"compile": "compile", "stop": "stop"},
+        {"compile": "compile", "approval": "approval", "stop": "stop"},
     )
     builder.add_edge("compile", "select_resume")
     builder.add_conditional_edges(
@@ -383,7 +385,7 @@ def build_graph(deps, checkpointer):
     # Approval routing (includes cleanup path)
     builder.add_conditional_edges(
         "approval", route_after_approval,
-        {"repair_apply": "repair_apply", "cleanup": "cleanup", "retry": "select_repair_resume", "stop": "stop"},
+        {"repair_apply": "repair_apply", "cleanup": "cleanup", "retry": "select_repair_resume", "command_policy": "policy", "stop": "stop"},
     )
     # Cleanup routes back to select_repair_resume for retry
     builder.add_edge("cleanup", "select_repair_resume")

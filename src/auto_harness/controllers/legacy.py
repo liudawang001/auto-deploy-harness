@@ -53,9 +53,18 @@ class LegacyController:
         return self.result_adapter(context, controller=self.name, strategy=strategy)
 
     def resume(self, context: DeploymentContext, resume_input: Optional[Dict[str, Any]] = None) -> DeploymentResult:
-        self.resume_existing(
-            context.task_id,
-            dry_run=context.dry_run,
-            resume_input=resume_input,
-        )
-        return self.result_adapter(context, controller=self.name, strategy="resume")
+        if self.config.agent_plan_first:
+            self.run_plan_first(
+                context.task_id,
+                dry_run=context.dry_run,
+                resume_input=resume_input,
+            )
+            strategy = "plan_first"
+        else:
+            self.resume_existing(
+                context.task_id,
+                dry_run=context.dry_run,
+                resume_input=resume_input,
+            )
+            strategy = "resume"
+        return self.result_adapter(context, controller=self.name, strategy=strategy)

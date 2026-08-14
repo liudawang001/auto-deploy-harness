@@ -268,7 +268,9 @@ class TaskRunner:
         if name == "legacy":
             return LegacyController(
                 config=self.config,
-                run_plan_first=lambda task_id, dry_run=True: self._run_plan_first_loop(task_id, dry_run=dry_run),
+                run_plan_first=lambda task_id, dry_run=True, resume_input=None: self._run_plan_first_loop(
+                    task_id, dry_run=dry_run, resume_input=resume_input,
+                ),
                 run_agent_loop=lambda task_id, dry_run=True: self._run_agent_runtime_loop(task_id, dry_run=dry_run),
                 run_pipeline=lambda task_id, dry_run=True: self._run_legacy_pipeline(task_id, dry_run=dry_run),
                 resume_existing=lambda task_id, dry_run=True, resume_input=None: self._resume_legacy(task_id, dry_run=dry_run, resume_input=resume_input),
@@ -354,8 +356,15 @@ class TaskRunner:
 
         # Read plan_first result if available
         plan_first_path = run_dir / "reports" / "plan_first_result.json"
+        plan_first_result: Dict[str, Any] = {}
         if plan_first_path.exists():
             artifacts["plan_first_result"] = "reports/plan_first_result.json"
+            try:
+                value = read_json(plan_first_path)
+                if isinstance(value, dict):
+                    plan_first_result = value
+            except (OSError, ValueError):
+                pass
 
         # Read agent loop result if available
         agent_loop_path = run_dir / "reports" / "agent_loop_result.json"
@@ -363,15 +372,26 @@ class TaskRunner:
             artifacts["agent_loop_result"] = "reports/agent_loop_result.json"
 
         # Determine overall status
-        if verify_status in ("passed", "pass"):
+        plan_policy_status = str(plan_first_result.get("policy_status", ""))
+        plan_stop_reason = str(plan_first_result.get("stop_reason", ""))
+        if plan_policy_status == "approval_required":
+            status = "interrupted"
+            stop_reason = "repository_command_approval_required"
+        elif plan_stop_reason in {"plan_not_ok", "policy_rejected"}:
+            status = "failed"
+            stop_reason = plan_stop_reason
+        elif context.dry_run:
+            status = "completed_dry_run"
+            stop_reason = "dry_run_completed"
+        elif verify_status in ("passed", "pass"):
             status = "completed"
             stop_reason = "verify_passed"
         elif verify_status in ("failed", "uncertain"):
             status = "failed"
             stop_reason = "verify_failed"
         else:
-            status = "completed"
-            stop_reason = "pipeline_completed"
+            status = "failed"
+            stop_reason = plan_stop_reason or "verification_missing"
 
         return DeploymentResult(
             task_id=context.task_id,
@@ -392,7 +412,12 @@ class TaskRunner:
         from auto_harness.controllers.langgraph_deps import LangGraphControllerDependencies
         return LangGraphControllerDependencies(self)
 
-    def _run_plan_first_loop(self, task_id: str, dry_run: bool = True) -> None:
+    def _run_plan_first_loop(
+        self,
+        task_id: str,
+        dry_run: bool = True,
+        resume_input: Optional[Dict[str, Any]] = None,
+    ) -> None:
         """Run the Plan-first Deployment Loop."""
         from auto_harness.agent_runtime.plan_first_loop import PlanFirstDeploymentLoop
 
@@ -417,18 +442,70 @@ class TaskRunner:
             max_replans=self.config.agent_plan_first_max_replans,
         )
 
+        command_approval, rejected_candidate_ids = (
+            self._legacy_command_approval(run_dir, resume_input)
+        )
         result = loop.run(
             task_id=task_id,
             run_dir=run_dir,
             repo_dir=repo_dir,
             dry_run=dry_run,
+            approval=command_approval,
+            excluded_candidate_ids=rejected_candidate_ids,
         )
 
         write_json(run_dir / "reports" / "plan_first_result.json", result)
+        approval_request = result.get("approval_request")
+        if isinstance(approval_request, dict) and approval_request.get("approval_id"):
+            from auto_harness.graph.approval import ApprovalStore
+            ApprovalStore(run_dir).save(
+                approval_request["approval_id"],
+                {"status": "pending", "request": approval_request},
+            )
         self.store.events(task_id).append("task", "plan_first_loop_completed", {
             "stop_reason": result.get("stop_reason", ""),
             "plan_id": result.get("plan_id", ""),
         })
+
+    @staticmethod
+    def _legacy_command_approval(
+        run_dir: Path,
+        resume_input: Optional[Dict[str, Any]],
+    ):
+        if not resume_input:
+            return None, []
+        from auto_harness.graph.approval import ApprovalStore, sanitize_approval
+
+        previous_path = Path(run_dir) / "reports" / "plan_first_result.json"
+        previous = read_json(previous_path) if previous_path.exists() else {}
+        request = previous.get("approval_request") if isinstance(previous, dict) else None
+        if not isinstance(request, dict):
+            raise ValueError("legacy plan-first approval request is missing")
+        required_matches = (
+            ("approval_id", request.get("approval_id")),
+            ("operation_id", request.get("operation_id")),
+            ("request_hash", request.get("request_hash")),
+        )
+        for field, expected in required_matches:
+            if not expected or resume_input.get(field) != expected:
+                raise ValueError("legacy plan-first approval %s mismatch" % field)
+        decision = str(resume_input.get("decision", ""))
+        if decision not in request.get("allowed_decisions", []):
+            raise ValueError("legacy plan-first approval decision is invalid")
+        safe_decision = sanitize_approval(resume_input)
+        ApprovalStore(run_dir).save(request["approval_id"], {
+            "status": "resolved",
+            "request": request,
+            "decision": safe_decision,
+        })
+        if decision == "reject":
+            candidate_id = str(request.get("candidate_id", ""))
+            return None, [candidate_id] if candidate_id else []
+        return {
+            "request": request,
+            "decision": safe_decision,
+            "execution_count": 0,
+        }, []
 
     def _create_plan_first_provider(self):
         """Create the LLM provider for plan-first mode."""

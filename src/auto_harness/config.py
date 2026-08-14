@@ -64,6 +64,7 @@ class HarnessConfig:
     docker_repo_mount_mode: str = "rw"
     verify_workspace_name: str = "verify_workspace"
     allowed_commands: List[str] = None
+    repository_command_policy: Dict[str, Any] = None
     use_agent_analyzer: bool = False
     agent_timeout_seconds: int = 900
     agent_mode: str = "off"
@@ -199,6 +200,35 @@ class HarnessConfig:
     def __post_init__(self) -> None:
         if self.allowed_commands is None:
             self.allowed_commands = ["python", "python3", "pip", "curl", "git", "streamlit"]
+        repository_command_defaults = {
+            "enabled": True,
+            "unknown_repository_backend": "docker",
+            "approval_mode": "risk_based",
+            "approval_ttl_seconds": 1800,
+            "max_runner_candidate_attempts": 3,
+            "max_strategy_attempts": 2,
+            "allow_make_targets": True,
+            "allow_repository_scripts": True,
+            "auto_allow_declared_project_cli_in_docker": True,
+            "auto_allow_locked_package_scripts_in_docker": True,
+            "require_readme_reference_for_project_cli": True,
+            "require_lockfile_for_node_install": True,
+            "default_network_profile": "none",
+            "install_network_profile": "registry_only",
+        }
+        configured_repository_policy = self.repository_command_policy or {}
+        if not isinstance(configured_repository_policy, dict):
+            raise ValueError("repository_command_policy must be an object")
+        self.repository_command_policy = {
+            **repository_command_defaults,
+            **configured_repository_policy,
+        }
+        if self.repository_command_policy["unknown_repository_backend"] != "docker":
+            raise ValueError("unknown_repository_backend must be docker")
+        for name in ("approval_ttl_seconds", "max_runner_candidate_attempts", "max_strategy_attempts"):
+            value = self.repository_command_policy.get(name)
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ValueError("repository_command_policy.%s must be a positive integer" % name)
         if self.model_cache_cleanup_keep_cache_keys is None:
             self.model_cache_cleanup_keep_cache_keys = []
         if self.model_cache_cleanup_keep_repo_ids is None:

@@ -16,6 +16,8 @@ def route_after_parse(state):
 
 def route_after_policy(state):
     """Route after policy: allowed goes to compile, rejected to stop."""
+    if state.get("pending_approval"):
+        return "approval"
     return "compile" if not state.get("stop_reason") else "stop"
 
 
@@ -134,6 +136,8 @@ def route_after_approval(state):
     if approval_history:
         last = approval_history[-1] if isinstance(approval_history, list) else {}
         decision = last.get("decision", "")
+        if state.get("approval_kind") == "repository_command":
+            return "command_policy" if decision in {"approve", "reject"} else "stop"
         if decision == "reject":
             return "stop"
         if decision == "approve":

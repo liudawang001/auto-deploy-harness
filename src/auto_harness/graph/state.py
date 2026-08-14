@@ -58,6 +58,8 @@ class DeploymentGraphState(TypedDict, total=False):
     approval_history: Annotated[List[Dict[str, Any]], operator.add]
     approved_operation_id: str
     approved_action: str
+    approved_command_approval: Dict[str, Any]
+    rejected_command_candidate_ids: List[str]
 
     # ── Agent failure reasoning (Phase 3) ──────────────────────────────
 

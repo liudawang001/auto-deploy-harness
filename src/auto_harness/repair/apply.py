@@ -1,8 +1,8 @@
-import os
 from pathlib import Path
 from typing import Dict, List
 
 from auto_harness.agent.repair_actions import install_package_command
+from auto_harness.command_auth import CommandAuthorizationEngine
 from auto_harness.models.base import write_json
 from auto_harness.repair.actions import RepairActionNormalizer, RepairActionRegistry
 from auto_harness.runtime import ChildEnvironmentPolicy
@@ -12,10 +12,13 @@ from auto_harness.utils.shell import run_command
 class RepairApplier:
     """Applies only non-executing repair artifacts; shell/source changes remain gated."""
 
-    def __init__(self) -> None:
+    def __init__(self, command_authorization=None) -> None:
         self.normalizer = RepairActionNormalizer()
         self.registry = RepairActionRegistry()
         self.child_environment_policy = ChildEnvironmentPolicy()
+        self.command_authorization = (
+            command_authorization or CommandAuthorizationEngine()
+        )
 
     def apply(
         self,
@@ -43,6 +46,7 @@ class RepairApplier:
             "executed": False,
             "executed_action_count": 0,
             "action_results": [],
+            "command_authorization": [],
         }
         safe_plan = self._sanitize(plan)
         write_json(repair_dir / "repair_plan.json", safe_plan)
@@ -74,18 +78,28 @@ class RepairApplier:
                 command = install_package_command(str(payload["package"]), env_context=env_context)
                 if command["status"] == "ready":
                     install_commands.append(command["cmd"])
+                    command_decision = self._authorize_command(
+                        command["cmd"], allowed_commands,
+                    )
+                    result["command_authorization"].append(command_decision)
                     if execute:
-                        command_reject = self._command_policy_reject(command["cmd"], allowed_commands)
-                        if command_reject:
+                        if not command_decision["allowed"]:
                             result["action_results"].append({
                                 "action_type": action_type,
                                 "executed": False,
                                 "status": "rejected",
                                 "cmd": command["cmd"],
-                                "reason": command_reject,
+                                "reason": "command is not allowed by command policy",
+                                "reason_code": command_decision["reason_code"],
+                                "command_decision": command_decision,
                             })
                         else:
-                            result["action_results"].append(self._execute_command(run_dir, action_type, command["cmd"], command_runner, timeout_seconds))
+                            executed = self._execute_command(
+                                run_dir, action_type, command["cmd"],
+                                command_runner, timeout_seconds,
+                            )
+                            executed["command_decision"] = command_decision
+                            result["action_results"].append(executed)
                 else:
                     result["action_results"].append({
                         "action_type": action_type,
@@ -96,18 +110,26 @@ class RepairApplier:
             elif action_type == "install_conda_package" and payload.get("package"):
                 command = self._install_conda_package_command(str(payload["package"]), payload, env_context or {})
                 install_commands.append(command)
+                command_decision = self._authorize_command(command, allowed_commands)
+                result["command_authorization"].append(command_decision)
                 if execute:
-                    command_reject = self._command_policy_reject(command, allowed_commands)
-                    if command_reject:
+                    if not command_decision["allowed"]:
                         result["action_results"].append({
                             "action_type": action_type,
                             "executed": False,
                             "status": "rejected",
                             "cmd": command,
-                            "reason": command_reject,
+                            "reason": "command is not allowed by command policy",
+                            "reason_code": command_decision["reason_code"],
+                            "command_decision": command_decision,
                         })
                     else:
-                        result["action_results"].append(self._execute_command(run_dir, action_type, command, command_runner, timeout_seconds))
+                        executed = self._execute_command(
+                            run_dir, action_type, command,
+                            command_runner, timeout_seconds,
+                        )
+                        executed["command_decision"] = command_decision
+                        result["action_results"].append(executed)
             elif action_type == "set_env_var_name_only":
                 required_env.extend(payload.get("env_vars") or [])
             elif action_type == "update_verify_hint":
@@ -155,14 +177,17 @@ class RepairApplier:
             channels.extend(["-c", str(channel)])
         return [tool, "install", "-y", "-p", prefix] + channels + [package]
 
-    def _command_policy_reject(self, cmd: List[str], allowed_commands: List[str] = None) -> str:
-        if allowed_commands is None:
-            return ""
-        executable = os.path.basename(str(cmd[0] or "")) if cmd else ""
-        allowed = {os.path.basename(str(item)) for item in allowed_commands}
-        if executable not in allowed:
-            return "command is not allowed by command policy"
-        return ""
+    def _authorize_command(
+        self,
+        cmd: List[str],
+        allowed_commands: List[str] = None,
+    ) -> Dict:
+        return self.command_authorization.authorize_argv(
+            cmd,
+            allowed_commands=allowed_commands or (),
+            section="repair.apply",
+            strict_allowlist=allowed_commands is not None,
+        )
 
     def _execute_command(self, run_dir: Path, action_type: str, cmd: List[str], command_runner, timeout_seconds: int) -> Dict:
         if command_runner:

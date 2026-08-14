@@ -9,11 +9,19 @@ This is a hard gate: if policy rejects, the plan must NOT be compiled or execute
 """
 import re
 import hashlib
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from auto_harness.agent.safety import AgentInputSanitizer
 from auto_harness.context.repository import safe_repo_path
+from auto_harness.command_auth import (
+    CommandAuthorizationEngine,
+    CommandCandidateSelector,
+    CommandRegistry,
+)
+from auto_harness.command_auth.approval import build_command_approval_request
+from auto_harness.command_auth.schemas import sandbox_policy_fingerprint
 
 
 # Command root allowlist - only these programs may be proposed
@@ -73,6 +81,8 @@ class PlanPolicyGate:
         snapshot: Dict,
         runtime_policy: Optional[Dict] = None,
         config: Any = None,
+        approval: Optional[Dict] = None,
+        excluded_candidate_ids: Optional[List[str]] = None,
     ) -> Dict:
         """Validate a parsed DeploymentPlan dict.
 
@@ -86,6 +96,26 @@ class PlanPolicyGate:
         rejected_items: List[Dict] = []
         accepted_sections: List[str] = []
         normalized_plan = dict(plan)
+        registry_present = "command_registry" in snapshot
+        registry = CommandRegistry.from_dict(snapshot.get("command_registry", {}))
+        command_decisions = []
+        approval_candidates = []
+        approval_preview_candidates = []
+        required_approval_candidates = []
+        excluded_candidate_ids = set(excluded_candidate_ids or ())
+        execution_backend = (
+            getattr(config, "execution_backend", "local")
+            if config is not None else "local"
+        )
+        if not isinstance(execution_backend, str):
+            execution_backend = "local"
+        sandbox_policy_fingerprint = self._sandbox_fingerprint(config)
+        command_policy_config = (
+            getattr(config, "repository_command_policy", {})
+            if config is not None else {}
+        )
+        if not isinstance(command_policy_config, dict):
+            command_policy_config = {}
 
         # If status is not ok, no execution happens
         if plan.get("status") != "ok":
@@ -112,7 +142,44 @@ class PlanPolicyGate:
                 rejected_items.append({"section": "environment.install_commands", "item_index": i, "reason": "command must be a list of strings, not a shell string"})
                 continue
             cmd = self._normalize_declared_console_script(cmd, snapshot)
-            result = self._validate_command(cmd, "environment.install_commands", i)
+            registry_candidate = (
+                self._registry_candidate_for_command(registry, cmd)
+                if registry_present else None
+            )
+            if registry_candidate is not None:
+                cmd = list(registry_candidate.argv)
+                decision = CommandAuthorizationEngine().authorize(
+                    registry_candidate,
+                    registry,
+                    repo_dir=Path(snapshot["repo_dir"])
+                    if snapshot.get("repo_dir") else None,
+                    execution_backend=execution_backend,
+                    sandbox_policy_fingerprint=sandbox_policy_fingerprint,
+                    approval=approval,
+                )
+                command_decisions.append(decision)
+                if decision.verdict == "approval_required":
+                    required_approval_candidates.append(registry_candidate)
+                    continue
+                result = (
+                    {"allowed": True}
+                    if decision.verdict == "auto_allowed" else
+                    {"allowed": False, "rejection": {
+                        "section": "environment.install_commands",
+                        "item_index": i,
+                        "reason": decision.reason_code,
+                        "reason_code": decision.reason_code,
+                    }}
+                )
+            else:
+                result = self._validate_command(cmd, "environment.install_commands", i)
+                if result["allowed"] and registry_present and self._looks_repository_command(cmd):
+                    result = {"allowed": False, "rejection": {
+                        "section": "environment.install_commands",
+                        "item_index": i,
+                        "reason": "repository_command_not_declared",
+                        "reason_code": "repository_command_not_declared",
+                    }}
             if result["allowed"]:
                 safe_install_commands.append(cmd)
             else:
@@ -131,9 +198,38 @@ class PlanPolicyGate:
             cmd = self._normalize_declared_console_script(item["cmd"], snapshot)
             if cmd in safe_install_commands:
                 continue
-            result = self._validate_command(
-                cmd, "environment.documented_setup_commands", len(safe_install_commands),
+            registry_candidate = (
+                self._registry_candidate_for_command(registry, cmd)
+                if registry_present else None
             )
+            if registry_candidate is not None:
+                cmd = list(registry_candidate.argv)
+                decision = CommandAuthorizationEngine().authorize(
+                    registry_candidate,
+                    registry,
+                    repo_dir=Path(snapshot["repo_dir"])
+                    if snapshot.get("repo_dir") else None,
+                    execution_backend=execution_backend,
+                    sandbox_policy_fingerprint=sandbox_policy_fingerprint,
+                    approval=approval,
+                )
+                command_decisions.append(decision)
+                if decision.verdict == "approval_required":
+                    required_approval_candidates.append(registry_candidate)
+                    continue
+                result = (
+                    {"allowed": True}
+                    if decision.verdict == "auto_allowed" else
+                    {"allowed": False, "rejection": {
+                        "section": "environment.documented_setup_commands",
+                        "item_index": len(safe_install_commands),
+                        "reason": decision.reason_code,
+                    }}
+                )
+            else:
+                result = self._validate_command(
+                    cmd, "environment.documented_setup_commands", len(safe_install_commands),
+                )
             if result["allowed"]:
                 safe_install_commands.append(cmd)
             else:
@@ -157,10 +253,74 @@ class PlanPolicyGate:
             cand["cmd"] = self._normalize_declared_console_script(
                 cand.get("cmd", []), snapshot,
             )
-            result = self._validate_candidate(cand, snapshot, i)
+            registry_candidate = (
+                self._registry_candidate_for_command(registry, cand.get("cmd", []))
+                if registry_present else None
+            )
+            if registry_candidate is not None:
+                cand["cmd"] = list(registry_candidate.argv)
+            result = (
+                self._validate_candidate_port(cand, i)
+                if registry_candidate is not None
+                else self._validate_candidate(cand, snapshot, i)
+            )
+            if registry_present:
+                if registry_candidate is None:
+                    hard = CommandAuthorizationEngine().authorize_argv(cand.get("cmd", []))
+                    reason = (
+                        hard["reason_code"] if hard.get("verdict") == "hard_denied"
+                        else "repository_command_not_declared"
+                    )
+                    result = {
+                        "allowed": False,
+                        "rejection": {
+                            "section": "run.candidates[%d].cmd" % i,
+                            "item_index": i,
+                            "reason": reason,
+                            "reason_code": reason,
+                        },
+                    }
+                elif result["allowed"] and registry_candidate.candidate_id in excluded_candidate_ids:
+                    result = {
+                        "allowed": False,
+                        "rejection": {
+                            "section": "run.candidates[%d].cmd" % i,
+                            "item_index": i,
+                            "reason": "command_candidate_rejected_by_operator",
+                            "reason_code": "command_candidate_rejected_by_operator",
+                        },
+                    }
+                elif result["allowed"]:
+                    decision = CommandAuthorizationEngine().authorize(
+                        registry_candidate,
+                        registry,
+                        repo_dir=Path(snapshot["repo_dir"])
+                        if snapshot.get("repo_dir") else None,
+                        execution_backend=execution_backend,
+                        sandbox_policy_fingerprint=sandbox_policy_fingerprint,
+                        approval=approval,
+                    )
+                    command_decisions.append(decision)
+                    cand["command_candidate_id"] = registry_candidate.candidate_id
+                    cand["command_decision"] = decision.to_dict()
+                    cand["required_backend"] = decision.effective_backend
+                    if decision.verdict == "approval_required":
+                        approval_candidates.append(registry_candidate)
+                        approval_preview_candidates.append(cand)
+                        result = {"allowed": False, "approval_required": True}
+                    elif decision.verdict != "auto_allowed":
+                        result = {
+                            "allowed": False,
+                            "rejection": {
+                                "section": "run.candidates[%d].cmd" % i,
+                                "item_index": i,
+                                "reason": decision.reason_code,
+                                "reason_code": decision.reason_code,
+                            },
+                        }
             if result["allowed"]:
                 safe_candidates.append(cand)
-            else:
+            elif not result.get("approval_required"):
                 rejected_items.append(result["rejection"])
         if safe_candidates:
             accepted_sections.append("run")
@@ -172,6 +332,13 @@ class PlanPolicyGate:
         if selected_id not in safe_ids and safe_candidates:
             normalized_run["selected_candidate_id"] = safe_candidates[0].get("id", "")
         normalized_plan["run"] = normalized_run
+        normalized_plan["command_registry"] = registry.to_dict()
+        normalized_plan["command_decisions"] = [
+            item.to_dict() for item in command_decisions
+        ]
+        normalized_plan["sandbox_policy_fingerprint"] = sandbox_policy_fingerprint
+        if approval:
+            normalized_plan["command_approval"] = approval
 
         # Validate verify
         verify = plan.get("verify", {})
@@ -209,12 +376,18 @@ class PlanPolicyGate:
         # Any rejection in environment, run, or verify is critical
         critical_sections = {"environment.install_commands", "run.candidates", "run.candidates[0].cmd", "verify", "grounding", "plan"}
         has_critical_rejection = any(
-            r.get("section", "").split("[")[0] in critical_sections
+            (not r.get("section", "").startswith("run.candidates") or not safe_candidates)
+            and (r.get("section", "").split("[")[0] in critical_sections
             or r.get("section", "") in critical_sections
-            or any(r.get("section", "").startswith(s) for s in critical_sections)
+            or any(r.get("section", "").startswith(s) for s in critical_sections))
             for r in rejected_items
         )
-        if not rejected_items:
+        if (
+            (required_approval_candidates or (not safe_candidates and approval_candidates))
+            and "verify" in accepted_sections
+        ):
+            status = "approval_required"
+        elif not rejected_items:
             status = "accepted"
         elif has_critical_rejection or not safe_candidates or "verify" not in accepted_sections:
             status = "rejected"
@@ -231,7 +404,7 @@ class PlanPolicyGate:
         if allow_external:
             network = "external_allowed"
 
-        return {
+        result = {
             "allowed": status != "rejected",
             "status": status,
             "accepted_sections": accepted_sections,
@@ -243,6 +416,36 @@ class PlanPolicyGate:
                 "requires_human_input": False,
             },
         }
+        if approval_preview_candidates:
+            result["approval_preview_candidates"] = approval_preview_candidates
+        if status == "approval_required":
+            selectable_approvals = list(required_approval_candidates)
+            if not safe_candidates:
+                selectable_approvals.extend(approval_candidates)
+            selected = CommandCandidateSelector().select(
+                selectable_approvals,
+                command_decisions,
+                excluded_candidate_ids,
+            )
+            selected_candidate = next(
+                item for item in selectable_approvals
+                if item.candidate_id == selected["candidate_id"]
+            )
+            evidence_by_id = registry.evidence_by_id()
+            result["allowed"] = False
+            result["risk_summary"]["requires_human_input"] = True
+            result["approval_request"] = build_command_approval_request(
+                selected_candidate,
+                registry.repository_fingerprint,
+                [evidence_by_id[item] for item in selected_candidate.evidence_ids],
+                sandbox_policy_fingerprint,
+                task_id=snapshot.get("task_id", ""),
+                expires_at=(
+                    datetime.now(timezone.utc)
+                    + timedelta(seconds=int(command_policy_config.get("approval_ttl_seconds", 1800)))
+                ).isoformat(),
+            )
+        return result
 
     def _validate_command(self, cmd: Any, section: str, index: int) -> Dict:
         """Validate a single command (list of strings)."""
@@ -357,7 +560,81 @@ class PlanPolicyGate:
         if not cmd_result["allowed"]:
             return cmd_result
 
-        # Validate expected_port is reasonable
+        return self._validate_candidate_port(cand, index)
+
+    @staticmethod
+    def _registry_candidate_for_command(registry: CommandRegistry, cmd: Any):
+        """Match a documented command and return its canonical pinned form."""
+        if not isinstance(cmd, list):
+            return None
+        exact = registry.candidate_for_argv(cmd)
+        if exact is not None:
+            return exact
+        if cmd:
+            node_installs = [
+                item for item in registry.candidates
+                if item.source_kind == "node_install"
+                and item.argv and item.argv[0] == cmd[0]
+                and ("ci" in cmd[1:] or "install" in cmd[1:])
+            ]
+            if len(node_installs) == 1:
+                return node_installs[0]
+        for candidate in registry.candidates:
+            if candidate.source_kind == "make_target":
+                if len(cmd) == 2 and cmd[0] == "make" and candidate.argv[-1] == cmd[1]:
+                    return candidate
+            elif candidate.source_kind == "package_json_script":
+                if len(cmd) >= 2 and cmd[0] == candidate.argv[0]:
+                    requested = cmd[2] if len(cmd) >= 3 and cmd[1] == "run" else cmd[1]
+                    if candidate.argv[-2:] == ["run", requested]:
+                        return candidate
+            elif candidate.source_kind == "repository_script" and len(cmd) >= 2:
+                if cmd[0] in {"python", "python3", "sh", "bash"}:
+                    if candidate.argv[1:] == cmd[1:]:
+                        return candidate
+                elif cmd[0].startswith("./") and candidate.argv[1:] == [cmd[0][2:]] + cmd[1:]:
+                    return candidate
+        return None
+
+    @staticmethod
+    def _looks_repository_command(cmd: Any) -> bool:
+        if not isinstance(cmd, list) or not cmd or not isinstance(cmd[0], str):
+            return False
+        root = cmd[0]
+        basename = Path(root).name
+        if root.startswith(".venv/bin/"):
+            return basename not in {"python", "python3", "pip"}
+        if basename in {"make", "sh", "bash", "zsh", "pnpm", "yarn"}:
+            return True
+        return basename == "npm" and "run" in cmd[1:]
+
+    @staticmethod
+    def _sandbox_fingerprint(config: Any) -> str:
+        def value(name, default):
+            item = getattr(config, name, default) if config is not None else default
+            return item if isinstance(item, type(default)) else default
+        return sandbox_policy_fingerprint(
+            phase="runtime",
+            image=value("docker_image", "python:3.10-slim"),
+            network="none",
+            gpus=value("docker_gpus", "none"),
+            model_cache_dir=value("docker_model_cache_dir", ""),
+            security_options={
+                "read_only_rootfs": value("docker_read_only_rootfs", False),
+                "user": value("docker_user", ""),
+                "memory": value("docker_memory", "8g"),
+                "cpus": value("docker_cpus", 4.0),
+                "pids_limit": value("docker_pids_limit", 512),
+                "tmpfs_size": value("docker_tmpfs_size", "1g"),
+                "cap_drop_all": value("docker_cap_drop_all", True),
+                "no_new_privileges": value("docker_no_new_privileges", True),
+                "repo_mount_mode": value("docker_repo_mount_mode", "rw"),
+            },
+        )
+
+    @staticmethod
+    def _validate_candidate_port(cand: Dict, index: int) -> Dict:
+        """Validate candidate metadata independently of command provenance."""
         port = cand.get("expected_port", 0)
         if not isinstance(port, (int, float)) or port < 0 or port > 65535:
             return {"allowed": False, "rejection": {"section": "run.candidates", "item_index": index, "reason": "expected_port must be 0-65535"}}

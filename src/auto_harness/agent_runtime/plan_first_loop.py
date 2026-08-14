@@ -797,6 +797,8 @@ class PlanFirstDeploymentLoop:
         run_dir: Path,
         repo_dir: Path,
         dry_run: bool = True,
+        approval: Optional[Dict] = None,
+        excluded_candidate_ids: Optional[List[str]] = None,
     ) -> Dict:
         """Run the plan-first deployment loop."""
         run_dir = Path(run_dir)
@@ -870,7 +872,23 @@ class PlanFirstDeploymentLoop:
             snapshot,
             runtime_policy=self.runtime_policy,
             config=self.config,
+            approval=approval,
+            excluded_candidate_ids=excluded_candidate_ids,
         )
+        if (
+            dry_run
+            and policy_result.get("status") == "approval_required"
+            and policy_result.get("approval_preview_candidates")
+        ):
+            preview_plan = policy_result.get("normalized_plan", {})
+            preview_run = dict(preview_plan.get("run", {}))
+            preview_run["candidates"] = policy_result["approval_preview_candidates"]
+            preview_run["selected_candidate_id"] = preview_run["candidates"][0].get("id", "")
+            preview_plan["run"] = preview_run
+            policy_result["normalized_plan"] = preview_plan
+            policy_result["status"] = "accepted_dry_run"
+            policy_result["allowed"] = True
+            policy_result["approval_deferred_until_execute"] = True
         artifacts.write_policy_result(policy_result)
         if snapshot.get("context_mode") == "layered":
             artifacts.write_repository_grounding({
@@ -893,7 +911,11 @@ class PlanFirstDeploymentLoop:
                 task_id=task_id,
                 plan=parsed_plan,
                 policy_result=policy_result,
-                stop_reason="policy_rejected",
+                stop_reason=(
+                    "approval_required"
+                    if policy_result.get("status") == "approval_required"
+                    else "policy_rejected"
+                ),
                 artifacts=artifacts,
             )
 
@@ -1170,11 +1192,16 @@ class PlanFirstDeploymentLoop:
                 elif stage == "env_solve":
                     result = self._execute_env_solve(repo_dir, analysis)
                 elif stage == "env_deploy":
-                    result = self._execute_env_deploy(repo_dir, analysis, dry_run)
+                    result = self._execute_env_deploy(
+                        task_id, run_dir, repo_dir, analysis, dry_run,
+                    )
                 elif stage == "model_prepare":
                     result = self._execute_model_prepare(run_dir, analysis, dry_run)
                 elif stage == "runner":
-                    result = self._execute_runner(repo_dir, analysis, results.get("env_deploy", {}), dry_run)
+                    result = self._execute_runner(
+                        run_dir, repo_dir, analysis,
+                        results.get("env_deploy", {}), dry_run,
+                    )
                 elif stage == "verify":
                     result = self._execute_verify(run_dir, analysis, results.get("runner", {}))
                 else:
@@ -1218,7 +1245,10 @@ class PlanFirstDeploymentLoop:
         result = solver.solve(repo_dir, analysis, {})
         return {"status": result.status, "summary": result.summary, "data": result.data or {}}
 
-    def _execute_env_deploy(self, repo_dir: Path, analysis: Dict, dry_run: bool) -> Dict:
+    def _execute_env_deploy(
+        self, task_id: str, run_dir: Path, repo_dir: Path,
+        analysis: Dict, dry_run: bool,
+    ) -> Dict:
         from auto_harness.modules.env_deploy import EnvDeployModule
         deployer = EnvDeployModule()
         execute = not dry_run and self.runtime_policy.get("allow_dependency_install", False)
@@ -1226,6 +1256,15 @@ class PlanFirstDeploymentLoop:
             repo_dir, analysis,
             execute=execute,
             allowed_commands=getattr(self.config, "allowed_commands", ["python", "python3", "pip"]),
+            execution_backend=getattr(self.config, "execution_backend", "local"),
+            docker_image=getattr(self.config, "docker_image", "python:3.10-slim"),
+            docker_network=getattr(self.config, "docker_network", "bridge"),
+            docker_gpus=getattr(self.config, "docker_gpus", "none"),
+            docker_model_cache_dir=getattr(self.config, "docker_model_cache_dir", ""),
+            docker_security_options=self._docker_security_options(),
+            config=self.config,
+            run_dir=run_dir,
+            task_id=task_id,
         )
         return {"status": result.status, "summary": result.summary, "data": result.data or {}}
 
@@ -1233,7 +1272,10 @@ class PlanFirstDeploymentLoop:
         # Model prepare is often a no-op for simple projects
         return {"status": "passed", "summary": "no model assets to prepare", "data": {}}
 
-    def _execute_runner(self, repo_dir: Path, analysis: Dict, env_result: Dict, dry_run: bool) -> Dict:
+    def _execute_runner(
+        self, run_dir: Path, repo_dir: Path, analysis: Dict,
+        env_result: Dict, dry_run: bool,
+    ) -> Dict:
         from auto_harness.modules.runner import RunnerModule
         runner = RunnerModule()
         execute = not dry_run and self.runtime_policy.get("allow_service_start", False)
@@ -1242,8 +1284,33 @@ class PlanFirstDeploymentLoop:
             execute=execute,
             allowed_commands=getattr(self.config, "allowed_commands", ["python", "python3", "pip"]),
             wait_seconds=10,
+            execution_backend=getattr(self.config, "execution_backend", "local"),
+            docker_image=getattr(self.config, "docker_image", "python:3.10-slim"),
+            docker_network=getattr(self.config, "docker_network", "bridge"),
+            docker_gpus=getattr(self.config, "docker_gpus", "none"),
+            docker_model_cache_dir=getattr(self.config, "docker_model_cache_dir", ""),
+            docker_security_options=self._docker_security_options(),
+            run_dir=run_dir,
+            max_candidate_attempts=int(
+                getattr(self.config, "repository_command_policy", {}).get(
+                    "max_runner_candidate_attempts", 3,
+                )
+            ),
         )
         return {"status": result.status, "summary": result.summary, "data": result.data or {}}
+
+    def _docker_security_options(self) -> Dict:
+        return {
+            "read_only_rootfs": getattr(self.config, "docker_read_only_rootfs", False),
+            "user": getattr(self.config, "docker_user", ""),
+            "memory": getattr(self.config, "docker_memory", "8g"),
+            "cpus": getattr(self.config, "docker_cpus", 4.0),
+            "pids_limit": getattr(self.config, "docker_pids_limit", 512),
+            "tmpfs_size": getattr(self.config, "docker_tmpfs_size", "1g"),
+            "cap_drop_all": getattr(self.config, "docker_cap_drop_all", True),
+            "no_new_privileges": getattr(self.config, "docker_no_new_privileges", True),
+            "repo_mount_mode": getattr(self.config, "docker_repo_mount_mode", "rw"),
+        }
 
     def _execute_verify(self, run_dir: Path, analysis: Dict, runner_result: Dict) -> Dict:
         from auto_harness.modules.verify import VerifyModule
@@ -1339,7 +1406,7 @@ class PlanFirstDeploymentLoop:
     def _build_failure_context(self, failed_stage: str, pipeline_results: Dict, plan: DeploymentPlan) -> Dict:
         """Build failure context for replan."""
         result = pipeline_results.get(failed_stage, {})
-        return {
+        result = {
             "failed_stage": failed_stage,
             "stage_status": result.get("status", ""),
             "summary": result.get("summary", ""),
@@ -1349,6 +1416,7 @@ class PlanFirstDeploymentLoop:
             "previous_command": plan.run.get("candidates", [{}])[0].get("cmd", []) if plan.run else [],
             "evidence_paths": result.get("evidence", []),
         }
+        return result
 
     def _determine_resume_stage(self, old_plan: Dict, new_plan: Dict) -> str:
         """Determine which stage to resume from after replan."""
@@ -1418,7 +1486,7 @@ class PlanFirstDeploymentLoop:
         replan_count: int = 0,
     ) -> Dict:
         """Build the final result dict."""
-        return {
+        result = {
             "task_id": task_id,
             "plan_id": plan.plan_id,
             "plan_status": plan.status,
@@ -1427,3 +1495,6 @@ class PlanFirstDeploymentLoop:
             "replan_count": replan_count,
             "pipeline_results": pipeline_results or {},
         }
+        if policy_result.get("status") == "approval_required":
+            result["approval_request"] = policy_result.get("approval_request", {})
+        return result

@@ -12,6 +12,7 @@ from typing import Dict, List, Optional
 from auto_harness.agent.safety import AgentInputSanitizer
 from auto_harness.agent_runtime.core_evidence import CoreEvidenceSelector
 from auto_harness.agent_runtime.repository_inventory import RepositoryInventoryBuilder
+from auto_harness.command_auth.discovery import CommandDiscoveryService
 from auto_harness.tools.repository_policy import RepositoryReadPolicy
 
 
@@ -154,6 +155,11 @@ class ProjectSnapshotBuilder:
             tree_truncated=self._last_total_file_count > len(file_tree),
             excluded=self._last_excluded,
         )
+        command_registry = CommandDiscoveryService().discover(
+            repo_dir,
+            file_tree,
+            inventory["repository_fingerprint"],
+        )
 
         return {
             "schema_version": 2,
@@ -164,6 +170,7 @@ class ProjectSnapshotBuilder:
             "repo_dir": str(repo_dir),
             "repository_fingerprint": inventory["repository_fingerprint"],
             "repository_inventory": inventory,
+            "command_registry": command_registry.to_dict(),
             "file_tree": file_tree,
             "file_tree_summary": {
                 "total_file_count": self._last_total_file_count,

@@ -10,6 +10,10 @@ memory/skill_candidates/
 model_cache/
 queue/
 docs/
+optimization/
+.harness-runtime/
+eval_targets/
+tmp/
 dist/
 build/
 *.egg-info/

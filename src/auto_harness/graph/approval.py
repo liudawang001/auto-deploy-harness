@@ -208,18 +208,35 @@ def approval_node(state):
         "decision": safe_decision,
     })
 
-    return {
+    repository_command = request.get("approval_kind") == "repository_command"
+    approved = decision["decision"] == "approve"
+    result = {
         "approval_history": [safe_decision],
         "pending_approval": None,
         "approved_operation_id": (
-            request["operation_id"] if decision["decision"] == "approve" else ""
+            request["operation_id"] if approved else ""
         ),
         "approved_action": (
             request.get("requested_action", "retry")
-            if decision["decision"] == "approve" else ""
+            if approved else ""
         ),
-        "stop_reason": "" if decision["decision"] == "approve" else "operator_rejected",
+        "stop_reason": "" if approved or repository_command else "operator_rejected",
     }
+    if repository_command:
+        if approved:
+            result["approved_command_approval"] = {
+                "request": request,
+                "decision": safe_decision,
+                "execution_count": 0,
+            }
+        else:
+            rejected = list(state.get("rejected_command_candidate_ids", []))
+            candidate_id = request.get("candidate_id", "")
+            if candidate_id and candidate_id not in rejected:
+                rejected.append(candidate_id)
+            result["rejected_command_candidate_ids"] = rejected
+            result["approved_command_approval"] = {}
+    return result
 
 
 def cleanup_node(state, recovery, cleanup_executor):

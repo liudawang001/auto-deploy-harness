@@ -15,6 +15,7 @@ from auto_harness.recovery.schemas import canonical_json, compute_operation_id
 from auto_harness.runtime import ChildEnvironmentPolicy, DockerSandboxBackend
 from auto_harness.utils.commands import is_allowed_command
 from auto_harness.utils.shell import run_command
+from auto_harness.command_auth import CommandAuthorizationEngine, CommandRegistry
 
 
 class EnvDeployModule:
@@ -64,15 +65,39 @@ class EnvDeployModule:
             plan = [list(cmd) for cmd in conda_plan.get("commands") or []]
         if not plan and action != "reuse":
             return StageResult("env_deploy", "uncertain", "no install plan detected", {"commands": []})
+        registry_data = analysis.get("command_registry")
+        command_registry = (
+            CommandRegistry.from_dict(registry_data)
+            if isinstance(registry_data, dict) and registry_data else None
+        )
+        repository_commands = {
+            tuple(candidate.argv): candidate
+            for candidate in (command_registry.candidates if command_registry else [])
+        }
+        effective_backend = execution_backend
+        if any(
+            repository_commands.get(tuple(command), None)
+            and repository_commands[tuple(command)].required_backend == "docker"
+            for command in plan
+        ) or any(
+            isinstance(candidate, dict)
+            and candidate.get("required_backend") == "docker"
+            for candidate in analysis.get("run_candidates", [])
+        ):
+            effective_backend = "docker"
         effective_plan, sandbox = self._effective_plan(
             repo_dir,
             plan,
-            execution_backend,
+            effective_backend,
             docker_image,
             docker_network,
             docker_gpus,
             docker_model_cache_dir,
             docker_security_options,
+            command_network_profiles={
+                command: candidate.network_profile
+                for command, candidate in repository_commands.items()
+            },
         )
         if not execute:
             return StageResult(
@@ -82,7 +107,7 @@ class EnvDeployModule:
                 {
                     "commands": plan,
                     "effective_commands": effective_plan,
-                    "execution_backend": execution_backend,
+                    "execution_backend": effective_backend,
                     "environment_backend": env_solution.get("backend", "venv"),
                     "environment_prefix": env_solution.get("environment_prefix", ""),
                     "environment_python": env_solution.get("environment_python", ""),
@@ -149,9 +174,26 @@ class EnvDeployModule:
                 )
             owns_operation = not operation_prepared
         command_results = []
+        authorization_attempts = []
         for original_cmd, cmd in zip(plan, effective_plan):
             policy_result = {"allowed": True, "reason": "legacy command allowlist"}
-            if backend in ("conda", "mamba", "micromamba") and decision:
+            declared_command = repository_commands.get(tuple(original_cmd))
+            if declared_command is not None and command_registry is not None:
+                command_decision = CommandAuthorizationEngine().authorize(
+                    declared_command,
+                    command_registry,
+                    repo_dir=repo_dir,
+                    execution_backend=execution_backend,
+                    sandbox_policy_fingerprint=analysis.get("sandbox_policy_fingerprint", ""),
+                    approval=analysis.get("command_approval") or None,
+                    require_executable=True,
+                )
+                authorization_attempts.append(command_decision.to_dict())
+                policy_result = {
+                    "allowed": command_decision.verdict == "auto_allowed",
+                    "reason": command_decision.reason_code,
+                }
+            elif backend in ("conda", "mamba", "micromamba") and decision:
                 policy_result = self.environment_policy.validate_mutation_command(
                     original_cmd,
                     decision,
@@ -170,6 +212,10 @@ class EnvDeployModule:
                             "bash", "sh", "zsh", "fish", "csh", "tcsh",
                         }
                     except ValueError:
+                        project_cli_allowed = False
+                if command_registry is not None and original_cmd:
+                    root = str(original_cmd[0])
+                    if root.startswith(".venv/bin/") and Path(root).name not in {"python", "python3", "pip"}:
                         project_cli_allowed = False
                 policy_result = {
                     "allowed": project_cli_allowed,
@@ -194,12 +240,13 @@ class EnvDeployModule:
                         "cmd": cmd,
                         "original_cmd": original_cmd,
                         "allowed_commands": list(allowed_commands),
-                        "execution_backend": execution_backend,
+                        "execution_backend": effective_backend,
                         "environment_backend": env_solution.get("backend", "venv"),
                         "environment_prefix": env_solution.get("environment_prefix", ""),
                         "environment_python": env_solution.get("environment_python", ""),
                         "sandbox": sandbox,
                         "environment_policy": policy_result,
+                        "authorization_attempts": authorization_attempts,
                     },
                     error="disallowed command: %s" % (
                         policy_result.get("reason") or (cmd[0] if cmd else ""),
@@ -249,6 +296,21 @@ class EnvDeployModule:
                 {"commands": command_results, "diagnosis": diagnosis},
                     error=result.stderr[-2000:],
                 )
+            if (
+                len(original_cmd) >= 4
+                and original_cmd[0] in {"python", "python3"}
+                and original_cmd[1:3] == ["-m", "venv"]
+                and original_cmd[3] == ".venv"
+                and command_registry is not None
+            ):
+                if not run_dir:
+                    continue
+                write_json(Path(run_dir) / "environment" / "venv_owner.json", {
+                    "schema_version": 1,
+                    "task_id": str(task_id),
+                    "repository_fingerprint": command_registry.repository_fingerprint,
+                    "environment_path": str((repo_dir / ".venv").resolve()),
+                })
         postcheck = {}
         evidence = []
         if backend in ("conda", "mamba", "micromamba") and decision:
@@ -319,7 +381,7 @@ class EnvDeployModule:
             "environment reused and verified" if action == "reuse" else "environment deployed",
             {
                 "commands": command_results,
-                "execution_backend": execution_backend,
+                "execution_backend": effective_backend,
                 "environment_backend": env_solution.get("backend", "venv"),
                 "environment_prefix": env_solution.get("environment_prefix", ""),
                 "environment_python": env_solution.get("environment_python", ""),
@@ -328,6 +390,7 @@ class EnvDeployModule:
                 "environment_postcheck": postcheck,
                 "operation_id": operation_id,
                 "sandbox": sandbox,
+                "authorization_attempts": authorization_attempts,
             },
             evidence=evidence,
         )
@@ -457,6 +520,7 @@ class EnvDeployModule:
         docker_gpus: str,
         docker_model_cache_dir: str,
         docker_security_options: Dict = None,
+        command_network_profiles: Dict = None,
     ):
         if execution_backend != "docker":
             effective_plan = []
@@ -473,19 +537,27 @@ class EnvDeployModule:
                 "backend": "local",
                 "venv_bootstrap_python": sys.executable,
             }
-        backend = DockerSandboxBackend.for_phase(
-            "install",
-            image=docker_image,
-            network=docker_network,
-            gpus=docker_gpus,
-            model_cache_dir=Path(docker_model_cache_dir) if docker_model_cache_dir else None,
-            **(docker_security_options or {}),
-        )
-        sandbox_commands = [backend.wrap(repo_dir, cmd).to_dict() for cmd in plan]
+        profiles = command_network_profiles or {}
+        sandbox_commands = []
+        for cmd in plan:
+            network = "none" if profiles.get(tuple(cmd)) == "none" else docker_network
+            backend = DockerSandboxBackend.for_phase(
+                "install",
+                image=docker_image,
+                network=network,
+                gpus=docker_gpus,
+                model_cache_dir=Path(docker_model_cache_dir) if docker_model_cache_dir else None,
+                **(docker_security_options or {}),
+            )
+            sandbox_commands.append(backend.wrap(repo_dir, cmd).to_dict())
         return [item["effective_cmd"] for item in sandbox_commands], {
             "backend": "docker",
             "image": docker_image,
-            "network": docker_network,
+            "network": (
+                "mixed" if len({item.get("network") for item in sandbox_commands}) > 1
+                else sandbox_commands[0].get("network", docker_network)
+                if sandbox_commands else docker_network
+            ),
             "gpus": docker_gpus,
             "model_cache_dir": docker_model_cache_dir,
             "commands": sandbox_commands,

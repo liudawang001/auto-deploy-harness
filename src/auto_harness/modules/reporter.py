@@ -1,7 +1,8 @@
+import json
 from pathlib import Path
 from typing import Dict, List
 
-from auto_harness.models.base import read_json
+from auto_harness.models.base import read_json, write_json
 from auto_harness.models.result import StageResult
 
 
@@ -113,6 +114,23 @@ class ReportGenerator:
                 "- Cache hits: `%s`" % repository_context.get("cache_hits", 0),
                 "- Rejected reads: `%s`"
                 % repository_context.get("rejected_reads", 0),
+                "",
+            ])
+        command_authorization = self._command_authorization_summary(run_dir, results)
+        if command_authorization:
+            write_json(
+                Path(run_dir) / "reports" / "command_authorization_summary.json",
+                command_authorization,
+            )
+            lines.extend([
+                "## Repository Command Authorization",
+                "",
+                "- Discovered candidates: `%s`" % command_authorization.get("candidate_count", 0),
+                "- Policy decisions: `%s`" % command_authorization.get("decision_count", 0),
+                "- Execution authorization attempts: `%s`" % command_authorization.get("attempt_count", 0),
+                "- Candidate fallbacks: `%s`" % command_authorization.get("fallback_count", 0),
+                "- Approval required: `%s`" % str(bool(command_authorization.get("approval_required"))).lower(),
+                "- Final reason: `%s`" % command_authorization.get("final_reason", ""),
                 "",
             ])
         agent_metrics = self._read_optional(run_dir / "reports" / "agent_metrics.json")
@@ -261,6 +279,44 @@ class ReportGenerator:
             "cache_hits": sum(bool(item.get("cache_hit")) for item in records),
             "rejected_reads": sum(
                 item.get("status") == "rejected" for item in records
+            ),
+        }
+
+    def _command_authorization_summary(self, run_dir: Path, results: Dict[str, Dict]) -> Dict:
+        reports = Path(run_dir) / "reports"
+        registry = self._read_optional(reports / "command_registry.json")
+        policy = self._read_optional(reports / "command_policy.json")
+        attempts = []
+        attempts_path = reports / "command_attempts.jsonl"
+        if attempts_path.exists():
+            for line in attempts_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+                try:
+                    item = json.loads(line)
+                except (TypeError, ValueError):
+                    continue
+                if isinstance(item, dict):
+                    attempts.append(item)
+        fallback_count = 0
+        fallbacks_path = reports / "command_fallbacks.jsonl"
+        if fallbacks_path.exists():
+            fallback_count = sum(
+                bool(line.strip()) for line in fallbacks_path.read_text(
+                    encoding="utf-8", errors="ignore",
+                ).splitlines()
+            )
+        if not registry and not policy and not attempts and not fallback_count:
+            return {}
+        final = attempts[-1] if attempts else {}
+        return {
+            "candidate_count": len(registry.get("candidates", [])) if isinstance(registry, dict) else 0,
+            "decision_count": len(policy.get("command_decisions", [])) if isinstance(policy, dict) else 0,
+            "attempt_count": len(attempts),
+            "fallback_count": fallback_count,
+            "approval_required": bool(
+                isinstance(policy, dict) and policy.get("approval_request")
+            ),
+            "final_reason": final.get("reason_code", "") or (
+                policy.get("status", "") if isinstance(policy, dict) else ""
             ),
         }
 

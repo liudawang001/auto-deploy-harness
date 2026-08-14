@@ -74,6 +74,11 @@ class PlanCompiler:
                 "selected_by": "llm_plan_first",
                 "score_reasons": [cand.get("reason", "LLM proposed candidate")],
             }
+            for key in (
+                "command_candidate_id", "command_decision", "required_backend",
+            ):
+                if key in cand:
+                    converted[key] = cand[key]
             # If this is the selected candidate, put it first
             if cand.get("id") == selected_id:
                 converted["confidence"] = 0.95
@@ -103,6 +108,12 @@ class PlanCompiler:
 
         analysis["llm_candidates"] = converted_llm_candidates
         analysis["merged_candidates"] = analysis.get("run_candidates", [])
+        analysis["command_registry"] = normalized_plan.get("command_registry", {})
+        analysis["command_decisions"] = normalized_plan.get("command_decisions", [])
+        analysis["command_approval"] = normalized_plan.get("command_approval", {})
+        analysis["sandbox_policy_fingerprint"] = normalized_plan.get(
+            "sandbox_policy_fingerprint", "",
+        )
 
         # Compile verify.request -> analysis.verify_hint
         verify = normalized_plan.get("verify", {})

@@ -35,6 +35,7 @@ from auto_harness.agent_runtime.stage_planners import (
 )
 from auto_harness.models.base import write_json
 from auto_harness.utils.time import utc_now_iso
+from auto_harness.command_auth import CommandAuthorizationEngine, CommandRegistry
 
 
 # ------------------------------------------------------------------
@@ -118,6 +119,9 @@ class StagePolicyValidator:
             for c in candidates:
                 if c.get("id") == candidate_id:
                     cmd = c.get("cmd", [])
+                    registry_result = self._validate_registry_command(c, cmd, obs)
+                    if registry_result is not None:
+                        return registry_result
                     if isinstance(cmd, list):
                         cmd_str = " ".join(str(x) for x in cmd)
                         if _SHELL_META.search(cmd_str):
@@ -134,6 +138,9 @@ class StagePolicyValidator:
             cmd = tool_input.get("cmd", [])
             if not cmd:
                 return {"allowed": False, "reason": "add_runner_candidate requires cmd"}
+            registry_result = self._validate_registry_command(tool_input, cmd, obs)
+            if registry_result is not None:
+                return registry_result
             cmd_str = " ".join(str(x) for x in cmd) if isinstance(cmd, list) else str(cmd)
             if _SHELL_META.search(cmd_str):
                 return {"allowed": False, "reason": "candidate command contains shell metacharacters"}
@@ -147,6 +154,32 @@ class StagePolicyValidator:
             return {"allowed": True, "reason": "rejection is always allowed"}
 
         return {"allowed": False, "reason": "unknown runner tool: %s" % name}
+
+    @staticmethod
+    def _validate_registry_command(candidate: Dict, cmd, obs: Dict):
+        registry_data = obs.get("command_registry")
+        if not isinstance(registry_data, dict) or not registry_data:
+            return None
+        registry = CommandRegistry.from_dict(registry_data)
+        by_id = {item.candidate_id: item for item in registry.candidates}
+        declared = by_id.get(candidate.get("command_candidate_id", ""))
+        if declared is None:
+            declared = registry.candidate_for_argv(cmd if isinstance(cmd, list) else [])
+        if declared is None:
+            return {"allowed": False, "reason": "repository_command_not_declared"}
+        decision = CommandAuthorizationEngine().authorize(
+            declared,
+            registry,
+            repo_dir=Path(obs["repo_dir"]) if obs.get("repo_dir") else None,
+            execution_backend=str(obs.get("execution_backend", "local")),
+            sandbox_policy_fingerprint=str(obs.get("sandbox_policy_fingerprint", "")),
+            approval=obs.get("command_approval") or None,
+        )
+        return {
+            "allowed": decision.verdict == "auto_allowed",
+            "reason": decision.reason_code,
+            "command_decision": decision.to_dict(),
+        }
 
     def _validate_env(self, name: str, tool_input: Dict, obs: Dict) -> Dict:
         """Env gate policy."""

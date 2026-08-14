@@ -1,0 +1,194 @@
+"""Single deterministic authorization engine for every command entry point."""
+
+import re
+from pathlib import Path
+from typing import Dict, Iterable, Optional
+
+from auto_harness.command_auth.approval import approval_valid, command_operation_id
+from auto_harness.command_auth.evidence import revalidate_evidence
+from auto_harness.command_auth.resolver import ExecutableResolver
+from auto_harness.command_auth.schemas import (
+    CommandCandidate,
+    CommandDecision,
+    CommandRegistry,
+    canonical_hash,
+)
+
+
+POLICY_VERSION = "1"
+SHELL_META = re.compile(r"[;&|>`$()]|\n|\r")
+DANGEROUS_ROOTS = frozenset({
+    "rm", "sudo", "su", "chmod", "chown", "curl", "wget", "nc", "ssh", "scp",
+    "osascript", "open", "eval", "powershell", "cmd",
+})
+SHELL_ROOTS = frozenset({"sh", "bash", "zsh", "fish", "csh", "tcsh"})
+SAFE_SYSTEM_ROOTS = frozenset({
+    "python", "python3", "pip", "streamlit", "uvicorn", "gradio", "gunicorn", "flask",
+    "conda", "mamba", "micromamba", "uv", "npm", "pnpm", "yarn", "make", "docker", "git",
+})
+
+
+class CommandAuthorizationEngine:
+    def __init__(self, policy_version: str = POLICY_VERSION):
+        self.policy_version = policy_version
+        self.resolver = ExecutableResolver()
+
+    def authorize(
+        self,
+        candidate: CommandCandidate,
+        registry: CommandRegistry,
+        *,
+        repo_dir: Optional[Path] = None,
+        execution_backend: str = "local",
+        sandbox_policy_fingerprint: str = "",
+        approval: Optional[Dict] = None,
+        require_executable: bool = False,
+        environment_ownership_marker: Optional[Path] = None,
+    ) -> CommandDecision:
+        policy_fingerprint = canonical_hash({
+            "version": self.policy_version,
+            "candidate": candidate.to_dict(),
+            "repository_fingerprint": registry.repository_fingerprint,
+            "sandbox": sandbox_policy_fingerprint,
+        })
+        base = {
+            "candidate_id": candidate.candidate_id,
+            "normalized_argv": list(candidate.argv),
+            "effective_backend": candidate.required_backend or execution_backend,
+            "operation_id": command_operation_id(candidate, registry.repository_fingerprint),
+            "policy_version": self.policy_version,
+            "policy_fingerprint": policy_fingerprint,
+        }
+        hard = self.hard_deny_reason(candidate)
+        if hard:
+            return CommandDecision(verdict="hard_denied", reason_code=hard, reasons=[hard], **base)
+
+        evidence_by_id = registry.evidence_by_id()
+        evidence = [evidence_by_id.get(item) for item in candidate.evidence_ids]
+        if not evidence or any(item is None for item in evidence):
+            return CommandDecision(
+                verdict="candidate_rejected", reason_code="repository_evidence_missing",
+                reasons=["candidate does not reference complete repository evidence"], **base,
+            )
+        if any(item.repository_fingerprint != registry.repository_fingerprint for item in evidence):
+            return CommandDecision(
+                verdict="candidate_rejected", reason_code="repository_fingerprint_changed",
+                reasons=["evidence belongs to another repository snapshot"], **base,
+            )
+        if repo_dir is not None and any(not revalidate_evidence(repo_dir, item) for item in evidence):
+            return CommandDecision(
+                verdict="candidate_rejected", reason_code="evidence_hash_mismatch",
+                reasons=["repository evidence changed after discovery"], **base,
+            )
+        evidence_types = {item.source_type for item in evidence}
+        evidence_reason = self._evidence_reason(candidate, evidence_types)
+        if evidence_reason:
+            return CommandDecision(
+                verdict="candidate_rejected", reason_code=evidence_reason,
+                reasons=[evidence_reason], **base,
+            )
+        if require_executable and repo_dir is not None:
+            resolution = self.resolver.resolve(
+                repo_dir, candidate, require_exists=True,
+                repository_fingerprint=registry.repository_fingerprint,
+                ownership_marker_path=environment_ownership_marker,
+            )
+            if not resolution["resolved"]:
+                verdict = "hard_denied" if resolution["reason_code"].endswith("hard_denied") else "candidate_rejected"
+                return CommandDecision(
+                    verdict=verdict, reason_code=resolution["reason_code"],
+                    reasons=[resolution["reason_code"]], **base,
+                )
+
+        needs_approval = candidate.source_kind in {
+            "make_target", "repository_script", "python_entrypoint",
+        }
+        if needs_approval:
+            approval_reason = approval_valid(
+                approval or {}, candidate, registry.repository_fingerprint,
+                sandbox_policy_fingerprint,
+            )
+            if approval_reason:
+                return CommandDecision(
+                    verdict="approval_required", reason_code=(
+                        "make_target_requires_approval" if candidate.source_kind == "make_target"
+                        else "python_entrypoint_requires_approval" if candidate.source_kind == "python_entrypoint"
+                        else "repository_script_requires_approval"
+                    ),
+                    reasons=[approval_reason], required_approval=True, **base,
+                )
+        reason_code = (
+            "locked_package_script" if candidate.source_kind == "package_json_script"
+            else "locked_dependency_install" if candidate.source_kind == "node_install"
+            else "declared_cli_bound_to_owned_env" if candidate.source_kind in {"pep621_script", "poetry_script"}
+            else "approved_repository_command"
+        )
+        return CommandDecision(
+            verdict="auto_allowed", reason_code=reason_code,
+            reasons=[reason_code], required_approval=needs_approval, **base,
+        )
+
+    def authorize_argv(
+        self,
+        argv,
+        *,
+        allowed_commands: Iterable[str] = (),
+        section: str = "",
+        strict_allowlist: bool = False,
+    ) -> Dict:
+        if not isinstance(argv, list) or not argv or any(not isinstance(item, str) for item in argv):
+            return {"allowed": False, "verdict": "hard_denied", "reason_code": "command_schema_invalid", "section": section}
+        candidate = CommandCandidate.build(phase="run", argv=argv, source_kind="unresolved")
+        hard = self.hard_deny_reason(candidate)
+        if hard:
+            return {"allowed": False, "verdict": "hard_denied", "reason_code": hard, "section": section}
+        root = Path(argv[0]).name
+        allowed = set(allowed_commands or ())
+        if not strict_allowlist:
+            allowed |= SAFE_SYSTEM_ROOTS
+        if root in allowed or argv[0] in allowed:
+            return {"allowed": True, "verdict": "auto_allowed", "reason_code": "harness_tool_allowlist", "section": section}
+        return {"allowed": False, "verdict": "candidate_rejected", "reason_code": "readme_only_unbound_command", "section": section}
+
+    @staticmethod
+    def hard_deny_reason(candidate: CommandCandidate) -> str:
+        if not isinstance(candidate.argv, list) or not candidate.argv:
+            return "command_schema_invalid"
+        if any(not isinstance(arg, str) or not arg or "\x00" in arg for arg in candidate.argv):
+            return "command_schema_invalid"
+        root = Path(candidate.argv[0]).name
+        if root in DANGEROUS_ROOTS:
+            return "dangerous_command_hard_denied"
+        if root in SHELL_ROOTS:
+            if candidate.source_kind != "repository_script" or len(candidate.argv) < 2:
+                return "shell_wrapper_hard_denied"
+            if any(arg in {"-c", "-lc"} for arg in candidate.argv[1:]):
+                return "shell_wrapper_hard_denied"
+        for arg in candidate.argv:
+            if SHELL_META.search(arg):
+                return "shell_metacharacter_hard_denied"
+            if "../" in arg or "..\\" in arg:
+                return "path_escape_hard_denied"
+        if any(token in " ".join(candidate.argv).lower() for token in ("--privileged", "docker.sock", "--network=host")):
+            return "host_escape_hard_denied"
+        return ""
+
+    @staticmethod
+    def _evidence_reason(candidate, evidence_types):
+        if candidate.source_kind not in {"node_install", "python_entrypoint"} and "readme_reference" not in evidence_types:
+            return "readme_reference_missing"
+        if candidate.source_kind == "node_install" and not {"package_manifest", "lockfile"}.issubset(evidence_types):
+            return "node_manifest_or_lockfile_missing"
+        if candidate.source_kind == "pep621_script" and "pep621_script" not in evidence_types:
+            return "project_cli_declaration_missing"
+        if candidate.source_kind == "poetry_script" and "poetry_script" not in evidence_types:
+            return "project_cli_declaration_missing"
+        if candidate.source_kind == "package_json_script" and not {"package_json_script", "lockfile"}.issubset(evidence_types):
+            return "node_script_or_lockfile_missing"
+        if candidate.source_kind == "make_target" and "make_target" not in evidence_types:
+            return "make_target_missing"
+        if candidate.source_kind == "repository_script" and "repository_script" not in evidence_types:
+            return "repository_script_missing"
+        if candidate.source_kind == "python_entrypoint" and "repository_script" not in evidence_types:
+            return "repository_script_missing"
+        return ""

@@ -143,3 +143,5 @@ def test_pin_dependency_uses_controlled_package_installer(tmp_path):
     assert result["status"] == "applied"
     assert result["executed_action_count"] == 1
     assert calls == [[".venv/bin/python", "-m", "pip", "install", "numpy<2"]]
+    assert result["command_authorization"][0]["verdict"] == "auto_allowed"
+    assert result["action_results"][0]["command_decision"]["section"] == "repair.apply"

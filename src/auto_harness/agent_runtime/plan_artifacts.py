@@ -43,6 +43,24 @@ class PlanArtifactWriter:
         write_json(path, grounding)
         return path
 
+    def write_command_registry(self, registry: Dict) -> Path:
+        path = self.reports_dir / "command_registry.json"
+        write_json(path, registry)
+        return path
+
+    def write_command_policy(self, result: Dict) -> Path:
+        path = self.reports_dir / "command_policy.json"
+        write_json(path, {
+            "status": result.get("status", ""),
+            "command_decisions": (
+                result.get("normalized_plan", {}).get("command_decisions", [])
+                if isinstance(result.get("normalized_plan"), dict) else []
+            ),
+            "approval_request": result.get("approval_request", {}),
+            "rejected_items": result.get("rejected_items", []),
+        })
+        return path
+
     def write_raw_plan(self, raw_plan: Any) -> Path:
         path = self.reports_dir / "llm_deployment_plan.raw.json"
         write_json(path, raw_plan)

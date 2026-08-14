@@ -386,6 +386,11 @@ class AgentStageExecutor:
             docker_model_cache_dir=self.config.docker_model_cache_dir if self.config else "",
             docker_security_options=self._docker_security_options(),
             stage_hints=stage_hints,
+            run_dir=run_dir,
+            max_candidate_attempts=(
+                int(self.config.repository_command_policy.get("max_runner_candidate_attempts", 3))
+                if self.config else 3
+            ),
         )
         return StageExecutionResult(
             stage="runner",

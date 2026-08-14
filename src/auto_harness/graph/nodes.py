@@ -294,6 +294,8 @@ class DeploymentGraphNodes:
             inventory_path = artifacts.write_repository_inventory(snapshot["repository_inventory"])
         else:
             inventory_path = path
+        if snapshot.get("command_registry") and hasattr(artifacts, "write_command_registry"):
+            artifacts.write_command_registry(snapshot["command_registry"])
         # Update state with skill/memory fields from snapshot (Task 9)
         route_path = Path(state["run_dir"]) / "skills" / "routes" / "plan.json"
         update = {
@@ -643,9 +645,32 @@ class DeploymentGraphNodes:
             snapshot["observation_ledger"] = ObservationLedger(
                 Path(state["observation_ledger_path"])
             ).load()
-        result = self.deps.policy_gate.validate(parsed, snapshot, runtime_policy=state.get("runtime_policy", {}), config=self.deps.runtime_config)
+        result = self.deps.policy_gate.validate(
+            parsed,
+            snapshot,
+            runtime_policy=state.get("runtime_policy", {}),
+            config=self.deps.runtime_config,
+            approval=state.get("approved_command_approval") or None,
+            excluded_candidate_ids=state.get("rejected_command_candidate_ids", []),
+        )
+        if (
+            state.get("dry_run")
+            and result.get("status") == "approval_required"
+            and result.get("approval_preview_candidates")
+        ):
+            preview_plan = result.get("normalized_plan", {})
+            preview_run = dict(preview_plan.get("run", {}))
+            preview_run["candidates"] = result["approval_preview_candidates"]
+            preview_run["selected_candidate_id"] = preview_run["candidates"][0].get("id", "")
+            preview_plan["run"] = preview_run
+            result["normalized_plan"] = preview_plan
+            result["status"] = "accepted_dry_run"
+            result["allowed"] = True
+            result["approval_deferred_until_execute"] = True
         artifacts = self._artifacts(state)
         path = artifacts.write_policy_result(result)
+        if hasattr(artifacts, "write_command_policy"):
+            artifacts.write_command_policy(result)
         if snapshot.get("context_mode") == "layered":
             artifacts.write_repository_grounding({
                 "schema_version": 1,
@@ -661,6 +686,14 @@ class DeploymentGraphNodes:
                     "repository_fingerprint", ""
                 ),
             })
+        if result.get("status") == "approval_required" and result.get("approval_request"):
+            return {
+                "policy_result_path": str(path),
+                "pending_approval": result["approval_request"],
+                "approval_kind": "repository_command",
+                "approval_resume_target": "policy",
+                "stop_reason": "",
+            }
         return {"policy_result_path": str(path), "stop_reason": "" if result.get("allowed") else "policy_rejected"}
 
     def compile(self, state):

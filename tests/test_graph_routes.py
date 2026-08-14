@@ -37,6 +37,10 @@ class TestRouteAfterPolicy:
         state = {"stop_reason": "policy_rejected"}
         assert route_after_policy(state) == "stop"
 
+    def test_repository_command_approval_pauses_before_compile(self):
+        state = {"stop_reason": "", "pending_approval": {"approval_id": "a"}}
+        assert route_after_policy(state) == "approval"
+
 
 class TestRouteAfterStage:
     def test_passed_goes_to_continue(self):

@@ -2493,6 +2493,7 @@ class CoreTests(unittest.TestCase):
             )
             self.assertFalse(result["executed"])
             self.assertEqual(result["action_results"][0]["status"], "rejected")
+            self.assertEqual(result["action_results"][0]["reason_code"], "readme_only_unbound_command")
 
     def test_repair_execute_records_command_policy_reject(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2510,6 +2511,7 @@ class CoreTests(unittest.TestCase):
             RepairApplier().apply(run_dir, plan, {"allowed": True, "decisions": []}, execute=True, allowed_commands=["curl"])
             stored = json.loads((run_dir / "repairs" / "repair_apply_result.json").read_text(encoding="utf-8"))
             self.assertEqual(stored["action_results"][0]["reason"], "command is not allowed by command policy")
+            self.assertEqual(stored["command_authorization"][0]["section"], "repair.apply")
 
     def test_repair_execute_then_resume_requires_verify_pass(self):
         with tempfile.TemporaryDirectory() as tmp:
