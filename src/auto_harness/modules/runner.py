@@ -248,6 +248,137 @@ class RunnerModule:
             )
         return StageResult("runner", status, "service process started" if status == "passed" else "service process exited", data)
 
+    def run_model_runtime(
+        self,
+        *,
+        run_dir,
+        task_id,
+        runtime_plan,
+        bundle,
+        execute=False,
+        command_runner=None,
+        docker_network="bridge",
+        docker_security_options=None,
+        operation_id="",
+    ) -> StageResult:
+        """Start or plan the managed vLLM inference container (Document B).
+
+        Builds the deterministic Docker command from the runtime plan, attaches
+        ownership labels, executes ``docker run -d``, captures the container id,
+        and verifies the labels/config match. It does not wait for readiness —
+        that is the Startup Readiness Gate (Document B Phase B5).
+        """
+        from auto_harness.runtime import DockerSandboxBackend
+
+        security = dict(docker_security_options or {})
+        labels = {
+            "auto-harness.task-id": str(task_id),
+            "auto-harness.operation-id": str(operation_id or ""),
+            "auto-harness.plan-hash": runtime_plan.plan_hash,
+            "auto-harness.model-hash": runtime_plan.resolved_model_hash,
+        }
+        gpu_index = (list(runtime_plan.gpu_indexes) or [0])[0]
+        backend = DockerSandboxBackend.for_model_runtime(
+            image=runtime_plan.image,
+            gpu_index=gpu_index,
+            network=docker_network,
+            memory=security.get("memory", "32g"),
+            cpus=security.get("cpus", 8.0),
+            pids_limit=security.get("pids_limit", 1024),
+            tmpfs_size=security.get("tmpfs_size", "1g"),
+            read_only_rootfs=True,
+            user=security.get("user", ""),
+        )
+        sandbox = backend.wrap_model_runtime(
+            model_host_dir=runtime_plan.model_host_path,
+            host_port=runtime_plan.expected_port,
+            command=runtime_plan.command,
+            container_name=runtime_plan.container_name,
+            labels=labels,
+            shm_size=security.get("shm_size", "8g"),
+        )
+
+        data = {
+            "container_name": runtime_plan.container_name,
+            "runtime_plan_hash": runtime_plan.plan_hash,
+            "model_identity": runtime_plan.model_identity,
+            "image_digest": runtime_plan.image_digest,
+            "gpu_indexes": list(runtime_plan.gpu_indexes),
+            "expected_port": runtime_plan.expected_port,
+            "sandbox": sandbox.to_dict(),
+            "executed": False,
+        }
+        if not execute:
+            return StageResult(
+                "runner",
+                "passed",
+                "dry-run managed model runtime plan",
+                data,
+            )
+
+        runner = command_runner or self._subprocess_command_runner()
+        started = runner(sandbox.effective_cmd)
+        if started.get("exit_code") != 0:
+            return StageResult(
+                "runner",
+                "failed",
+                "docker run failed",
+                {**data, "executed": True, "stderr_tail": (started.get("stderr") or "")[-500:]},
+                error="docker_run_failed",
+            )
+        container_id = (started.get("stdout") or "").strip().splitlines()
+        container_id = container_id[-1].strip() if container_id else ""
+        if not container_id:
+            return StageResult(
+                "runner", "failed", "docker run returned no container id", data,
+                error="container_id_missing",
+            )
+
+        verified = self._verify_model_runtime_container(
+            runner, container_id, labels, runtime_plan
+        )
+        if not verified:
+            return StageResult(
+                "runner", "failed", "container labels/config mismatch after start",
+                {**data, "executed": True, "container_id": container_id},
+                error="container_verification_failed",
+            )
+
+        data["executed"] = True
+        data["container_id"] = container_id
+        data["ready"] = False  # readiness is decided by the Startup Readiness Gate
+        return StageResult(
+            "runner", "passed", "managed model runtime container started", data,
+        )
+
+    @staticmethod
+    def _subprocess_command_runner():
+        def _run(cmd):
+            proc = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=600,
+            )
+            return {
+                "exit_code": proc.returncode,
+                "stdout": proc.stdout or "",
+                "stderr": proc.stderr or "",
+            }
+        return _run
+
+    @staticmethod
+    def _verify_model_runtime_container(runner, container_id, labels, runtime_plan) -> bool:
+        inspected = runner(["docker", "inspect", container_id])
+        if inspected.get("exit_code") != 0:
+            return False
+        try:
+            data = json.loads(inspected.get("stdout") or "")[0]
+        except (ValueError, IndexError, TypeError):
+            return False
+        actual_labels = data.get("Config", {}).get("Labels", {}) or {}
+        for key, value in labels.items():
+            if actual_labels.get(key) != value:
+                return False
+        return True
+
     def _select_authorized_candidate(
         self, repo_dir, candidates, analysis, execution_backend, require_executable,
         max_candidate_attempts=3, sandbox_fingerprint="", run_dir=None,

@@ -427,6 +427,19 @@ class GraphRecoveryAdapter:
                 "revision": assets.get("revision", "main"),
             }
         elif stage == "runner":
+            runtime_plan = state.get("runtime_plan") or {}
+            if runtime_plan:
+                # Managed inference runtime: identity is bound to the frozen
+                # plan hash, model hash, image digest, GPU index, port and
+                # security profile — never container IDs, PIDs, or timestamps.
+                return {
+                    "runtime_plan_hash": runtime_plan.get("plan_hash", ""),
+                    "model_identity_hash": runtime_plan.get("resolved_model_hash", ""),
+                    "image_digest": runtime_plan.get("image_digest", ""),
+                    "gpu_indexes": list(runtime_plan.get("gpu_indexes", [])),
+                    "expected_port": runtime_plan.get("expected_port", 0),
+                    "security_profile": runtime_plan.get("security_profile", ""),
+                }
             compiled = state.get("compiled_analysis", {})
             candidates = compiled.get("run_candidates", [])
             selected = ""
@@ -485,6 +498,29 @@ class GraphRecoveryAdapter:
                 "cache_key": assets.get("cache_key", ""),
             }
         elif stage == "runner":
+            runtime_plan = state.get("runtime_plan") or {}
+            if runtime_plan:
+                gpu_indexes = list(runtime_plan.get("gpu_indexes", []))
+                return {
+                    "container_name": runtime_plan.get("container_name", ""),
+                    "plan_hash": runtime_plan.get("plan_hash", ""),
+                    "runtime_plan_hash": runtime_plan.get("plan_hash", ""),
+                    "image": runtime_plan.get("image", ""),
+                    "image_digest": runtime_plan.get("image_digest", ""),
+                    "model_hash": runtime_plan.get("resolved_model_hash", ""),
+                    "model_identity": runtime_plan.get("model_identity", ""),
+                    "model_host_path": runtime_plan.get("model_host_path", ""),
+                    "gpu_indexes": gpu_indexes,
+                    "ports": [int(runtime_plan.get("expected_port", 0))] if runtime_plan.get("expected_port") else [],
+                    "network": "bridge",
+                    "gpus": ("device=%d" % gpu_indexes[0]) if gpu_indexes else "none",
+                    "shm_size": runtime_plan.get("shm_size", "8g"),
+                    "memory": runtime_plan.get("memory", "32g"),
+                    "cpus": runtime_plan.get("cpus", 8.0),
+                    "pids_limit": runtime_plan.get("pids_limit", 1024),
+                    "read_only_rootfs": True,
+                    "user": runtime_plan.get("user", ""),
+                }
             return {
                 "repo_path": state.get("repo_dir", ""),
                 "expected_port": str(state.get("compiled_analysis", {}).get("expected_port", "7860")),

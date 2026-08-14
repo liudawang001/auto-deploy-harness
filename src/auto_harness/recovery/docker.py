@@ -115,7 +115,11 @@ class DockerReconciler:
             )
 
         # 6. Verify runtime config
-        if not docker_config_matches(data, expected):
+        if "runtime_plan_hash" in expected or "model_hash" in expected:
+            config_ok = docker_model_runtime_config_matches(data, expected)
+        else:
+            config_ok = docker_config_matches(data, expected)
+        if not config_ok:
             return reconcile_result(
                 "cleanup_then_retry", "container runtime config changed",
                 id=ids[0],
@@ -247,6 +251,118 @@ def docker_config_matches(inspect_data, expected):
         if expected_gpus and expected_gpus != "none":
             if not device_requests:
                 return False
+
+        return True
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
+def _size_bytes(value) -> int:
+    """Parse a size string ('8g', '512m', '1g') or int into bytes."""
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, int):
+        return value
+    text = str(value).strip().lower()
+    if not text:
+        return 0
+    units = {"k": 1024, "m": 1024 ** 2, "g": 1024 ** 3, "t": 1024 ** 4}
+    try:
+        if text[-1] in units:
+            return int(float(text[:-1]) * units[text[-1]])
+        return int(float(text))
+    except (ValueError, IndexError):
+        return 0
+
+
+def docker_model_runtime_config_matches(inspect_data, expected) -> bool:
+    """Check a managed vLLM container's runtime config against expected values.
+
+    Compares image + digest, model identity label, the exact read-only
+    ``/models/current`` mount source, GPU device index, shm/memory/CPU/PID
+    limits, read-only rootfs and user. A check is enforced only when the
+    corresponding expected key is present.
+    """
+    try:
+        config = inspect_data.get("Config", {})
+        host_config = inspect_data.get("HostConfig", {})
+        labels = config.get("Labels", {}) or {}
+
+        # Image and digest
+        actual_image = str(config.get("Image", ""))
+        expected_image = str(expected.get("image", ""))
+        if expected_image and actual_image != expected_image:
+            return False
+        expected_digest = str(expected.get("image_digest", ""))
+        if expected_digest and expected_digest not in actual_image:
+            return False
+
+        # Model identity label
+        expected_model_hash = str(expected.get("model_hash", ""))
+        if expected_model_hash and labels.get("auto-harness.model-hash") != expected_model_hash:
+            return False
+
+        # Exact read-only model mount (both sides resolved so symlinked roots
+        # such as /tmp -> /private/tmp compare consistently).
+        expected_model_path = str(expected.get("model_host_path", ""))
+        if expected_model_path:
+            mounts = inspect_data.get("Mounts", []) or []
+            wanted = str(Path(expected_model_path).resolve())
+            found = any(
+                str(m.get("Destination", "")) == "/models/current"
+                and str(Path(str(m.get("Source", ""))).resolve()) == wanted
+                and str(m.get("Mode", "")).lower().startswith("ro")
+                for m in mounts
+                if isinstance(m, dict)
+            )
+            if not found:
+                return False
+
+        # GPU device index
+        expected_gpus = expected.get("gpu_indexes", [])
+        if expected_gpus:
+            device_requests = host_config.get("DeviceRequests", []) or []
+            device_ids = []
+            for request in device_requests:
+                if isinstance(request, dict):
+                    device_ids.extend(str(i) for i in (request.get("DeviceIDs") or []))
+            if not any(str(i) in device_ids for i in expected_gpus):
+                return False
+
+        # shm size
+        expected_shm = str(expected.get("shm_size", ""))
+        if expected_shm:
+            if _size_bytes(host_config.get("ShmSize", 0)) != _size_bytes(expected_shm):
+                return False
+
+        # memory
+        expected_memory = str(expected.get("memory", ""))
+        if expected_memory:
+            if int(host_config.get("Memory", 0) or 0) != _size_bytes(expected_memory):
+                return False
+
+        # CPU (NanoCpus = cpus * 1e9)
+        expected_cpus = expected.get("cpus")
+        if expected_cpus:
+            wanted_nano = int(float(expected_cpus) * 1e9)
+            if int(host_config.get("NanoCpus", 0) or 0) != wanted_nano:
+                return False
+
+        # PID limit
+        expected_pids = expected.get("pids_limit")
+        if expected_pids:
+            if int(host_config.get("PidsLimit", 0) or 0) != int(expected_pids):
+                return False
+
+        # read-only rootfs
+        if expected.get("read_only_rootfs") is not None:
+            if bool(host_config.get("ReadonlyRootfs", False)) != bool(expected["read_only_rootfs"]):
+                return False
+
+        # user
+        expected_user = str(expected.get("user", ""))
+        if expected_user and str(host_config.get("User", "")) != expected_user:
+            return False
 
         return True
     except (KeyError, TypeError, ValueError):

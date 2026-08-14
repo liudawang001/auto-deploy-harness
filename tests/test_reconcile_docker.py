@@ -10,6 +10,7 @@ from unittest.mock import MagicMock
 from auto_harness.recovery.docker import (
     DockerReconciler,
     docker_config_matches,
+    docker_model_runtime_config_matches,
 )
 from auto_harness.recovery.schemas import compute_operation_id, canonical_json
 
@@ -424,3 +425,148 @@ class TestVerifyCleanupTarget:
         reconciler = DockerReconciler(runner)
         result = reconciler.verify_cleanup_target(op)
         assert result["owned"] is False
+
+
+# -------------------------------------------------------------------
+# Model Runtime Reconciler Tests
+# -------------------------------------------------------------------
+
+MODEL_IMAGE = "vllm/vllm-openai:v0.6.1@sha256:" + "d" * 64
+MODEL_DIGEST = "sha256:" + "d" * 64
+
+
+def _gb(value):
+    return int(value) * (1024 ** 3)
+
+
+def make_model_runtime_operation(operation_id="op-model", task_id="task-model", **overrides):
+    identity = {
+        "container_name": "auto-harness-abc12345-vllm",
+        "plan_hash": "sha256:plan",
+        "runtime_plan_hash": "sha256:plan",
+        "image": MODEL_IMAGE,
+        "image_digest": MODEL_DIGEST,
+        "model_hash": "sha256:model",
+        "model_identity": "huggingface:org/model@" + "c" * 40,
+        "model_host_path": "/tmp/model_cache/huggingface/key",
+        "gpu_indexes": [0],
+        "ports": [8000],
+        "network": "bridge",
+        "gpus": "device=0",
+        "shm_size": "8g",
+        "memory": "32g",
+        "cpus": 8.0,
+        "pids_limit": 1024,
+        "read_only_rootfs": True,
+        "user": "",
+    }
+    identity.update(overrides)
+    return {
+        "operation_id": operation_id,
+        "task_id": task_id,
+        "stage": "runner",
+        "action": "start_service",
+        "resource_type": "docker_service",
+        "resource_identity": identity,
+        "observed_resource": {},
+        "normalized_input_hash": canonical_json({"runtime_plan_hash": identity["runtime_plan_hash"]}),
+        "status": "running",
+    }
+
+
+def make_model_inspect_response(op, running=True):
+    identity = op["resource_identity"]
+    labels = {
+        "auto-harness.task-id": op["task_id"],
+        "auto-harness.operation-id": op["operation_id"],
+        "auto-harness.plan-hash": identity["plan_hash"],
+        "auto-harness.model-hash": identity["model_hash"],
+    }
+    data = [{
+        "Id": "abc123",
+        "Config": {"Image": identity["image"], "Labels": labels},
+        "State": {"Running": running, "Status": "running" if running else "exited"},
+        "Mounts": [{
+            "Source": identity["model_host_path"],
+            "Destination": "/models/current",
+            "Mode": "ro",
+        }],
+        "HostConfig": {
+            "PortBindings": {"8000/tcp": [{"HostIp": "127.0.0.1", "HostPort": "8000"}]},
+            "NetworkMode": identity["network"],
+            "DeviceRequests": [{"Driver": "nvidia", "DeviceIDs": [str(i) for i in identity["gpu_indexes"]]}],
+            "ShmSize": _gb(8),
+            "Memory": _gb(32),
+            "NanoCpus": int(float(identity["cpus"]) * 1e9),
+            "PidsLimit": identity["pids_limit"],
+            "ReadonlyRootfs": identity["read_only_rootfs"],
+            "User": identity["user"],
+        },
+    }]
+    return {"exit_code": 0, "stdout": json.dumps(data), "stderr": ""}
+
+
+class TestModelRuntimeReconciler:
+    def test_reuse_matching_model_runtime_container(self):
+        op = make_model_runtime_operation()
+        runner = FakeCommandRunner({
+            ("docker", "ps", "-a"): {"exit_code": 0, "stdout": "abc123\n", "stderr": ""},
+            ("docker", "inspect"): make_model_inspect_response(op, running=True),
+        })
+        result = DockerReconciler(runner).reconcile(op)
+        assert result["decision"] == "reuse"
+
+    def test_cleanup_when_model_path_changed(self):
+        # The expected plan now points at a new cache key, but the running
+        # container still mounts the old one -> config changed.
+        op = make_model_runtime_operation(model_host_path="/tmp/model_cache/huggingface/NEW_KEY")
+        inspect = make_model_inspect_response(op, running=True)
+        data = json.loads(inspect["stdout"])
+        data[0]["Mounts"][0]["Source"] = "/tmp/model_cache/huggingface/key"
+        inspect["stdout"] = json.dumps(data)
+        runner = FakeCommandRunner({
+            ("docker", "ps", "-a"): {"exit_code": 0, "stdout": "abc123\n", "stderr": ""},
+            ("docker", "inspect"): inspect,
+        })
+        result = DockerReconciler(runner).reconcile(op)
+        assert result["decision"] == "cleanup_then_retry"
+
+    def test_conflict_when_model_hash_label_mismatch(self):
+        op = make_model_runtime_operation()
+        inspect = make_model_inspect_response(op, running=True)
+        data = json.loads(inspect["stdout"])
+        data[0]["Config"]["Labels"]["auto-harness.model-hash"] = "sha256:OTHER"
+        inspect["stdout"] = json.dumps(data)
+        runner = FakeCommandRunner({
+            ("docker", "ps", "-a"): {"exit_code": 0, "stdout": "abc123\n", "stderr": ""},
+            ("docker", "inspect"): inspect,
+        })
+        # The model-hash label mismatch is a config change, not a task/op/plan
+        # ownership conflict, so the reconciler asks for cleanup.
+        result = DockerReconciler(runner).reconcile(op)
+        assert result["decision"] == "cleanup_then_retry"
+
+
+class TestModelRuntimeConfigMatches:
+    def test_matching_model_config(self):
+        op = make_model_runtime_operation()
+        inspect = json.loads(make_model_inspect_response(op)["stdout"])[0]
+        assert docker_model_runtime_config_matches(inspect, op["resource_identity"]) is True
+
+    def test_model_mount_source_mismatch(self):
+        op = make_model_runtime_operation()
+        inspect = json.loads(make_model_inspect_response(op)["stdout"])[0]
+        inspect["Mounts"][0]["Source"] = "/tmp/other"
+        assert docker_model_runtime_config_matches(inspect, op["resource_identity"]) is False
+
+    def test_gpu_index_mismatch(self):
+        op = make_model_runtime_operation()
+        inspect = json.loads(make_model_inspect_response(op)["stdout"])[0]
+        inspect["HostConfig"]["DeviceRequests"][0]["DeviceIDs"] = ["1"]
+        assert docker_model_runtime_config_matches(inspect, op["resource_identity"]) is False
+
+    def test_image_digest_mismatch(self):
+        op = make_model_runtime_operation()
+        inspect = json.loads(make_model_inspect_response(op)["stdout"])[0]
+        inspect["Config"]["Image"] = "vllm/vllm-openai:v0.6.1@sha256:" + "e" * 64
+        assert docker_model_runtime_config_matches(inspect, op["resource_identity"]) is False
