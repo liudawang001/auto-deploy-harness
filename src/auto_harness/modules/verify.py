@@ -170,6 +170,61 @@ class VerifyModule:
             ),
         )
 
+    def verify_model_runtime(
+        self,
+        run_dir: Path,
+        runtime_plan,
+        startup_evidence,
+        task_id: str = "",
+        operation_id: str = "",
+    ) -> StageResult:
+        """Run the non-stream and SSE trace inference gates (Document B).
+
+        Both requests use a fresh, unpredictable trace id and write their
+        evidence atomically. Pass requires both gates to return ``passed``.
+        """
+        from auto_harness.model_runtime.evidence import (
+            ModelInferenceGate,
+            ModelRuntimeEvidenceWriter,
+        )
+
+        gate = ModelInferenceGate(urlopen=self.urlopen)
+        writer = ModelRuntimeEvidenceWriter(run_dir)
+
+        non_stream = gate.verify_non_stream(
+            runtime_plan=runtime_plan,
+            startup_evidence=startup_evidence,
+            task_id=task_id,
+            operation_id=operation_id,
+        )
+        stream = gate.verify_stream(
+            runtime_plan=runtime_plan,
+            startup_evidence=startup_evidence,
+            task_id=task_id,
+            operation_id=operation_id,
+        )
+        ns_path = writer.write_inference_evidence(non_stream, "non_stream")
+        s_path = writer.write_inference_evidence(stream, "stream")
+
+        checks = [
+            {"name": "model_non_stream_trace", "status": non_stream.status, "evidence": "trace_id=%s" % non_stream.trace_id},
+            {"name": "model_sse_trace", "status": stream.status, "evidence": "trace_id=%s" % stream.trace_id},
+        ]
+        passed = non_stream.status == "passed" and stream.status == "passed"
+        status = "passed" if passed else "uncertain"
+        data = {
+            "non_stream": non_stream.to_dict(),
+            "stream": stream.to_dict(),
+            "checks": checks,
+        }
+        return StageResult(
+            "verify",
+            status,
+            "model runtime inference evidence %s" % status,
+            data=data,
+            evidence=[ns_path, s_path],
+        )
+
     def _plan_and_execute_verify_hint(
         self,
         trace_id: str,
