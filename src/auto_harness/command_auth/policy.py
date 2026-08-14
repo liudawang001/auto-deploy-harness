@@ -59,6 +59,16 @@ class CommandAuthorizationEngine:
             "policy_version": self.policy_version,
             "policy_fingerprint": policy_fingerprint,
         }
+        # The managed inference runtime source is reserved for the built-in
+        # adapter. A repository or LLM candidate claiming it is impersonating
+        # the adapter and is always hard-denied.
+        if candidate.source_kind == "managed_inference_runtime":
+            return CommandDecision(
+                verdict="hard_denied",
+                reason_code="managed_inference_runtime_reserved_for_adapter",
+                reasons=["managed_inference_runtime is only producible by the built-in adapter"],
+                **base,
+            )
         hard = self.hard_deny_reason(candidate)
         if hard:
             return CommandDecision(verdict="hard_denied", reason_code=hard, reasons=[hard], **base)
