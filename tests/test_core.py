@@ -735,7 +735,14 @@ class CoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = Path(tmp)
             (run_dir / "workspace" / "repo").mkdir(parents=True)
-            result = VerifyModule(urlopen=fake_urlopen).verify(
+            result = VerifyModule(
+                urlopen=fake_urlopen,
+                browser_verifier=BrowserVerifier(
+                    browser_backend=FakeBrowserBackend(
+                        '<html><body><div class="gradio-container">{{trace_id}}</div></body></html>'
+                    )
+                ),
+            ).verify(
                 run_dir,
                 analysis={"frameworks": ["gradio"], "verify_hint": {"endpoint": "http://127.0.0.1:7860"}},
                 runner_result={"pid": 1234, "expected_port": 7860, "service_ready": True},
@@ -764,7 +771,14 @@ class CoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = Path(tmp)
             (run_dir / "workspace" / "repo").mkdir(parents=True)
-            result = VerifyModule(urlopen=fake_urlopen).verify(
+            result = VerifyModule(
+                urlopen=fake_urlopen,
+                browser_verifier=BrowserVerifier(
+                    browser_backend=FakeBrowserBackend(
+                        '<html><body><div class="gradio-container">{{trace_id}}</div></body></html>'
+                    )
+                ),
+            ).verify(
                 run_dir,
                 analysis={"frameworks": ["gradio"], "verify_hint": {"endpoint": "http://127.0.0.1:7860"}},
                 runner_result={"pid": 1234, "expected_port": 7860, "service_ready": True},
@@ -796,7 +810,14 @@ class CoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = Path(tmp)
             (run_dir / "workspace" / "repo").mkdir(parents=True)
-            result = VerifyModule(urlopen=fake_urlopen).verify(
+            result = VerifyModule(
+                urlopen=fake_urlopen,
+                browser_verifier=BrowserVerifier(
+                    browser_backend=FakeBrowserBackend(
+                        '<html><body><div class="gradio-container">{{trace_id}}</div></body></html>'
+                    )
+                ),
+            ).verify(
                 run_dir,
                 analysis={"frameworks": ["gradio"], "verify_hint": {"endpoint": "http://127.0.0.1:7860"}},
                 runner_result={"pid": 1234, "expected_port": 7860, "service_ready": True},
@@ -2709,7 +2730,14 @@ class CoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = Path(tmp)
             (run_dir / "workspace" / "repo").mkdir(parents=True)
-            result = VerifyModule(urlopen=fake_urlopen).verify(
+            result = VerifyModule(
+                urlopen=fake_urlopen,
+                browser_verifier=BrowserVerifier(
+                    browser_backend=FakeBrowserBackend(
+                        '<html><body><div class="gradio-container">{{trace_id}}</div></body></html>'
+                    )
+                ),
+            ).verify(
                 run_dir,
                 analysis={"frameworks": ["streamlit"], "verify_hint": {"endpoint": "http://127.0.0.1:8501"}},
                 runner_result={"pid": 1234, "expected_port": 8501, "service_ready": True},
@@ -2726,7 +2754,14 @@ class CoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = Path(tmp)
             (run_dir / "workspace" / "repo").mkdir(parents=True)
-            result = VerifyModule(urlopen=fake_urlopen).verify(
+            result = VerifyModule(
+                urlopen=fake_urlopen,
+                browser_verifier=BrowserVerifier(
+                    browser_backend=FakeBrowserBackend(
+                        '<html><body><div class="gradio-container">{{trace_id}}</div></body></html>'
+                    )
+                ),
+            ).verify(
                 run_dir,
                 analysis={"frameworks": ["streamlit"], "verify_hint": {"endpoint": "http://127.0.0.1:8501"}},
                 runner_result={"pid": 1234, "expected_port": 8501, "service_ready": True},
