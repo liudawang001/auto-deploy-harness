@@ -8,6 +8,23 @@ from auto_harness.assets.manifest import ModelAsset
 from auto_harness.utils.files import ensure_dir, safe_name, short_hash
 
 
+def revision_cache_key(source: str, repo_id: str, resolved_revision: str, file_plan_hash: str) -> str:
+    """Deterministic revision-bound cache identity.
+
+    Binds source + repo_id + immutable revision + file plan hash. Does NOT
+    include the target repository origin, so the same model at the same
+    revision shares one cache across deployments.
+    """
+    base = "%s:%s:%s:%s" % (source, repo_id, resolved_revision, file_plan_hash)
+    readable = safe_name(repo_id.replace("/", "-") or repo_id)
+    return "%s_%s" % (readable[:80], short_hash(base, 12))
+
+
+COMPLETE_MARKER_NAME = ".auto_harness_complete.json"
+ASSET_META_NAME = ".auto_harness_asset.json"
+DOWNLOAD_LOCK_NAME = ".auto_harness_download.lock"
+
+
 class ModelCache:
     def __init__(self, root: Path) -> None:
         self.root = ensure_dir(root)
@@ -164,3 +181,33 @@ class ModelCache:
             return json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return {}
+
+    # ------------------------------------------------------------------
+    # Revision-bound cache (Document A Phase A5).
+    # ------------------------------------------------------------------
+
+    def revision_cache_path(
+        self,
+        source: str,
+        repo_id: str,
+        resolved_revision: str,
+        file_plan_hash: str,
+    ) -> Path:
+        """Return the cache directory for a revision-bound model file plan."""
+        key = revision_cache_key(source, repo_id, resolved_revision, file_plan_hash)
+        return self.root / source / key
+
+    def complete_marker_path(self, cache_dir: Path) -> Path:
+        return Path(cache_dir) / COMPLETE_MARKER_NAME
+
+    def read_complete_marker(self, cache_dir: Path) -> Optional[Dict]:
+        path = self.complete_marker_path(cache_dir)
+        if not path.exists():
+            return None
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+
+    def download_lock_path(self, cache_dir: Path) -> Path:
+        return Path(cache_dir) / DOWNLOAD_LOCK_NAME

@@ -53,6 +53,7 @@ class HarnessConfig:
     docker_network: str = "bridge"
     docker_gpus: str = "none"
     docker_model_cache_dir: str = ""
+    docker_gpu_probe_image: str = ""
     docker_read_only_rootfs: bool = False
     docker_user: str = ""
     docker_memory: str = "8g"
@@ -130,6 +131,32 @@ class HarnessConfig:
     model_cache_cleanup_repo_id: Optional[str] = None
     model_cache_cleanup_keep_cache_keys: List[str] = None
     model_cache_cleanup_keep_repo_ids: List[str] = None
+    # Model inference configuration (guarded by model_inference_enabled).
+    # Disabled by default; enabling routes deployment through the model
+    # preparation chain (resolve -> file closure -> resource solve -> download).
+    model_inference_enabled: bool = False
+    model_runtime: str = "vllm"
+    model_runtime_mode: str = "managed_vllm"
+    model_runtime_image: str = ""
+    model_runtime_require_image_digest: bool = True
+    model_runtime_port: int = 8000
+    model_runtime_dtype: str = "auto"
+    model_runtime_max_model_len: int = 4096
+    model_runtime_max_num_seqs: int = 1
+    model_runtime_gpu_memory_utilization: float = 0.9
+    model_runtime_tensor_parallel_size: int = 1
+    model_runtime_startup_timeout_seconds: int = 900
+    model_runtime_request_timeout_seconds: int = 120
+    model_runtime_shm_size: str = "8g"
+    model_runtime_allow_remote_code: bool = False
+    model_runtime_allow_quantized: bool = False
+    model_runtime_require_immutable_revision: bool = True
+    model_runtime_require_strong_weight_integrity: bool = True
+    model_runtime_disk_safety_ratio: float = 1.2
+    model_runtime_ram_safety_ratio: float = 1.2
+    # Operator model reference overrides (CLI-only; never persisted to default.json).
+    model_id_override: str = ""
+    model_revision_override: str = ""
     max_skill_chars: int = 6000
     max_memory_items: int = 5
     memory_evolution_enabled: bool = False
@@ -390,6 +417,37 @@ class HarnessConfig:
             raise ValueError(
                 "docker_repo_mount_mode must be 'ro' or 'rw', got: %s" % self.docker_repo_mount_mode
             )
+        # Model inference configuration validation (guarded feature).
+        if self.model_runtime not in ("vllm",):
+            raise ValueError("model_runtime must be 'vllm', got: %s" % self.model_runtime)
+        if self.model_runtime_mode not in ("managed_vllm",):
+            raise ValueError(
+                "model_runtime_mode must be 'managed_vllm', got: %s" % self.model_runtime_mode
+            )
+        if self.model_runtime_tensor_parallel_size != 1:
+            raise ValueError("model_runtime_tensor_parallel_size must be 1")
+        if isinstance(self.model_runtime_gpu_memory_utilization, bool) or not (
+            0.5 <= self.model_runtime_gpu_memory_utilization <= 0.95
+        ):
+            raise ValueError(
+                "model_runtime_gpu_memory_utilization must be within [0.5, 0.95]"
+            )
+        for name in (
+            "model_runtime_port",
+            "model_runtime_max_model_len",
+            "model_runtime_max_num_seqs",
+            "model_runtime_startup_timeout_seconds",
+            "model_runtime_request_timeout_seconds",
+        ):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ValueError("%s must be a positive integer" % name)
+        if not self.model_runtime_shm_size:
+            raise ValueError("model_runtime_shm_size must be non-empty")
+        for name in ("model_runtime_disk_safety_ratio", "model_runtime_ram_safety_ratio"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+                raise ValueError("%s must be positive" % name)
 
     @classmethod
     def load(cls, path: str = None) -> "HarnessConfig":

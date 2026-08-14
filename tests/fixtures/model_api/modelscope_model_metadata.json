@@ -1,0 +1,50 @@
+{
+  "Code": 200,
+  "Data": {
+    "Revision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "License": "apache-2.0",
+    "Private": false,
+    "Files": [
+      {
+        "Path": "config.json",
+        "Size": 700,
+        "Sha256": "c0f16e0000000000000000000000000000000000000000000000000000000000"
+      },
+      {
+        "Path": "tokenizer.json",
+        "Size": 7000000,
+        "Sha256": "c0f16e2222222222222222222222222222222222222222222222222222222222"
+      },
+      {
+        "Path": "tokenizer_config.json",
+        "Size": 1500,
+        "Sha256": "c0f16e3333333333333333333333333333333333333333333333333333333333"
+      },
+      {
+        "Path": "model.safetensors.index.json",
+        "Size": 3000,
+        "Sha256": "c0f16e6666666666666666666666666666666666666666666666666666666666"
+      },
+      {
+        "Path": "model-00001-of-00004.safetensors",
+        "Size": 4000000000,
+        "Sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      {
+        "Path": "model-00002-of-00004.safetensors",
+        "Size": 4000000000,
+        "Sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      {
+        "Path": "model-00003-of-00004.safetensors",
+        "Size": 4000000000,
+        "Sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      {
+        "Path": "model-00004-of-00004.safetensors",
+        "Size": 3000000000,
+        "Sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+      }
+    ]
+  }
+}

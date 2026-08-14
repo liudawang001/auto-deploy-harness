@@ -343,3 +343,59 @@ class ModelPrepareModule:
 
     def _first_git_error(self, git_lfs_result: Dict, git_submodule_result: Dict):
         return git_lfs_result.get("error") or git_submodule_result.get("error")
+
+    def prepare_frozen(
+        self,
+        run_dir: Path,
+        plan,
+        decision,
+        cache_dir: Optional[Path] = None,
+        disk_safety_ratio: float = 1.2,
+        progress_callback: Optional[Callable[[Dict], None]] = None,
+    ) -> StageResult:
+        """Consume a frozen ModelFilePlan + allowed ResourceDecision (Document A).
+
+        Downloads exactly plan.files, re-verifies required files, and writes the
+        atomic complete marker. Does NOT re-resolve the model or re-scan the repo.
+        """
+        if getattr(decision, "status", None) != "allowed":
+            return StageResult(
+                "model_prepare",
+                "blocked",
+                "resource decision is not allowed: %s" % getattr(decision, "status", ""),
+                {"status": getattr(decision, "status", "blocked")},
+            )
+        model_identity = getattr(plan, "model_identity", "") or ""
+        if ":" not in model_identity:
+            return StageResult("model_prepare", "failed", "invalid model identity", {})
+        source = model_identity.split(":", 1)[0]
+        rest = model_identity.split(":", 1)[1]
+        repo_id, revision = rest.rsplit("@", 1) if "@" in rest else (rest, "")
+        downloader = (
+            self.huggingface_downloader if source == "huggingface" else self.modelscope_downloader
+        )
+        cache_path = Path(cache_dir) if cache_dir else Path(plan.model_identity.replace(":", "_").replace("/", "_"))
+        result = downloader.download_plan(
+            repo_id, revision, plan, cache_path,
+            progress_callback=progress_callback,
+            disk_safety_ratio=disk_safety_ratio,
+        )
+        if result.get("status") == "complete":
+            return StageResult(
+                "model_prepare",
+                "passed",
+                "frozen model file plan downloaded and verified",
+                {
+                    "status": "complete",
+                    "complete_marker_path": result.get("complete_marker_path", ""),
+                    "cache_dir": str(cache_path),
+                },
+                evidence=[result.get("complete_marker_path", "")] if result.get("complete_marker_path") else [],
+            )
+        return StageResult(
+            "model_prepare",
+            "failed",
+            result.get("status", "failed"),
+            result,
+            error=result.get("error") or result.get("status", "failed"),
+        )

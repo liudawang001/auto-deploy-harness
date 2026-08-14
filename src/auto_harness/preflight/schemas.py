@@ -67,3 +67,36 @@ class EnvironmentPostcheckEvidence:
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
+
+
+@dataclass
+class HostResourceSnapshot:
+    """RAM + cache filesystem facts for the model resource decision."""
+    schema_version: int = 1
+    collected_at: str = ""
+    cache_root: str = ""
+    ram_total_bytes: int = 0
+    ram_available_bytes: int = 0
+    disk_total_bytes: int = 0
+    disk_used_bytes: int = 0
+    disk_free_bytes: int = 0
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class DockerGpuSnapshot:
+    """Docker daemon + NVIDIA Container Toolkit + container-visible GPU facts."""
+    schema_version: int = 1
+    status: str = "not_probed"
+    client_version: str = ""
+    server_version: str = ""
+    daemon_accessible: bool = False
+    nvidia_container_toolkit: bool = False
+    container_gpus: List[Dict[str, Any]] = field(default_factory=list)
+    probe_image: str = ""
+    errors: List[str] = field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)

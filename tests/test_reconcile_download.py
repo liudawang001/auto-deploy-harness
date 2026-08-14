@@ -348,3 +348,52 @@ class TestContinueOffsetIntegration:
         assert result["decision"] == "continue"
         assert result["observed_state"]["offset"] == 8192
         assert result["observed_state"]["offset"] == 8192
+
+
+# -------------------------------------------------------------------
+# Plan download sidecar metadata integration (Document A Phase A5).
+# -------------------------------------------------------------------
+
+class TestPlanDownloadSidecar:
+    def test_download_plan_writes_reconcile_sidecar(self, tmp_path):
+        """Frozen-plan download writes the .auto_harness_meta.json sidecar
+        that DownloadReconciler / partial metadata helpers depend on."""
+        import hashlib
+        from auto_harness.assets.huggingface import HuggingFaceDownloader
+        from auto_harness.model_runtime.schemas import ModelFilePlan
+
+        content = b"plan-data"
+        digest = hashlib.sha256(content).hexdigest()
+
+        class FakeResp:
+            def __init__(self, body, status=200):
+                self._body = body
+                self.status = status
+            def __enter__(self):
+                return self
+            def __exit__(self, *exc):
+                return False
+            def read(self, size=-1):
+                if size is None or size < 0:
+                    size = len(self._body)
+                chunk = self._body[:size]
+                self._body = self._body[size:]
+                return chunk
+
+        def fake_urlopen(req, timeout):
+            return FakeResp(content, status=200)
+
+        cache_dir = tmp_path / "cache"
+        files = [
+            {"path": "model.safetensors", "role": "weight_shard", "size_bytes": len(content), "sha256": digest, "etag": None, "required": True},
+        ]
+        plan = ModelFilePlan(model_identity="huggingface:org/model@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", files=files, total_size_bytes=len(content))
+        plan.plan_hash = plan.compute_plan_hash()
+        result = HuggingFaceDownloader(urlopen=fake_urlopen, token="").download_plan(
+            "org/model", "a" * 40, plan, cache_dir
+        )
+        assert result["status"] == "complete"
+        sidecar = cache_dir / "model.safetensors.auto_harness_meta.json"
+        assert sidecar.exists()
+        meta = json.loads(sidecar.read_text(encoding="utf-8"))
+        assert meta["sha256"] == digest

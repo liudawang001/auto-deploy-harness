@@ -1,0 +1,62 @@
+[
+  {
+    "type": "file",
+    "path": "config.json",
+    "size": 700
+  },
+  {
+    "type": "file",
+    "path": "generation_config.json",
+    "size": 200
+  },
+  {
+    "type": "file",
+    "path": "tokenizer.json",
+    "size": 7000000
+  },
+  {
+    "type": "file",
+    "path": "tokenizer_config.json",
+    "size": 1500
+  },
+  {
+    "type": "file",
+    "path": "special_tokens_map.json",
+    "size": 400
+  },
+  {
+    "type": "file",
+    "path": "model.safetensors.index.json",
+    "size": 3000,
+    "oid": "c0f16e6666666666666666666666666666666666666666666666666666666666"
+  },
+  {
+    "type": "file",
+    "path": "model-00001-of-00004.safetensors",
+    "size": 4000000000,
+    "oid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  {
+    "type": "file",
+    "path": "model-00002-of-00004.safetensors",
+    "size": 4000000000,
+    "oid": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  {
+    "type": "file",
+    "path": "model-00003-of-00004.safetensors",
+    "size": 4000000000,
+    "oid": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+  },
+  {
+    "type": "file",
+    "path": "model-00004-of-00004.safetensors",
+    "size": 3000000000,
+    "oid": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+  },
+  {
+    "type": "file",
+    "path": "README.md",
+    "size": 5000
+  }
+]

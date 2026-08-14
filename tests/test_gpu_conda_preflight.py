@@ -647,3 +647,59 @@ def test_preflight_service_writes_complete_evidence_bundle(tmp_path):
         "policy_decision",
     }
     assert all(Path(path).exists() for path in result["evidence_paths"].values())
+
+
+def test_preflight_model_inference_collects_storage_and_docker(tmp_path):
+    """With model_inference enabled, storage + docker GPU facts enter the bundle."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    class GpuProbe:
+        def probe(self):
+            return {"status": "not_found", "devices": [], "errors": []}
+
+    class RuntimeProbe:
+        def probe(self):
+            return {
+                "conda": {"available": False, "path": ""},
+                "mamba": {"available": False, "path": ""},
+                "micromamba": {"available": False, "path": ""},
+            }
+
+    class InventoryProbe:
+        def probe(self, *args, **kwargs):
+            return {
+                "schema_version": 1, "tool": "", "tool_path": "",
+                "root_prefix": "", "active_prefix": "", "environments": [], "errors": [],
+            }
+
+    class StorageProbe:
+        def probe(self, cache_root):
+            return {"ram_total_bytes": 1, "ram_available_bytes": 1,
+                    "disk_total_bytes": 10, "disk_free_bytes": 5, "cache_root": str(cache_root)}
+
+    class DockerGpuProbe:
+        def probe(self, gpu_index=0):
+            return {"status": "no_docker_client", "errors": ["docker not found"],
+                    "container_gpus": [], "probe_image": "x"}
+
+    result = HostPreflightService(
+        gpu_probe=GpuProbe(),
+        runtime_probe=RuntimeProbe(),
+        inventory_probe=InventoryProbe(),
+        storage_probe=StorageProbe(),
+        docker_gpu_probe=DockerGpuProbe(),
+    ).run(
+        repo,
+        {},
+        {"gpu_required": False},
+        HarnessConfig(env_backend="venv", model_inference_enabled=True, model_cache_dir=str(tmp_path / "cache")),
+        run_dir=tmp_path / "run",
+    )
+    assert result["host_resources"]["disk_total_bytes"] == 10
+    assert result["docker_gpu"]["status"] == "no_docker_client"
+    assert set(result["evidence_paths"]) == {
+        "host_capabilities", "gpu_probe", "conda_runtime_probe",
+        "conda_environment_inventory", "compatibility_decision", "policy_decision",
+        "host_resources", "docker_gpu",
+    }

@@ -1,0 +1,32 @@
+[
+  {
+    "path": "config.json",
+    "size_bytes": 700,
+    "sha256": "c0f16e0000000000000000000000000000000000000000000000000000000000",
+    "etag": null
+  },
+  {
+    "path": "tokenizer.json",
+    "size_bytes": 1000000,
+    "sha256": "c0f16e2222222222222222222222222222222222222222222222222222222222",
+    "etag": null
+  },
+  {
+    "path": "tokenizer_config.json",
+    "size_bytes": 1500,
+    "sha256": "c0f16e3333333333333333333333333333333333333333333333333333333333",
+    "etag": null
+  },
+  {
+    "path": "model.safetensors",
+    "size_bytes": 5000000,
+    "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "etag": null
+  },
+  {
+    "path": "README.md",
+    "size_bytes": 5000,
+    "sha256": null,
+    "etag": null
+  }
+]

@@ -6,10 +6,12 @@ from typing import Dict
 from auto_harness.env import CondaEnvironmentParser
 from auto_harness.preflight.compatibility import EnvironmentCompatibilityResolver
 from auto_harness.preflight.conda import CondaInventoryProbe, CondaRuntimeProbe
+from auto_harness.preflight.container import DockerGpuProbe
 from auto_harness.preflight.evidence import PreflightEvidenceWriter
 from auto_harness.preflight.gpu import NvidiaGpuProbe
 from auto_harness.preflight.policy import EnvironmentPreflightPolicy
 from auto_harness.preflight.schemas import HostCapabilitySnapshot
+from auto_harness.preflight.storage import StorageProbe
 from auto_harness.utils.time import utc_now_iso
 
 
@@ -21,12 +23,16 @@ class HostPreflightService:
         inventory_probe=None,
         resolver=None,
         policy=None,
+        storage_probe=None,
+        docker_gpu_probe=None,
     ) -> None:
         self.gpu_probe = gpu_probe or NvidiaGpuProbe()
         self.runtime_probe = runtime_probe or CondaRuntimeProbe()
         self.inventory_probe = inventory_probe or CondaInventoryProbe()
         self.resolver = resolver or EnvironmentCompatibilityResolver()
         self.policy = policy or EnvironmentPreflightPolicy()
+        self.storage_probe = storage_probe or StorageProbe()
+        self.docker_gpu_probe = docker_gpu_probe
 
     def run(
         self,
@@ -44,6 +50,14 @@ class HostPreflightService:
         )
         gpu = self.gpu_probe.probe()
         runtimes = self.runtime_probe.probe()
+        model_inference = bool(getattr(config, "model_inference_enabled", False))
+        host_resources: Dict = {}
+        docker_gpu: Dict = {}
+        if model_inference:
+            host_resources = self.storage_probe.probe(
+                getattr(config, "model_cache_path", None) or Path("model_cache")
+            )
+            docker_gpu = self._probe_docker_gpu(config, gpu)
         capabilities = HostCapabilitySnapshot(
             collected_at=utc_now_iso(),
             host={
@@ -88,11 +102,25 @@ class HostPreflightService:
                 "compatibility_decision": writer.write("compatibility_decision", decision),
                 "policy_decision": writer.write("policy_decision", policy),
             }
+            if model_inference:
+                paths["host_resources"] = writer.write("host_resources", host_resources)
+                paths["docker_gpu"] = writer.write("docker_gpu", docker_gpu)
         return {
             "capabilities": capabilities,
             "conda_file": conda_file,
             "conda_inventory": inventory,
             "compatibility_decision": decision,
             "policy": policy,
+            "host_resources": host_resources,
+            "docker_gpu": docker_gpu,
             "evidence_paths": paths,
         }
+
+    def _probe_docker_gpu(self, config, gpu: Dict) -> Dict:
+        probe_image = getattr(config, "docker_gpu_probe_image", "") or None
+        if self.docker_gpu_probe is None:
+            devices = gpu.get("devices") or []
+            selected = int(devices[0].get("index", 0)) if devices else 0
+            self.docker_gpu_probe = DockerGpuProbe(probe_image=probe_image)
+            return self.docker_gpu_probe.probe(selected)
+        return self.docker_gpu_probe.probe(0)

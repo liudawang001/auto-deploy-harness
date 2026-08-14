@@ -1,0 +1,44 @@
+[
+  {
+    "path": "config.json",
+    "size_bytes": 700,
+    "sha256": "c0f16e0000000000000000000000000000000000000000000000000000000000",
+    "etag": null
+  },
+  {
+    "path": "tokenizer.json",
+    "size_bytes": 1000000,
+    "sha256": "c0f16e2222222222222222222222222222222222222222222222222222222222",
+    "etag": null
+  },
+  {
+    "path": "tokenizer_config.json",
+    "size_bytes": 1500,
+    "sha256": "c0f16e3333333333333333333333333333333333333333333333333333333333",
+    "etag": null
+  },
+  {
+    "path": "model.safetensors.index.json",
+    "size_bytes": 3000,
+    "sha256": "c0f16e6666666666666666666666666666666666666666666666666666666666",
+    "etag": null
+  },
+  {
+    "path": "model-00001-of-00004.safetensors",
+    "size_bytes": 4000000000,
+    "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "etag": null
+  },
+  {
+    "path": "model-00002-of-00004.safetensors",
+    "size_bytes": 4000000000,
+    "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "etag": null
+  },
+  {
+    "path": "model-00003-of-00004.safetensors",
+    "size_bytes": 4000000000,
+    "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "etag": null
+  }
+]

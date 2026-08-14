@@ -1,8 +1,9 @@
 import hashlib
 import json
+import shutil
 import time
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 
 class ResumableDownloadMixin:
@@ -131,3 +132,88 @@ class ResumableDownloadMixin:
             for chunk in iter(lambda: f.read(1024 * 1024), b""):
                 digest.update(chunk)
         return digest.hexdigest()
+
+    # ------------------------------------------------------------------
+    # Frozen ModelFilePlan download (Document A Phase A5).
+    # ------------------------------------------------------------------
+
+    def _precheck_disk(self, cache_path: Path, files: List[Dict], disk_safety_ratio: float) -> Dict:
+        """Compute remaining bytes and fail before any large request if disk is short."""
+        remaining = 0
+        reusable = 0
+        for item in files:
+            rel_path = item["path"]
+            target = cache_path / rel_path
+            expected = item.get("size_bytes")
+            sha256 = item.get("sha256")
+            etag = item.get("etag")
+            if target.exists() and self._target_valid(target, expected, sha256, etag):
+                continue
+            part = target.with_name(target.name + ".part")
+            part_size = part.stat().st_size if part.exists() else 0
+            reusable += part_size
+            remaining += max(0, int(expected or 0) - part_size)
+        actual_peak = remaining
+        required_free = int(actual_peak * float(disk_safety_ratio or 1.0))
+        free = shutil.disk_usage(str(cache_path)).free
+        return {
+            "remaining_download_bytes": remaining,
+            "partial_bytes_reusable": reusable,
+            "temporary_peak_bytes": actual_peak,
+            "required_free_bytes": required_free,
+            "available_free_bytes": free,
+            "sufficient": free >= required_free,
+        }
+
+    def _finalize_plan(self, plan, cache_path: Path, progress_callback=None) -> Dict:
+        """Re-verify every required file and atomically write the complete marker."""
+        from auto_harness.model_runtime.schemas import CacheCompleteMarker
+        from auto_harness.models.base import write_json
+        from auto_harness.utils.time import utc_now_iso
+
+        required = [f for f in plan.files if f.get("required")]
+        marker_files: List[Dict] = []
+        failed: List[str] = []
+        for item in required:
+            rel_path = item["path"]
+            target = cache_path / rel_path
+            sha = item.get("sha256")
+            size = item.get("size_bytes")
+            if not target.exists():
+                failed.append(rel_path)
+                continue
+            if isinstance(size, int) and target.stat().st_size != size:
+                failed.append(rel_path)
+                continue
+            if sha and self._sha256(target) != sha:
+                failed.append(rel_path)
+                continue
+            marker_files.append({
+                "path": rel_path,
+                "size_bytes": target.stat().st_size,
+                "sha256": sha,
+            })
+        if failed:
+            return {
+                "status": "integrity_failed",
+                "failed_files": failed,
+                "complete_marker_path": "",
+            }
+        marker = CacheCompleteMarker(
+            status="complete",
+            model_identity=plan.model_identity,
+            file_plan_hash=plan.plan_hash,
+            files=marker_files,
+            verified_at=utc_now_iso(),
+        )
+        marker.marker_hash = marker.compute_marker_hash()
+        marker_path = cache_path / ".auto_harness_complete.json"
+        write_json(marker_path, marker)
+        if progress_callback:
+            progress_callback({"status": "complete_marker_written", "current_file": ""})
+        return {
+            "status": "complete",
+            "complete_marker_path": str(marker_path),
+            "marker_hash": marker.marker_hash,
+            "verified_files": len(marker_files),
+        }

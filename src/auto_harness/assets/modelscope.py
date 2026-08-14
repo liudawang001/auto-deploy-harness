@@ -144,3 +144,45 @@ class ModelScopeDownloader(ResumableDownloadMixin):
             "total_bytes": total,
             "status": status,
         })
+
+    def download_plan(self, repo_id, revision, plan, cache_path, progress_callback=None, disk_safety_ratio=1.2):
+        """Download a frozen ModelFilePlan into a revision-bound cache directory."""
+        asset = ModelAsset(
+            asset_id="modelscope:%s" % repo_id,
+            source="modelscope",
+            repo_id=repo_id,
+            revision=revision,
+        )
+        return self._run_plan(asset, plan, cache_path, progress_callback, disk_safety_ratio)
+
+    def _run_plan(self, asset, plan, cache_path, progress_callback, disk_safety_ratio):
+        cache_path = Path(cache_path)
+        cache_path.mkdir(parents=True, exist_ok=True)
+        files = [
+            {
+                "path": f["path"],
+                "size_bytes": f.get("size_bytes"),
+                "sha256": f.get("sha256"),
+                "etag": f.get("etag"),
+            }
+            for f in plan.files
+        ]
+        precheck = self._precheck_disk(cache_path, files, disk_safety_ratio)
+        if not precheck["sufficient"]:
+            return {
+                "status": "insufficient_disk",
+                "precheck": precheck,
+                "complete_marker_path": "",
+            }
+        try:
+            self._download_files(asset, files, cache_path, progress_callback)
+        except Exception as exc:  # noqa: BLE001 - persisted into the result
+            return {
+                "status": "download_failed",
+                "error": str(exc),
+                "precheck": precheck,
+                "complete_marker_path": "",
+            }
+        result = self._finalize_plan(plan, cache_path, progress_callback)
+        result["precheck"] = precheck
+        return result

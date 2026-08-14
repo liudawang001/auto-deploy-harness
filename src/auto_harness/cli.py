@@ -37,6 +37,16 @@ def _positive_int_arg(value: str) -> int:
     return parsed
 
 
+def _gpu_memory_utilization_arg(value: str) -> float:
+    try:
+        parsed = float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("value must be a number")
+    if not (0.5 <= parsed <= 0.95):
+        raise argparse.ArgumentTypeError("value must be within [0.5, 0.95]")
+    return parsed
+
+
 def _add_llm_runtime_arguments(parser) -> None:
     parser.add_argument("--model", default=None)
     parser.add_argument(
@@ -49,6 +59,27 @@ def _add_llm_runtime_arguments(parser) -> None:
         type=_positive_int_arg,
         default=None,
     )
+
+
+def _add_model_inference_arguments(parser) -> None:
+    parser.add_argument(
+        "--model-inference",
+        action="store_true",
+        default=False,
+        help="enable the model preparation and inference deployment chain",
+    )
+    parser.add_argument("--model-runtime", choices=["vllm"], default=None)
+    parser.add_argument("--model-runtime-image", default=None)
+    parser.add_argument("--model-max-model-len", type=_positive_int_arg, default=None)
+    parser.add_argument(
+        "--model-gpu-memory-utilization",
+        type=_gpu_memory_utilization_arg,
+        default=None,
+    )
+    parser.add_argument("--model-startup-timeout", type=_positive_int_arg, default=None)
+    parser.add_argument("--model-request-timeout", type=_positive_int_arg, default=None)
+    parser.add_argument("--model-id-override", default=None)
+    parser.add_argument("--model-revision-override", default=None)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -85,6 +116,7 @@ def build_parser() -> argparse.ArgumentParser:
     deploy.add_argument("--docker-network", default=None)
     deploy.add_argument("--docker-gpus", default=None)
     deploy.add_argument("--docker-model-cache-dir", default=None)
+    _add_model_inference_arguments(deploy)
     deploy.add_argument("--agent-enable-plan-gate", action="store_true", default=False)
     deploy.add_argument("--agent-enable-runner-gate", action="store_true", default=False)
     deploy.add_argument("--agent-enable-env-gate", action="store_true", default=False)
@@ -121,6 +153,7 @@ def build_parser() -> argparse.ArgumentParser:
     resume.add_argument("--docker-network", default=None)
     resume.add_argument("--docker-gpus", default=None)
     resume.add_argument("--docker-model-cache-dir", default=None)
+    _add_model_inference_arguments(resume)
     resume.add_argument("--controller", choices=["legacy", "langgraph"], default=None)
     _add_llm_runtime_arguments(resume)
 
@@ -313,6 +346,24 @@ def _apply_cli_overrides(config: HarnessConfig, args) -> None:
         config.docker_gpus = args.docker_gpus
     if getattr(args, "docker_model_cache_dir", None):
         config.docker_model_cache_dir = args.docker_model_cache_dir
+    if getattr(args, "model_inference", False):
+        config.model_inference_enabled = True
+    if getattr(args, "model_runtime", None):
+        config.model_runtime = args.model_runtime
+    if getattr(args, "model_runtime_image", None):
+        config.model_runtime_image = args.model_runtime_image
+    if getattr(args, "model_max_model_len", None) is not None:
+        config.model_runtime_max_model_len = args.model_max_model_len
+    if getattr(args, "model_gpu_memory_utilization", None) is not None:
+        config.model_runtime_gpu_memory_utilization = args.model_gpu_memory_utilization
+    if getattr(args, "model_startup_timeout", None) is not None:
+        config.model_runtime_startup_timeout_seconds = args.model_startup_timeout
+    if getattr(args, "model_request_timeout", None) is not None:
+        config.model_runtime_request_timeout_seconds = args.model_request_timeout
+    if getattr(args, "model_id_override", None):
+        config.model_id_override = args.model_id_override
+    if getattr(args, "model_revision_override", None):
+        config.model_revision_override = args.model_revision_override
     if getattr(args, "agent_self_heal", False):
         config.agent_mode = "gated_actor"
         config.agent_enable_log_diagnosis = True
