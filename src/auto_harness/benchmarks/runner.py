@@ -653,6 +653,12 @@ class BenchmarkRunner:
             new_dir.mkdir(parents=True)
             (old_dir / "model.bin").write_bytes(b"old")
             (new_dir / "model.bin").write_bytes(b"newer")
+            # Pin deterministic mtimes so `old` always sorts before `new`,
+            # regardless of filesystem timestamp resolution (which can collide
+            # on CI filesystems and make the eviction order ambiguous).
+            now = time.time()
+            os.utime(old_dir, (now - 100, now - 100))
+            os.utime(new_dir, (now, now))
             plan = cache.cleanup(max_total_bytes=5, dry_run=True)
             applied = cache.cleanup(max_total_bytes=5, dry_run=False)
             ok = plan["candidate_count"] == 1 and len(applied["deleted"]) == 1 and not old_dir.exists() and new_dir.exists()
