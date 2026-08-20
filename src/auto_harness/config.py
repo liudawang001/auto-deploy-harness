@@ -77,6 +77,9 @@ class HarnessConfig:
     # backward-compatible default; native tools require explicit enablement.
     provider_protocol: str = "json_action"  # json_action | native_tools | auto
     native_tool_calling: Dict[str, Any] = None
+    # Optional evidence retrieval. Lexical mode is fully offline; dense and
+    # hybrid modes require an explicitly configured embedding provider.
+    retrieval: Dict[str, Any] = None
     provider_configs: Dict[str, Dict[str, Any]] = None
     agent_max_input_chars: int = 20000
     agent_max_file_chars: int = 6000
@@ -300,6 +303,89 @@ class HarnessConfig:
                 **native_defaults,
                 **self.native_tool_calling,
             }
+        retrieval_defaults = {
+            "enabled": False,
+            "mode": "lexical",
+            "fail_closed": False,
+            "sources": ["repository", "verified_memory"],
+            "lexical_backend": "auto",
+            "dense_enabled": False,
+            "embedding_provider": "disabled",
+            "embedding_model": "",
+            "external_embedding_enabled": False,
+            "embedding_api_base": "",
+            "embedding_api_key_env": "AUTO_HARNESS_RETRIEVAL_EMBEDDING_API_KEY",
+            "embedding_dimension": 1536,
+            "embedding_timeout_seconds": 30,
+            "vector_backend": "exact",
+            "reranker": "disabled",
+            "default_top_k": 8,
+            "max_top_k": 12,
+            "lexical_top_n": 30,
+            "dense_top_n": 30,
+            "fusion_top_n": 20,
+            "max_query_chars": 500,
+            "max_context_tokens": 3000,
+            "max_hit_tokens": 640,
+            "max_hits_per_document": 3,
+            "max_tool_calls_per_stage": 2,
+            "max_repository_chunks": 50000,
+            "index_runtime_logs": True,
+            "share_unverified_memory": False,
+            "tool_result_redaction": True,
+        }
+        if self.retrieval is None:
+            self.retrieval = retrieval_defaults
+        elif not isinstance(self.retrieval, dict):
+            raise ValueError("retrieval must be an object")
+        else:
+            self.retrieval = {**retrieval_defaults, **self.retrieval}
+        if self.retrieval["mode"] not in {"lexical", "dense", "hybrid"}:
+            raise ValueError("retrieval.mode must be lexical, dense or hybrid")
+        if self.retrieval["lexical_backend"] not in {"auto", "fts5", "python"}:
+            raise ValueError("retrieval.lexical_backend must be auto, fts5 or python")
+        if self.retrieval["vector_backend"] != "exact":
+            raise ValueError("retrieval.vector_backend must be exact in v1")
+        if self.retrieval["reranker"] not in {"disabled", "identity"}:
+            raise ValueError("retrieval.reranker must be disabled or identity in v1")
+        if self.retrieval["embedding_provider"] not in {"disabled", "fake", "openai_compatible"}:
+            raise ValueError("retrieval.embedding_provider is unsupported")
+        for name in (
+            "enabled", "fail_closed", "dense_enabled",
+            "external_embedding_enabled", "index_runtime_logs",
+            "share_unverified_memory", "tool_result_redaction",
+        ):
+            if not isinstance(self.retrieval.get(name), bool):
+                raise ValueError("retrieval.%s must be boolean" % name)
+        for name in (
+            "default_top_k", "max_top_k", "lexical_top_n", "dense_top_n",
+            "fusion_top_n", "max_query_chars", "max_context_tokens",
+            "max_hit_tokens", "max_hits_per_document",
+            "max_tool_calls_per_stage", "max_repository_chunks",
+            "embedding_dimension", "embedding_timeout_seconds",
+        ):
+            value = self.retrieval.get(name)
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ValueError("retrieval.%s must be a positive integer" % name)
+        if self.retrieval["default_top_k"] > self.retrieval["max_top_k"] or self.retrieval["max_top_k"] > 12:
+            raise ValueError("retrieval top-k must satisfy default <= max <= 12")
+        allowed_retrieval_sources = {
+            "repository", "runtime_evidence", "runtime_log",
+            "issue_memory", "verified_memory", "active_skill",
+        }
+        if not isinstance(self.retrieval.get("sources"), list) or not set(self.retrieval["sources"]).issubset(allowed_retrieval_sources):
+            raise ValueError("retrieval.sources contains unsupported values")
+        if self.retrieval["mode"] in {"dense", "hybrid"} and not self.retrieval["dense_enabled"]:
+            raise ValueError("dense/hybrid retrieval requires retrieval.dense_enabled=true")
+        if self.retrieval["dense_enabled"] and self.retrieval["embedding_provider"] == "disabled":
+            raise ValueError("dense retrieval requires an embedding provider")
+        if self.retrieval["embedding_provider"] == "openai_compatible" and not self.retrieval["external_embedding_enabled"]:
+            raise ValueError("external embedding provider requires explicit enablement")
+        if self.retrieval["embedding_provider"] == "openai_compatible":
+            if not str(self.retrieval.get("embedding_api_base", "")).startswith("https://"):
+                raise ValueError("external embedding api base must use https")
+            if not self.retrieval.get("embedding_model") or not self.retrieval.get("embedding_api_key_env"):
+                raise ValueError("external embedding model and API key env name are required")
         if self.provider_protocol not in {"json_action", "native_tools", "auto"}:
             raise ValueError(
                 "provider_protocol must be json_action, native_tools or auto"
