@@ -372,6 +372,7 @@ class CapabilityMatrix:
             "evidence": ["tests/test_provider_protocol.py"],
         }
         capabilities["native_tool_calling"] = self._native_tool_readiness()
+        capabilities["evidence_retrieval"] = self._retrieval_readiness(reports_dir)
 
         # 9. self_repair_closure
         capabilities["self_repair_closure"] = {
@@ -440,6 +441,67 @@ class CapabilityMatrix:
             except (OSError, ValueError):
                 manifest = {}
         return ModelRuntimeReadiness(self.project_root).assess(manifest=manifest)
+
+    def _retrieval_readiness(self, reports_dir: Path) -> Dict[str, Any]:
+        """Report retrieval levels without treating fake embeddings as live proof."""
+        implementation = self.project_root / "src" / "auto_harness" / "retrieval" / "service.py"
+        eval_path = Path(reports_dir) / "retrieval_eval_result.json"
+        eval_report = {}
+        if eval_path.exists():
+            try:
+                eval_report = json.loads(eval_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                return {
+                    "status": "failed", "evidence": [str(eval_path)],
+                    "details": {"readiness_level": "implemented", "reason": "invalid_eval_report"},
+                }
+        lexical = bool(
+            eval_report.get("status") == "completed"
+            and int(eval_report.get("case_count", 0) or 0) >= 30
+            and eval_report.get("lexical_tests_passed") is True
+        )
+        hybrid_fake = bool(lexical and eval_report.get("hybrid_fake_tests_passed") is True)
+        live_path = self.project_root / "docs" / "evidence" / "retrieval-live-embedding-manifest.json"
+        live = {}
+        if live_path.exists():
+            try:
+                live = json.loads(live_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                live = {}
+        live_verified = bool(
+            live.get("network_transport") == "live"
+            and str(live.get("provider_name", "")).lower() not in {"", "fake", "mock"}
+            and int(live.get("embedding_request_count", 0) or 0) > 0
+            and live.get("final_status") in {"passed", "completed"}
+            and live.get("credential_values_persisted") is not True
+        )
+        if live_verified:
+            level = "hybrid_live_verified"
+        elif hybrid_fake:
+            level = "hybrid_fake_verified"
+        elif lexical:
+            level = "lexical_verified"
+        else:
+            level = "implemented" if implementation.exists() else "not_implemented"
+        evidence = [str(implementation.relative_to(self.project_root))] if implementation.exists() else []
+        if eval_report:
+            try:
+                evidence.append(str(eval_path.relative_to(self.project_root)))
+            except ValueError:
+                evidence.append(str(eval_path))
+        if live_verified:
+            evidence.append(str(live_path.relative_to(self.project_root)))
+        return {
+            "status": "validated" if live_verified else ("integrated" if lexical else "implemented"),
+            "evidence": evidence,
+            "details": {
+                "readiness_level": level,
+                "lexical_verified": lexical,
+                "hybrid_fake_verified": hybrid_fake,
+                "hybrid_live_verified": live_verified,
+                "external_embedding_default_enabled": False,
+            },
+        }
 
     def _native_tool_readiness(self) -> Dict[str, Any]:
         """Report verified native-tool levels without promoting fake evidence."""

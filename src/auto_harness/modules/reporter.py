@@ -136,6 +136,35 @@ class ReportGenerator:
                 "- Stop reason: `%s`" % native_tools.get("stop_reason", ""),
                 "",
             ])
+        retrieval = self._read_optional(Path(run_dir) / "reports" / "retrieval_summary.json")
+        if isinstance(retrieval, dict) and retrieval:
+            lines.extend([
+                "## Evidence Retrieval",
+                "",
+                "- Requested/effective mode: `%s` / `%s`" % (
+                    retrieval.get("mode_requested", ""), retrieval.get("mode_effective", ""),
+                ),
+                "- Documents/chunks: `%s` / `%s`" % (
+                    retrieval.get("documents", 0), retrieval.get("chunks", 0),
+                ),
+                "- Queries/hits: `%s` / `%s`" % (
+                    retrieval.get("queries", 0), retrieval.get("hits_returned", 0),
+                ),
+                "- Exact reads/accepted grounding: `%s` / `%s`" % (
+                    retrieval.get("hits_exactly_read", 0), retrieval.get("hits_grounding_accepted", 0),
+                ),
+                "- Retrieval tokens: `%s`" % retrieval.get("retrieval_tokens", 0),
+                "- Latency P50/P95 ms: `%s` / `%s`" % (
+                    retrieval.get("latency_ms_p50", 0), retrieval.get("latency_ms_p95", 0),
+                ),
+                "- Degraded: `%s`" % str(bool(retrieval.get("degraded"))).lower(),
+                "- RAG helped/required: `%s` / `%s`" % (
+                    str(bool(retrieval.get("rag_helped"))).lower(),
+                    str(bool(retrieval.get("rag_required"))).lower(),
+                ),
+                "- Evidence: `retrieval/index_manifest.json`, `retrieval/queries.jsonl`, `reports/retrieval_contribution.json`",
+                "",
+            ])
         command_authorization = self._command_authorization_summary(run_dir, results)
         if command_authorization:
             write_json(
