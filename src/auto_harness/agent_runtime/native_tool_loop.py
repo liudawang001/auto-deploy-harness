@@ -78,8 +78,10 @@ class NativeToolTurnLoop:
         if max_turns < 1 or max_calls_per_turn < 1:
             raise ValueError("native tool loop bounds must be positive")
         self.provider = provider
-        self.registry = registry or ToolRegistry()
-        self.executor = executor or NativeToolExecutorRouter(registry=self.registry)
+        self.registry = registry or ToolRegistry(config=config)
+        self.executor = executor or NativeToolExecutorRouter(
+            config=config, registry=self.registry,
+        )
         self.stage = stage
         self.agent_mode = agent_mode
         self.allowed_categories = tuple(allowed_categories)
@@ -303,6 +305,8 @@ class NativeToolTurnLoop:
                         **context,
                         "agent_mode": self.agent_mode,
                         "stage": self.stage,
+                        "task_id": task_id,
+                        "repository_fingerprint": repository_fingerprint,
                     }
                     if self.run_dir is not None:
                         execution_context["run_dir"] = str(self.run_dir)

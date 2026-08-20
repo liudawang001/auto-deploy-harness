@@ -379,7 +379,7 @@ class LLMDeploymentPlanner:
             observations or [], observation_tokens
         )
         bounded_skills = fit_value_to_budget(skill_context or {}, skill_budget)
-        tools = ToolRegistry().executable_for_stage(
+        tools = ToolRegistry(config=self.config).executable_for_stage(
             "replan" if phase == "replan" else "plan",
             agent_mode="planner",
         )
@@ -1108,8 +1108,14 @@ class PlanFirstDeploymentLoop:
             "remaining_tokens": max(0, self._cfg("agent_repo_observation_budget_tokens", 24000) - used_tokens),
             "remaining_files": max(0, self._cfg("agent_repo_max_observed_files", 20) - len(observed_paths)),
         }
+        allowed_tools = {
+            item["name"] for item in ToolRegistry(config=self.config).executable_for_stage(
+                "replan" if phase == "replan" else "plan", agent_mode="planner",
+            )
+        }
         parser = PlannerTurnParser(
-            max_requests=self._cfg("agent_repo_max_requests_per_round", 4)
+            max_requests=self._cfg("agent_repo_max_requests_per_round", 4),
+            allowed_tools=allowed_tools,
         )
         service = RepositoryObservationService(config=self.config)
         while True:
@@ -1154,6 +1160,8 @@ class PlanFirstDeploymentLoop:
                 repository_fingerprint=snapshot.get("repository_fingerprint", ""),
                 round_number=round_number,
                 budget=budget,
+                stage="replan" if phase == "replan" else "plan",
+                run_dir=Path(reports_dir).parent,
             )
             if result.get("status") != "passed":
                 raise RuntimeError(result.get("stop_reason", "repository_observation_failed"))

@@ -179,9 +179,11 @@ class NativeToolExecutorRouter:
     def __init__(self, config: Any = None, registry: Any = None) -> None:
         from auto_harness.tools.registry import ToolRegistry
         from auto_harness.tools.repository_executor import RepositoryToolExecutor
+        from auto_harness.tools.retrieval_executor import RetrievalToolExecutor
 
         self.registry = registry or ToolRegistry()
         self.repository = RepositoryToolExecutor(config=config, registry=self.registry)
+        self.retrieval = RetrievalToolExecutor(config=config, registry=self.registry)
         self.state_delta = StateDeltaToolExecutor(self.registry)
 
     def execute(self, tool_call: ToolCall, context: Dict[str, Any]) -> ToolResult:
@@ -189,6 +191,8 @@ class NativeToolExecutorRouter:
         executor = str(getattr(schema, "executor", ""))
         if executor == "repository":
             return self.repository.execute(tool_call, context)
+        if executor == "retrieval":
+            return self.retrieval.execute(tool_call, context)
         if executor == "state_delta":
             return self.state_delta.execute(tool_call, context)
         return ToolResult(

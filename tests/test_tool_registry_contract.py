@@ -85,6 +85,7 @@ class TestImplementedTools:
             "search_repo",
             "read_selected_files",
             "parse_dependency_files",
+            "retrieve_deployment_context",
             "probe_http",
             "discover_gradio_api",
             "discover_openapi_schema",

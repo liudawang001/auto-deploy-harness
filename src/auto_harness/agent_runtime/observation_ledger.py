@@ -57,6 +57,12 @@ class RepositoryObservationService:
     def __init__(self, config: Any = None, executor=None):
         self.config = config
         self.executor = executor or RepositoryToolExecutor(config=config)
+        from auto_harness.tools.registry import ToolRegistry
+        from auto_harness.tools.retrieval_executor import RetrievalToolExecutor
+        self.registry = ToolRegistry(config=config)
+        self.retrieval_executor = RetrievalToolExecutor(
+            config=config, registry=self.registry,
+        )
 
     def execute_round(
         self,
@@ -67,6 +73,9 @@ class RepositoryObservationService:
         repository_fingerprint: str,
         round_number: int,
         budget: Dict,
+        stage: str = "plan",
+        task_id: str = "",
+        run_dir: Any = None,
     ) -> Dict:
         maximum_rounds = self._cfg("agent_repo_max_observation_rounds", 4)
         if int(round_number) > maximum_rounds:
@@ -113,9 +122,12 @@ class RepositoryObservationService:
             request_id = str(item.get("request_id", ""))
             tool = str(item.get("tool", ""))
             tool_input = item.get("input", {})
-            decision = self.executor.policy.validate_and_normalize(
-                tool, tool_input, Path(repo_dir)
-            )
+            if tool == "retrieve_deployment_context":
+                decision = self._validate_retrieval_input(tool_input, stage)
+            else:
+                decision = self.executor.policy.validate_and_normalize(
+                    tool, tool_input, Path(repo_dir)
+                )
             if not decision.get("allowed"):
                 rejected = self._record(
                     request_id=request_id,
@@ -171,9 +183,19 @@ class RepositoryObservationService:
                 ledger.append(rejected)
                 results.append(rejected)
                 continue
-            tool_result = self.executor.execute(
-                ToolCall(name=tool, input=normalized_input),
-                {"repo_dir": str(repo_dir), "round": round_number},
+            execution_context = {
+                "repo_dir": str(repo_dir), "round": round_number,
+                "stage": stage, "task_id": task_id,
+                "repository_fingerprint": repository_fingerprint,
+                "run_dir": str(run_dir or Path(ledger_path).parent.parent),
+                "requested_by": "json_action",
+            }
+            selected_executor = (
+                self.retrieval_executor
+                if tool == "retrieve_deployment_context" else self.executor
+            )
+            tool_result = selected_executor.execute(
+                ToolCall(name=tool, input=normalized_input), execution_context,
             )
             evidence = tool_result.evidence or {}
             cost = estimate_tokens(evidence)
@@ -210,14 +232,43 @@ class RepositoryObservationService:
                 observation_id=observation_id,
                 normalized_input=normalized_input,
             )
+            if normalized_input.get("retrieved_from_query_id"):
+                result["retrieved_from_query_id"] = normalized_input["retrieved_from_query_id"]
+                result["retrieval_chunk_ids"] = list(normalized_input.get("retrieval_chunk_ids") or [])
             ledger.append(result)
             results.append(result)
+            if normalized_input.get("retrieved_from_query_id") and run_dir:
+                from auto_harness.retrieval.artifacts import RetrievalArtifacts
+                settings = getattr(self.config, "retrieval", {}) if self.config else {}
+                RetrievalArtifacts(Path(run_dir)).finalize(
+                    requested_mode=str(settings.get("mode", "lexical")),
+                )
         next_budget = {
             "remaining_rounds": max(0, maximum_rounds - int(round_number)),
             "remaining_tokens": remaining_tokens,
             "remaining_files": remaining_files,
         }
         return {"status": "passed", "kind": "observation_result", "protocol_version": 1, "round": int(round_number), "results": results, "budget": next_budget}
+
+    def _validate_retrieval_input(self, value: Any, stage: str) -> Dict:
+        schema = self.registry.tools.get("retrieve_deployment_context")
+        visible = {
+            item["name"] for item in self.registry.executable_for_stage(
+                stage, agent_mode="planner",
+            )
+        }
+        if schema is None or schema.name not in visible:
+            return {"allowed": False, "reason": "retrieval is disabled"}
+        try:
+            from auto_harness.providers.protocols import validate_tool_arguments
+            validate_tool_arguments(schema.input_schema, value)
+        except (TypeError, ValueError) as exc:
+            return {"allowed": False, "reason": str(exc)[:300]}
+        return {
+            "allowed": True,
+            "reason": "retrieval request allowed",
+            "normalized_input": dict(value),
+        }
 
     @staticmethod
     def _record(

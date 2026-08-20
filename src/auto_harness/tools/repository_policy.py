@@ -107,7 +107,15 @@ class RepositoryReadPolicy:
             normalized.append({"path": path, "start_line": start, "end_line": end})
         if not normalized:
             raise ValueError("no requested repository paths exist")
-        return {"files": normalized}
+        query_id = str(value.get("retrieved_from_query_id", ""))[:80]
+        chunk_ids = value.get("retrieval_chunk_ids", [])
+        if not isinstance(chunk_ids, list):
+            raise ValueError("retrieval_chunk_ids must be a list")
+        return {
+            "files": normalized,
+            "retrieved_from_query_id": query_id,
+            "retrieval_chunk_ids": [str(item)[:80] for item in chunk_ids[:12]],
+        }
 
     def _dependency_input(self, value: Dict, repo_dir: Path) -> Dict:
         paths = value.get("paths", [])

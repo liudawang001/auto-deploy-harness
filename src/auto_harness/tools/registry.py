@@ -1,4 +1,4 @@
-from typing import Dict, List
+from typing import Any, Dict, List
 
 from auto_harness.models.base import to_plain
 from auto_harness.tools.schemas import TOOL_CATEGORIES, ToolSchema
@@ -14,7 +14,8 @@ class ToolRegistry:
     - evidence: produces evidence for verification
     """
 
-    def __init__(self) -> None:
+    def __init__(self, config: Any = None) -> None:
+        self.config = config
         self.tools: Dict[str, ToolSchema] = {}
         for tool in self._defaults():
             self.tools[tool.name] = tool
@@ -41,12 +42,23 @@ class ToolRegistry:
         for tool in self.tools.values():
             if not tool.implemented:
                 continue
+            if tool.name == "retrieve_deployment_context" and not self._retrieval_enabled():
+                continue
             if stage not in tool.stages:
                 continue
             if tool.allowed_modes and agent_mode not in tool.allowed_modes:
                 continue
             result.append(to_plain(tool))
         return result
+
+    def _retrieval_enabled(self) -> bool:
+        if self.config is None:
+            return False
+        if isinstance(self.config, dict):
+            settings = self.config.get("retrieval", self.config)
+        else:
+            settings = getattr(self.config, "retrieval", {})
+        return isinstance(settings, dict) and bool(settings.get("enabled", False))
 
     def _defaults(self) -> List[ToolSchema]:
         return [
@@ -89,6 +101,11 @@ class ToolRegistry:
                                     "end_line": {"type": "integer", "minimum": 1},
                                 },
                             },
+                        },
+                        "retrieved_from_query_id": {"type": "string", "maxLength": 80},
+                        "retrieval_chunk_ids": {
+                            "type": "array", "maxItems": 12,
+                            "items": {"type": "string", "maxLength": 80},
                         },
                     },
                 },
@@ -142,6 +159,39 @@ class ToolRegistry:
                 implemented=True,
                 executor="repository",
                 stages=["plan", "replan"],
+            ),
+            ToolSchema(
+                name="retrieve_deployment_context",
+                input_schema={
+                    "type": "object",
+                    "required": ["query", "purpose"],
+                    "properties": {
+                        "query": {"type": "string", "minLength": 1, "maxLength": 500},
+                        "purpose": {
+                            "type": "string",
+                            "enum": [
+                                "plan_repository", "diagnose_failure",
+                                "select_repair", "select_verify_strategy", "replan",
+                            ],
+                        },
+                        "sources": {
+                            "type": "array", "maxItems": 5,
+                            "items": {
+                                "type": "string",
+                                "enum": [
+                                    "repository", "runtime_evidence", "runtime_log",
+                                    "issue_memory", "verified_memory", "active_skill",
+                                ],
+                            },
+                        },
+                        "top_k": {"type": "integer", "minimum": 1, "maximum": 12},
+                    },
+                    "additionalProperties": False,
+                },
+                risk_level="low", side_effects=[], requires_policy=False,
+                success_signal="bounded candidate evidence returned",
+                category="read_only", implemented=True, executor="retrieval",
+                stages=["plan", "replan", "repair", "verify"],
             ),
             ToolSchema(
                 name="inspect_env_log",

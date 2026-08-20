@@ -82,6 +82,18 @@ def _add_model_inference_arguments(parser) -> None:
     parser.add_argument("--model-revision-override", default=None)
 
 
+def _add_retrieval_arguments(parser) -> None:
+    parser.add_argument("--retrieval", action="store_true", default=False)
+    parser.add_argument("--retrieval-mode", choices=["lexical", "dense", "hybrid"], default=None)
+    parser.add_argument(
+        "--retrieval-embedding-provider",
+        choices=["disabled", "fake", "openai_compatible"],
+        default=None,
+    )
+    parser.add_argument("--retrieval-top-k", type=_positive_int_arg, default=None)
+    parser.add_argument("--retrieval-max-context-tokens", type=_positive_int_arg, default=None)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="auto-deploy-harness")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -132,6 +144,7 @@ def build_parser() -> argparse.ArgumentParser:
     deploy.add_argument("--agent-plan-first-max-replans", type=int, default=None)
     deploy.add_argument("--controller", choices=["legacy", "langgraph"], default=None)
     _add_llm_runtime_arguments(deploy)
+    _add_retrieval_arguments(deploy)
 
     resume = sub.add_parser("resume", help="resume an existing task")
     resume.add_argument("--task-id", required=True)
@@ -156,6 +169,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_model_inference_arguments(resume)
     resume.add_argument("--controller", choices=["legacy", "langgraph"], default=None)
     _add_llm_runtime_arguments(resume)
+    _add_retrieval_arguments(resume)
 
     status = sub.add_parser("status", help="show task status")
     status.add_argument("--task-id", required=True)
@@ -330,6 +344,19 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _apply_cli_overrides(config: HarnessConfig, args) -> None:
+    retrieval = dict(config.retrieval)
+    if getattr(args, "retrieval", False):
+        retrieval["enabled"] = True
+    if getattr(args, "retrieval_mode", None):
+        retrieval["mode"] = args.retrieval_mode
+        retrieval["dense_enabled"] = args.retrieval_mode in {"dense", "hybrid"}
+    if getattr(args, "retrieval_embedding_provider", None):
+        retrieval["embedding_provider"] = args.retrieval_embedding_provider
+    if getattr(args, "retrieval_top_k", None) is not None:
+        retrieval["default_top_k"] = min(args.retrieval_top_k, retrieval["max_top_k"])
+    if getattr(args, "retrieval_max_context_tokens", None) is not None:
+        retrieval["max_context_tokens"] = min(args.retrieval_max_context_tokens, 32000)
+    config.retrieval = retrieval
     if getattr(args, "model_download_workers", None) is not None:
         config.model_download_max_workers = max(1, args.model_download_workers)
     if getattr(args, "download_retries", None) is not None:

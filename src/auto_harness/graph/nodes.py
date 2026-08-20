@@ -480,8 +480,18 @@ class DeploymentGraphNodes:
             return {"raw_plan_path": str(path), "current_stage": "plan", "planner_turn_kind": "final"}
 
         from auto_harness.agent_runtime.planner_turn import PlannerTurnParser
+        from auto_harness.tools.registry import ToolRegistry
+        allowed_tools = {
+            item["name"] for item in ToolRegistry(
+                config=self.deps.runtime_config,
+            ).executable_for_stage(
+                "replan" if state.get("planner_phase") == "replan" else "plan",
+                agent_mode="planner",
+            )
+        }
         parser = PlannerTurnParser(
-            max_requests=self._cfg("agent_repo_max_requests_per_round", 4)
+            max_requests=self._cfg("agent_repo_max_requests_per_round", 4),
+            allowed_tools=allowed_tools,
         )
         try:
             turn = parser.parse(raw.text)
@@ -587,6 +597,9 @@ class DeploymentGraphNodes:
             repository_fingerprint=state.get("repository_fingerprint", ""),
             round_number=round_number,
             budget=state.get("observation_budget", {}),
+            stage="replan" if state.get("planner_phase") == "replan" else "plan",
+            task_id=str(state.get("task_id", "")),
+            run_dir=state.get("run_dir"),
         )
         if result.get("status") != "passed":
             return {
