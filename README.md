@@ -44,6 +44,17 @@ auto-deploy-harness 是一个基于 LangGraph 编排的自动部署与证据化�
 
 v0.3 开放受限仓库只读工具，以及在 `gated_actor` 下显式开启的内部 `state_delta` 工具。外部副作用工具即使由 Provider 请求也不会开放，需等待 v0.4 的独立 Side-effect Release Gate。所有原生调用仍经过 Schema、stage/mode allowlist、Policy、确定性 Executor、Tool Call Ledger 与 Evidence Gate；Provider 只能表达调用意图，不能授予审批或直接判定成功。
 
+## Evidence Retrieval（可选）
+
+RAG 以默认关闭的 `Hybrid Evidence Retrieval` 形式提供，面向部署规划、故障诊断与验证策略，不是通用知识库问答。离线 `lexical` 模式使用 SQLite/FTS5 能力探测与 BM25 fallback；`dense`/`hybrid` 可选择 Embedding、精确余弦检索和 RRF。默认不会连接外部向量库，也不会把仓库内容发送到外部 Embedding 服务。
+
+```bash
+auto-deploy-harness deploy --repo ./project --retrieval \
+  --retrieval-mode lexical --retrieval-top-k 8 --dry-run
+```
+
+检索命中始终只是 `candidate_only`：仓库内容必须再通过 `read_selected_files` 精确读取并校验当前 SHA，之后才可能成为 Plan Grounding。Repository Fingerprint、Task ID、Secret Redaction、来源 allowlist 和 Tool Call Budget 都在本地强制执行。运行证据位于 `retrieval/index_manifest.json`、`retrieval/queries.jsonl`、`reports/retrieval_summary.json` 与 `reports/retrieval_contribution.json`；Fake Embedding 不能提升为真实 Provider 已验证。
+
 运行产物位于 `agent_tool_calls/`、`reports/provider_protocol.json` 和 `reports/native_tool_calling_summary.json`。Fake Provider 只能达到 `fake_verified`，不能冒充真实 Provider 的 `live_read_only_verified`。真实 DeepSeek smoke 为显式外部门：
 
 ```bash
@@ -119,6 +130,7 @@ auto-deploy-harness deploy \
 - Claude Code executor wrapper。
 - Policy-constrained LLM Agent：`agent_mode=planner` 时 LLM 可通过 schema 化 action 影响 analyze plan；`agent_mode=gated_actor` 且显式开关打开时，LLM repair action 可在 policy gate 后执行安全动作；LLM 永远不能直接执行 shell、修改源码或判定成功。
 - Provider protocol：默认 Mock、讯飞和所有现有调用路径继续使用 `json_action`；DeepSeek 与显式声明能力的 OpenAI-compatible Provider 可选择 `native_tools`。两个协议共用归一化调用、Schema/Policy、Executor、Ledger 与 Evidence Gate，运行证据会记录实际选择及原因。
+- Evidence Retrieval：默认关闭；开启后为 JSON Action 与 Native Tools 提供同一只读检索工具，支持安全摄取、稳定分块、BM25、可选 Fake/外部 Embedding 接口、精确向量与 RRF，并强制精确重读和 SHA Grounding。
 - Self-healing 主流程：`deploy/resume --agent-self-heal` 会打开 bounded repair/resume loop，普通 `TaskRunner.run_existing()` 能在 policy-approved repair 后自动从 `host_preflight` / `env_solve` / `env_deploy` / `model_prepare` / `runner` / `verify` 安全阶段恢复，最终仍由 verify trace 判定成功。
 - Agent runtime 证据：每个 run 会生成 `agent_steps.jsonl`、`agent_state.json`、`agent_plan.json`、`agent_plan_revisions.jsonl` 和 `reports/agent_contribution.json`，记录 observe / plan / policy gate / tool call / observe / critique 的受控探索过程。
 - Tool registry：LLM 只能请求命名 tool，Python runtime 根据 `risk_level`、`side_effects`、`requires_policy` 和 `allowed_modes` 进行执行控制；side-effect tool 默认需要 policy gate。
@@ -1179,7 +1191,3 @@ runs/<task-id>/reports/unified_metrics.json
 
 指标从 LLM trace、Policy、Repair、Recovery、Verify 和 Skill 工件生成，并保留
 `source_artifact`。
-
-## 发布边界
-
-本地 release gates 不等同于真实基础设施验证。真实 Provider、联网长任务、Docker/GPU、vLLM 和大型模型仓库矩阵属于外部门禁；在对应环境的证据产生前，项目状态最多为 `ready_for_external_smoke`，不能宣称生产就绪。

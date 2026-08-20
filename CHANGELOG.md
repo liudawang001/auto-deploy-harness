@@ -4,6 +4,9 @@ All notable changes are documented here.
 
 ## 0.3.0 - Unreleased
 
+- Added opt-in Hybrid Evidence Retrieval with safe repository/memory ingestion, deterministic chunking, SQLite manifests, BM25 fallback, optional embeddings, exact cosine search, and RRF fusion.
+- Added a policy-bounded `retrieve_deployment_context` tool for JSON Action and native tool loops; repository hits remain advisory until exact reread and SHA-backed Grounding.
+- Added retrieval traces, summaries, causal contribution gates, 30-case offline evaluation fixtures, transactional index recovery, and tiered readiness that never promotes fake embeddings to live evidence.
 - Added an independently selectable `native_tools` provider protocol while retaining `json_action` as the backward-compatible default.
 - Added strict provider tool-schema projection, normalized tool calls/results, bounded multi-turn execution, safe tool-result messages, and explicit no-fallback protocol routing.
 - Implemented native tool transport for DeepSeek and configurable OpenAI-compatible providers, including assistant tool calls and correlated tool-result messages.
