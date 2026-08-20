@@ -1,6 +1,6 @@
 import json
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from auto_harness.agent_runtime.critic import AgentCritic
 from auto_harness.agent_runtime.planner import VerifyPlanner
@@ -20,6 +20,10 @@ from auto_harness.models.base import to_plain, write_json
 from auto_harness.tools import ToolRegistry
 from auto_harness.tools.executor import ToolExecutor
 from auto_harness.utils.time import utc_now_iso
+from auto_harness.context.capabilities import resolve_provider_capabilities
+from auto_harness.providers.base import Message
+from auto_harness.providers.protocols import select_provider_protocol
+from auto_harness.agent_runtime.native_tool_loop import NativeToolTurnLoop
 
 
 class AgentRuntime:
@@ -53,6 +57,105 @@ class AgentRuntime:
     def run(self, goal: AgentGoal, run_dir: Path, results: Dict, contribution: Dict = None) -> Dict:
         """Backward-compatible wrapper. Delegates to audit()."""
         return self.audit(goal, run_dir, results, contribution=contribution)
+
+    def run_protocol_session(
+        self,
+        *,
+        provider: Any,
+        messages: List[Message],
+        context: Dict[str, Any],
+        run_dir: Path,
+        task_id: str,
+        stage: str,
+        config: Any,
+        agent_mode: str = "planner",
+        repository_fingerprint: str = "",
+        runtime_policy_fingerprint: str = "",
+    ):
+        """Route an independently enabled protocol session and persist why.
+
+        Existing JSON Action entry points remain unchanged. This method is the
+        explicit v0.3 integration seam for native multi-turn tools.
+        """
+        configured = (
+            config.get("provider_protocol", "json_action")
+            if isinstance(config, dict)
+            else getattr(config, "provider_protocol", "json_action")
+        )
+        capabilities = resolve_provider_capabilities(provider, config)
+        selection = select_provider_protocol(configured, provider, capabilities)
+        report = selection.to_dict()
+        report.update({
+            "provider_name": capabilities.provider_name,
+            "provider_model": capabilities.model,
+            "selected_at": utc_now_iso(),
+        })
+        reports_dir = Path(run_dir) / "reports"
+        write_json(reports_dir / "provider_protocol.json", report)
+        if selection.selected_protocol != "native_tools":
+            return {
+                "status": "json_action_selected",
+                "protocol_selection": report,
+            }
+
+        settings = (
+            config.get("native_tool_calling", {})
+            if isinstance(config, dict)
+            else getattr(config, "native_tool_calling", {})
+        ) or {}
+        if not bool(settings.get("enabled", False)):
+            raise ValueError("native tool protocol selected while runtime feature is disabled")
+        categories = []
+        if settings.get("allow_read_only_tools", True):
+            categories.append("read_only")
+        if settings.get("allow_state_delta_tools", False):
+            categories.append("state_delta")
+        if settings.get("allow_side_effect_tools", False):
+            raise ValueError("native side-effect tools are unavailable before v0.4")
+        outcome = NativeToolTurnLoop(
+            provider,
+            registry=self.registry,
+            stage=stage,
+            agent_mode=agent_mode,
+            allowed_categories=tuple(categories),
+            max_turns=int(settings.get("max_turns", 6)),
+            max_calls_per_turn=int(settings.get("max_calls_per_turn", 1)),
+            max_tool_result_chars=int(settings.get("max_tool_result_chars", 12000)),
+            run_dir=run_dir,
+            config=config,
+        ).run(
+            messages,
+            context=context,
+            task_id=task_id,
+            repository_fingerprint=repository_fingerprint,
+            runtime_policy_fingerprint=runtime_policy_fingerprint,
+        )
+        summary = {
+            "schema_version": 1,
+            "provider_protocol": "native_tools",
+            "provider_name": capabilities.provider_name,
+            "provider_model": capabilities.model,
+            "status": outcome.status,
+            "stop_reason": outcome.stop_reason,
+            "native_tool_turn_count": outcome.turn_count,
+            "native_tool_call_count": len(outcome.tool_results),
+            "native_tool_call_accepted_count": sum(
+                1 for item in outcome.tool_results if item.policy_allowed
+            ),
+            "native_tool_call_rejected_count": outcome.rejected_tool_count,
+            "native_tool_call_reused_count": outcome.reused_tool_count,
+            "native_tool_call_conflict_count": outcome.conflict_count,
+            "native_tool_result_truncated_count": outcome.truncated_result_count,
+            "native_tool_loop_limit_count": outcome.loop_limit_count,
+            "tool_schema_hash": outcome.tool_schema_hash,
+            "tool_schema_estimated_tokens": outcome.tool_schema_estimated_tokens,
+            "max_input_tokens": outcome.max_input_tokens,
+            "provider_request_ids": list(outcome.provider_request_ids),
+            "visible_tool_names": list(outcome.visible_tool_names),
+            "generated_at": utc_now_iso(),
+        }
+        write_json(reports_dir / "native_tool_calling_summary.json", summary)
+        return outcome
 
     # ------------------------------------------------------------------
     # Phase 1: audit mode (post-hoc artifact generation)

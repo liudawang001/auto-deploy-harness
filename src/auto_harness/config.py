@@ -35,6 +35,9 @@ def _default_deepseek_provider_configs() -> Dict[str, Dict[str, Any]]:
             "max_retries": 2,
             "retry_base_seconds": 1.0,
             "retry_max_seconds": 8.0,
+            "native_tool_calling": False,
+            "native_tool_choice": "auto",
+            "native_parallel_tool_calls": False,
         }
     }
 
@@ -70,6 +73,10 @@ class HarnessConfig:
     agent_timeout_seconds: int = 900
     agent_mode: str = "off"
     agent_provider: str = "deepseek"
+    # Provider protocol is independently versioned. JSON Action remains the
+    # backward-compatible default; native tools require explicit enablement.
+    provider_protocol: str = "json_action"  # json_action | native_tools | auto
+    native_tool_calling: Dict[str, Any] = None
     provider_configs: Dict[str, Dict[str, Any]] = None
     agent_max_input_chars: int = 20000
     agent_max_file_chars: int = 6000
@@ -273,6 +280,53 @@ class HarnessConfig:
             self.langgraph_fault_injection_points = []
         if self.provider_configs is None:
             self.provider_configs = _default_deepseek_provider_configs()
+        native_defaults = {
+            "enabled": False,
+            "max_turns": 6,
+            "max_calls_per_turn": 1,
+            "parallel_calls": False,
+            "allow_read_only_tools": True,
+            "allow_state_delta_tools": False,
+            "allow_side_effect_tools": False,
+            "max_tool_result_chars": 12000,
+            "tool_result_redaction": True,
+        }
+        if self.native_tool_calling is None:
+            self.native_tool_calling = native_defaults
+        elif not isinstance(self.native_tool_calling, dict):
+            raise ValueError("native_tool_calling must be an object")
+        else:
+            self.native_tool_calling = {
+                **native_defaults,
+                **self.native_tool_calling,
+            }
+        if self.provider_protocol not in {"json_action", "native_tools", "auto"}:
+            raise ValueError(
+                "provider_protocol must be json_action, native_tools or auto"
+            )
+        for name in (
+            "enabled", "parallel_calls", "allow_read_only_tools",
+            "allow_state_delta_tools", "allow_side_effect_tools",
+            "tool_result_redaction",
+        ):
+            if not isinstance(self.native_tool_calling.get(name), bool):
+                raise ValueError("native_tool_calling.%s must be boolean" % name)
+        for name in ("max_turns", "max_calls_per_turn", "max_tool_result_chars"):
+            value = self.native_tool_calling.get(name)
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ValueError("native_tool_calling.%s must be a positive integer" % name)
+        if self.native_tool_calling["max_turns"] > 20:
+            raise ValueError("native_tool_calling.max_turns must be <= 20")
+        if self.native_tool_calling["max_calls_per_turn"] != 1:
+            raise ValueError("native_tool_calling.max_calls_per_turn must remain 1 in v0.3")
+        if self.native_tool_calling["parallel_calls"]:
+            raise ValueError("native_tool_calling.parallel_calls is not implemented in v0.3")
+        if self.native_tool_calling["allow_side_effect_tools"]:
+            raise ValueError("native side-effect tools require the v0.4 release gate")
+        if self.provider_protocol == "native_tools" and not self.native_tool_calling["enabled"]:
+            raise ValueError(
+                "provider_protocol=native_tools requires native_tool_calling.enabled=true"
+            )
         if self.gpu_probe_timeout_seconds <= 0:
             raise ValueError("gpu_probe_timeout_seconds must be positive")
         if self.conda_probe_timeout_seconds <= 0 or self.conda_inventory_timeout_seconds <= 0:
@@ -383,6 +437,16 @@ class HarnessConfig:
                         "provider_configs.%s.%s must be positive"
                         % (provider_name, key)
                     )
+            for key in (
+                "native_tool_calling",
+                "supports_native_tool_calling",
+                "native_parallel_tool_calls",
+            ):
+                if key in settings and not isinstance(settings[key], bool):
+                    raise ValueError(
+                        "provider_configs.%s.%s must be boolean"
+                        % (provider_name, key)
+                    )
             # DeepSeek-specific validation
             _validate_deepseek_config(provider_name, settings)
             if (
@@ -396,10 +460,27 @@ class HarnessConfig:
                     "provider_configs.deepseek.timeout_seconds must not exceed "
                     "agent_decision_timeout_seconds"
                 )
+        if self.provider_protocol == "native_tools":
+            provider_settings = self.provider_configs.get(self.agent_provider) or {}
+            if not bool(
+                provider_settings.get("native_tool_calling")
+                or provider_settings.get("supports_native_tool_calling")
+            ):
+                raise ValueError(
+                    "provider_protocol=native_tools requires the selected provider "
+                    "to explicitly enable native tool calling"
+                )
         valid_fault_windows = {
             "before_side_effect",
             "after_side_effect_before_commit",
             "after_commit_before_checkpoint",
+            "after_provider_before_call_ledger",
+            "after_call_ledger_before_policy",
+            "after_journal_begin_before_side_effect",
+            "after_side_effect_before_journal_commit",
+            "after_journal_commit_before_tool_result",
+            "after_tool_result_before_provider_feedback",
+            "after_provider_feedback_before_checkpoint",
         }
         for point in self.langgraph_fault_injection_points:
             parts = str(point).split(":", 1)
@@ -777,10 +858,15 @@ def _validate_deepseek_config(provider_name: str, settings: dict) -> None:
         raise ValueError(
             "provider_configs.deepseek.native_tool_calling must be boolean"
         )
-    if settings.get("native_tool_calling") is True:
+    if "native_tool_choice" in settings and settings["native_tool_choice"] not in {
+        "auto", "required", "none",
+    }:
         raise ValueError(
-            "provider_configs.deepseek.native_tool_calling is not implemented; "
-            "keep it false and use json_action"
+            "provider_configs.deepseek.native_tool_choice must be auto, required or none"
+        )
+    if settings.get("native_parallel_tool_calls") not in (None, False):
+        raise ValueError(
+            "provider_configs.deepseek.native_parallel_tool_calls must be false in v0.3"
         )
 
     # allow_beta must be boolean

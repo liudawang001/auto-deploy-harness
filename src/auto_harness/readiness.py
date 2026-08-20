@@ -27,6 +27,15 @@ from auto_harness.utils.time import utc_now_iso
 
 
 ALLOWED_STATUSES = ("implemented", "integrated", "validated", "not_run", "failed")
+NATIVE_TOOL_READINESS_LEVELS = (
+    "not_implemented",
+    "contract_verified",
+    "fake_verified",
+    "live_read_only_verified",
+    "recovery_verified",
+    "state_delta_verified",
+    "side_effect_verified",
+)
 
 
 class ReadinessAuditor:
@@ -362,6 +371,7 @@ class CapabilityMatrix:
             ),
             "evidence": ["tests/test_provider_protocol.py"],
         }
+        capabilities["native_tool_calling"] = self._native_tool_readiness()
 
         # 9. self_repair_closure
         capabilities["self_repair_closure"] = {
@@ -430,6 +440,87 @@ class CapabilityMatrix:
             except (OSError, ValueError):
                 manifest = {}
         return ModelRuntimeReadiness(self.project_root).assess(manifest=manifest)
+
+    def _native_tool_readiness(self) -> Dict[str, Any]:
+        """Report verified native-tool levels without promoting fake evidence."""
+        summary_path = self.project_root / "reports" / "native_tool_calling_summary.json"
+        summary = {}
+        if summary_path.exists():
+            try:
+                summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                return {
+                    "status": "failed",
+                    "evidence": [str(summary_path)],
+                    "details": {"readiness_level": "not_implemented", "reason": "invalid_summary"},
+                }
+        verified_levels = []
+        if summary.get("contract_tests_passed"):
+            verified_levels.append("contract_verified")
+        if summary.get("fake_tests_passed"):
+            verified_levels.append("fake_verified")
+        if summary.get("recovery_tests_passed"):
+            verified_levels.append("recovery_verified")
+        if summary.get("state_delta_tests_passed"):
+            verified_levels.append("state_delta_verified")
+
+        live_manifest_path = (
+            self.project_root / "docs" / "evidence"
+            / "native-tool-live-smoke-manifest.json"
+        )
+        live_verified = False
+        if live_manifest_path.exists():
+            try:
+                live = json.loads(live_manifest_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                live = {}
+            live_verified = bool(
+                live.get("provider_protocol") == "native_tools"
+                and str(live.get("provider_name", "")).lower()
+                not in {"", "fake", "fake_native", "mock"}
+                and live.get("network_transport") == "live"
+                and int(live.get("tool_call_count") or 0) >= 2
+                and str(live.get("final_status", "")).lower() in {"pass", "passed", "completed"}
+                and live.get("credential_values_persisted") is not True
+            )
+        if live_verified:
+            verified_levels.append("live_read_only_verified")
+
+        release_gate = bool(
+            live_verified
+            and "recovery_verified" in verified_levels
+            and "state_delta_verified" in verified_levels
+        )
+        if live_verified:
+            level = "live_read_only_verified"
+        elif "state_delta_verified" in verified_levels:
+            level = "state_delta_verified"
+        elif "recovery_verified" in verified_levels:
+            level = "recovery_verified"
+        elif "fake_verified" in verified_levels:
+            level = "fake_verified"
+        elif "contract_verified" in verified_levels:
+            level = "contract_verified"
+        else:
+            level = "not_implemented"
+        evidence = []
+        if summary:
+            evidence.append(str(summary_path.relative_to(self.project_root)))
+        if live_verified:
+            evidence.append(str(live_manifest_path.relative_to(self.project_root)))
+        return {
+            "status": "validated" if release_gate else (
+                "integrated" if verified_levels else "implemented"
+            ),
+            "evidence": evidence,
+            "details": {
+                "readiness_level": level,
+                "verified_levels": verified_levels,
+                "live_read_only_verified": live_verified,
+                "v0_3_release_gate_passed": release_gate,
+                "side_effect_tools_enabled": False,
+            },
+        }
 
     def _deepseek_readiness(self) -> Dict[str, Any]:
         """Assess DeepSeek provider readiness from code and config.

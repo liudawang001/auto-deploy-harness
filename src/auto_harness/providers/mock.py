@@ -1,7 +1,48 @@
 import json
-from typing import List
+from typing import Dict, List
 
 from auto_harness.providers.base import LLMResult, Message
+
+
+class FakeNativeToolProvider:
+    """Scripted native provider used to test protocol orchestration."""
+
+    provider_name = "fake_native"
+    native_tool_calling = True
+    context_window_tokens = 65536
+    max_tokens = 4096
+
+    def __init__(self, responses: List[LLMResult], model: str = "fake-native-model") -> None:
+        self.responses = list(responses)
+        self.model = model
+        self.requests: List[Dict] = []
+
+    def complete_with_tools(
+        self,
+        messages: List[Message],
+        tools: List[Dict],
+        *,
+        tool_choice: str = "auto",
+        temperature: float = 0.2,
+        max_output_tokens: int = None,
+        request_context=None,
+    ) -> LLMResult:
+        self.requests.append({
+            "messages": list(messages),
+            "tools": list(tools),
+            "tool_choice": tool_choice,
+            "temperature": temperature,
+            "max_output_tokens": max_output_tokens,
+            "request_context": request_context,
+        })
+        if not self.responses:
+            raise RuntimeError("fake native provider script exhausted")
+        result = self.responses.pop(0)
+        if not result.provider_name:
+            result.provider_name = self.provider_name
+        if not result.provider_model:
+            result.provider_model = self.model
+        return result
 
 
 class MockLLMProvider:

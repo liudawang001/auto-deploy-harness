@@ -195,18 +195,44 @@ class DeepSeekConfigValidationTests(unittest.TestCase):
             )
         self.assertIn("max_retries", str(ctx.exception).lower())
 
-    def test_native_tool_calling_true_rejected_until_implemented(self):
-        with self.assertRaises(ValueError) as ctx:
-            HarnessConfig(
-                provider_configs={
-                    "deepseek": {
-                        "api_base": "https://api.deepseek.com",
-                        "model": "deepseek-v4-flash",
-                        "native_tool_calling": True,
-                    }
+    def test_native_tool_calling_true_is_valid_provider_capability(self):
+        config = HarnessConfig(
+            provider_configs={
+                "deepseek": {
+                    "api_base": "https://api.deepseek.com",
+                    "model": "deepseek-v4-flash",
+                    "native_tool_calling": True,
                 }
+            }
+        )
+        self.assertTrue(config.provider_configs["deepseek"]["native_tool_calling"])
+
+    def test_explicit_native_protocol_requires_both_runtime_and_provider_flags(self):
+        with self.assertRaises(ValueError):
+            HarnessConfig(provider_protocol="native_tools")
+        with self.assertRaises(ValueError):
+            HarnessConfig(
+                provider_protocol="native_tools",
+                native_tool_calling={"enabled": True},
             )
-        self.assertIn("not implemented", str(ctx.exception).lower())
+        config = HarnessConfig(
+            provider_protocol="native_tools",
+            native_tool_calling={"enabled": True},
+            provider_configs={
+                "deepseek": {
+                    "api_base": "https://api.deepseek.com",
+                    "model": "deepseek-v4-flash",
+                    "native_tool_calling": True,
+                }
+            },
+        )
+        self.assertEqual(config.provider_protocol, "native_tools")
+
+    def test_v03_rejects_parallel_and_side_effect_native_tools(self):
+        with self.assertRaises(ValueError):
+            HarnessConfig(native_tool_calling={"parallel_calls": True})
+        with self.assertRaises(ValueError):
+            HarnessConfig(native_tool_calling={"allow_side_effect_tools": True})
 
     def test_http_api_url_rejected(self):
         with self.assertRaises(ValueError):

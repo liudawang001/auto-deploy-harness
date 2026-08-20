@@ -76,6 +76,10 @@ class ToolCallingLLMProvider(Protocol):
         self,
         messages: List[Message],
         tools: List[Dict],
+        *,
         tool_choice: str = "auto",
+        temperature: float = 0.2,
+        max_output_tokens: int = None,
+        request_context: Optional[ProviderRequestContext] = None,
     ) -> LLMResult:
         ...

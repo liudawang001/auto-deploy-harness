@@ -38,6 +38,12 @@ def resolve_provider_capabilities(provider: Any, config: Any = None) -> Provider
 
     # Check for DeepSeek known capabilities first
     model_lower = model.strip().lower()
+    implementation_supports_tool_calling = callable(
+        getattr(provider, "complete_with_tools", None)
+    )
+    live_tool_calling_verified = bool(
+        getattr(provider, "native_tool_calling_live_verified", False)
+    )
     if model_lower in _DEEPSEEK_CAPABILITIES:
         caps = _DEEPSEEK_CAPABILITIES[model_lower]
         configured_provider_window = _positive_int(
@@ -58,7 +64,7 @@ def resolve_provider_capabilities(provider: Any, config: Any = None) -> Provider
         )
         supports_tool_calling = bool(
             caps["api_supports_tool_calling"]
-            and callable(getattr(provider, "complete_with_tools", None))
+            and implementation_supports_tool_calling
             and bool(getattr(provider, "native_tool_calling", False))
         )
         source = (
@@ -67,10 +73,18 @@ def resolve_provider_capabilities(provider: Any, config: Any = None) -> Provider
             and configured_provider_window < caps["context_window_tokens"]
             else "deepseek_model_registry"
         )
+        api_supports_tool_calling = bool(caps["api_supports_tool_calling"])
     else:
         provider_window = _positive_int(getattr(provider, "context_window_tokens", None))
         max_output = _positive_int(getattr(provider, "max_tokens", None))
-        supports_tool_calling = callable(getattr(provider, "complete_with_tools", None))
+        api_supports_tool_calling = bool(
+            getattr(provider, "supports_native_tool_calling", implementation_supports_tool_calling)
+        )
+        supports_tool_calling = bool(
+            api_supports_tool_calling
+            and implementation_supports_tool_calling
+            and getattr(provider, "native_tool_calling", True)
+        )
         source = "provider"
 
     configured_window = _positive_int(_config_get(config, "agent_context_window_tokens"))
@@ -122,6 +136,9 @@ def resolve_provider_capabilities(provider: Any, config: Any = None) -> Provider
         supports_tool_calling=supports_tool_calling,
         usage_format="provider_native",
         source=source,
+        api_supports_tool_calling=api_supports_tool_calling,
+        implementation_supports_tool_calling=implementation_supports_tool_calling,
+        live_tool_calling_verified=live_tool_calling_verified,
     )
 
 

@@ -430,12 +430,10 @@ class DeepSeekProvider(OpenAICompatibleProvider):
             )
 
     def _validate_native_tool_calling(self) -> None:
-        """Fail closed until the real multi-turn tools protocol exists."""
-        if self.native_tool_calling:
+        """Validate the explicit native protocol feature flag."""
+        if not isinstance(self.native_tool_calling, bool):
             raise configuration_error(
-                self.provider_name,
-                "native_tool_calling is not implemented; keep it false and use "
-                "the json_action protocol",
+                self.provider_name, "native_tool_calling must be boolean",
             )
 
     # ------------------------------------------------------------------
@@ -509,6 +507,34 @@ class DeepSeekProvider(OpenAICompatibleProvider):
         if self.json_mode:
             payload["response_format"] = {"type": "json_object"}
 
+        return payload
+
+    def _build_tools_payload(
+        self,
+        messages: List[Message],
+        tools: List[Dict[str, Any]],
+        *,
+        tool_choice: str = "auto",
+        temperature: float = 0.2,
+        max_output_tokens: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Build a DeepSeek native-tools request; JSON mode is not mixed in."""
+        output_limit = self.max_tokens
+        if max_output_tokens:
+            output_limit = min(output_limit, int(max_output_tokens))
+        payload: Dict[str, Any] = {
+            "model": self.model,
+            "messages": self._serialize_native_messages(messages),
+            "max_tokens": output_limit,
+            "tools": list(tools),
+            "tool_choice": tool_choice,
+            "thinking": {"type": self.thinking_mode},
+        }
+        if self.thinking_mode == "enabled":
+            if self.reasoning_effort:
+                payload["reasoning_effort"] = self.reasoning_effort
+        else:
+            payload["temperature"] = temperature
         return payload
 
     # ------------------------------------------------------------------
@@ -790,6 +816,101 @@ class DeepSeekProvider(OpenAICompatibleProvider):
                 transport_attempt += 1
                 continue
 
+    def complete_with_tools(
+        self,
+        messages: List[Message],
+        tools: List[Dict],
+        *,
+        tool_choice: str = "auto",
+        temperature: float = 0.2,
+        max_output_tokens: int = None,
+        request_context: Optional[ProviderRequestContext] = None,
+    ) -> LLMResult:
+        """Run one native-tools turn with DeepSeek's bounded transport retry."""
+        if not self.native_tool_calling:
+            raise ProviderError(
+                "DeepSeek native tool calling is disabled",
+                provider_name=self.provider_name,
+                category=ErrorCategory.INVALID_REQUEST,
+            )
+        if not tools:
+            raise ProviderError(
+                "DeepSeek native tool calling requires at least one tool",
+                provider_name=self.provider_name,
+                category=ErrorCategory.INVALID_REQUEST,
+            )
+        missing = self.missing_configuration()
+        if missing:
+            raise configuration_error(
+                self.provider_name,
+                "missing configuration: %s" % ", ".join(missing),
+            )
+
+        attempt = 0
+        while True:
+            self._ensure_deadline(request_context)
+            try:
+                payload = self._build_tools_payload(
+                    messages,
+                    tools,
+                    tool_choice=tool_choice,
+                    temperature=temperature,
+                    max_output_tokens=max_output_tokens,
+                )
+                raw = self._perform_request(
+                    payload,
+                    self._build_headers(),
+                    timeout_seconds=self._request_timeout(request_context),
+                )
+                if isinstance(raw, dict) and (
+                    "_raw_text" in raw or "_invalid_response_shape" in raw
+                ):
+                    raise invalid_response_error(
+                        self.provider_name,
+                        "response body is not a valid JSON object",
+                    )
+                result = self._parse_response(raw, messages)
+                result.protocol = "native_tools"
+                result.retry_count = attempt
+                if not result.tool_calls and not result.text.strip():
+                    raise empty_content_error(
+                        self.provider_name, request_id=result.request_id,
+                    )
+                return result
+            except urllib.error.HTTPError as exc:
+                classified = self._classify_http_error(exc)
+                error = ProviderError(
+                    "%s HTTP error %s" % (self.provider_name, exc.code),
+                    provider_name=self.provider_name,
+                    status_code=int(exc.code),
+                    error_code=classified.get("error_code", ""),
+                    category=classified["category"],
+                    request_id=classified.get("request_id", ""),
+                    safe_detail=classified.get("safe_detail", ""),
+                    retry_after_seconds=classified.get("retry_after_seconds"),
+                )
+            except urllib.error.URLError as exc:
+                error = ProviderError(
+                    "%s network error: %s" % (self.provider_name, str(exc.reason)),
+                    provider_name=self.provider_name,
+                    category=ErrorCategory.NETWORK_ERROR,
+                    safe_detail=str(exc.reason)[:500],
+                )
+            except TimeoutError as exc:
+                error = ProviderError(
+                    "%s network timeout" % self.provider_name,
+                    provider_name=self.provider_name,
+                    category=ErrorCategory.NETWORK_TIMEOUT,
+                    safe_detail=str(exc)[:500],
+                )
+            except ProviderError as exc:
+                error = exc
+            error.retry_count = attempt
+            if not error.retryable or attempt >= self.max_retries:
+                raise error
+            self._retry_delay(attempt, error, request_context=request_context)
+            attempt += 1
+
     def _complete_once(
         self,
         messages: List[Message],
@@ -1046,7 +1167,7 @@ class DeepSeekProvider(OpenAICompatibleProvider):
             "model": self.model,
             "context_window_tokens": self.context_window_tokens,
             "max_output_tokens": self.max_tokens,
-            "supports_tool_calling": False,
+            "supports_tool_calling": bool(self.native_tool_calling),
             "supports_json_mode": True,
             "supports_thinking": True,
             "supports_streaming": False,

@@ -116,6 +116,26 @@ class ReportGenerator:
                 % repository_context.get("rejected_reads", 0),
                 "",
             ])
+        native_tools = self._native_tool_summary(run_dir)
+        if native_tools:
+            write_json(
+                Path(run_dir) / "reports" / "native_tool_calling_summary.json",
+                native_tools,
+            )
+            lines.extend([
+                "## Native Tool Calling",
+                "",
+                "- Protocol: `%s`" % native_tools.get("provider_protocol", "native_tools"),
+                "- Turns: `%s`" % native_tools.get("native_tool_turn_count", 0),
+                "- Calls: `%s`" % native_tools.get("native_tool_call_count", 0),
+                "- Accepted: `%s`" % native_tools.get("native_tool_call_accepted_count", 0),
+                "- Rejected: `%s`" % native_tools.get("native_tool_call_rejected_count", 0),
+                "- Reused: `%s`" % native_tools.get("native_tool_call_reused_count", 0),
+                "- Conflicts: `%s`" % native_tools.get("native_tool_call_conflict_count", 0),
+                "- Truncated results: `%s`" % native_tools.get("native_tool_result_truncated_count", 0),
+                "- Stop reason: `%s`" % native_tools.get("stop_reason", ""),
+                "",
+            ])
         command_authorization = self._command_authorization_summary(run_dir, results)
         if command_authorization:
             write_json(
@@ -231,6 +251,50 @@ class ReportGenerator:
             lines.append("")
         report_path.write_text("\n".join(lines), encoding="utf-8")
         return StageResult("report", "passed", "report generated", {"report_path": str(report_path)}, evidence=[str(report_path)])
+
+    def _native_tool_summary(self, run_dir: Path) -> Dict:
+        existing = self._read_optional(
+            Path(run_dir) / "reports" / "native_tool_calling_summary.json"
+        )
+        if isinstance(existing, dict) and existing:
+            return existing
+        root = Path(run_dir) / "agent_tool_calls"
+        calls_path = root / "calls.jsonl"
+        if not calls_path.exists():
+            return {}
+        records = []
+        try:
+            for line in calls_path.read_text(encoding="utf-8").splitlines():
+                try:
+                    item = json.loads(line)
+                except (TypeError, ValueError):
+                    continue
+                if isinstance(item, dict):
+                    records.append(item)
+        except OSError:
+            return {}
+        latest = {}
+        for record in records:
+            latest[str(record.get("call_id", ""))] = record
+        calls = list(latest.values())
+        turns_dir = root / "turns"
+        return {
+            "schema_version": 1,
+            "provider_protocol": "native_tools",
+            "native_tool_turn_count": len(list(turns_dir.glob("turn_*.json"))) if turns_dir.exists() else 0,
+            "native_tool_call_count": len(calls),
+            "native_tool_call_accepted_count": sum(
+                1 for item in calls if item.get("policy_verdict") == "allowed"
+            ),
+            "native_tool_call_rejected_count": sum(
+                1 for item in calls if item.get("policy_verdict") == "rejected"
+            ),
+            "native_tool_call_reused_count": 0,
+            "native_tool_call_conflict_count": 0,
+            "native_tool_result_truncated_count": 0,
+            "native_tool_loop_limit_count": 0,
+            "stop_reason": "",
+        }
 
     def _repository_context_summary(self, run_dir: Path) -> Dict:
         reports = Path(run_dir) / "reports"

@@ -17,6 +17,31 @@ from auto_harness.context.tokens import normalize_usage
 from auto_harness.providers.base import ProviderRequestContext
 
 
+def execute_native_tool_turn(
+    provider: Any,
+    messages,
+    tools,
+    *,
+    tool_choice: str,
+    temperature: float,
+    max_output_tokens,
+    request_context: Optional[ProviderRequestContext],
+):
+    """Single governed transport seam for a provider-native tools turn.
+
+    NativeToolTurnLoop performs the multi-turn budget and policy state machine;
+    direct provider transport remains centralized in the context layer.
+    """
+    return provider.complete_with_tools(
+        messages,
+        tools,
+        tool_choice=tool_choice,
+        temperature=temperature,
+        max_output_tokens=max_output_tokens,
+        request_context=request_context,
+    )
+
+
 class ContextGovernanceError(RuntimeError):
     def __init__(
         self,

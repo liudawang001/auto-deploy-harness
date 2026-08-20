@@ -48,6 +48,9 @@ class ProviderCapabilities:
     message_overhead_tokens: int = 4
     request_overhead_tokens: int = 8
     source: str = "fallback"
+    api_supports_tool_calling: bool = False
+    implementation_supports_tool_calling: bool = False
+    live_tool_calling_verified: bool = False
 
 
 @dataclass(frozen=True)

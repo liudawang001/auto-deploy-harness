@@ -15,7 +15,7 @@ import urllib.error
 import urllib.request
 from typing import Any, Dict, List, Optional
 
-from auto_harness.providers.base import LLMResult, Message
+from auto_harness.providers.base import LLMResult, Message, ProviderRequestContext
 
 
 _ENV_PREFIXES = {
@@ -107,6 +107,14 @@ class OpenAICompatibleProvider:
             self.settings.get("organization"),
         )
         self.urlopen = urlopen or urllib.request.urlopen
+        native_capability = self.settings.get(
+            "supports_native_tool_calling",
+            self.settings.get("native_tool_calling", False),
+        )
+        if not isinstance(native_capability, bool):
+            raise ValueError("supports_native_tool_calling must be boolean")
+        self.supports_native_tool_calling = native_capability
+        self.native_tool_calling = native_capability
 
     # ------------------------------------------------------------------
     # Reusable transport methods (overridable by subclasses)
@@ -136,6 +144,43 @@ class OpenAICompatibleProvider:
             "temperature": temperature,
             "max_tokens": output_limit,
         }
+
+    def _build_tools_payload(
+        self,
+        messages: List[Message],
+        tools: List[Dict[str, Any]],
+        *,
+        tool_choice: str = "auto",
+        temperature: float = 0.2,
+        max_output_tokens: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        payload = self._build_payload([], temperature, max_output_tokens)
+        payload["messages"] = self._serialize_native_messages(messages)
+        payload["tools"] = list(tools)
+        payload["tool_choice"] = tool_choice
+        return payload
+
+    @staticmethod
+    def _serialize_native_messages(messages: List[Message]) -> List[Dict[str, Any]]:
+        payload_messages: List[Dict[str, Any]] = []
+        for message in messages:
+            if message.role == "tool":
+                if not message.tool_call_id:
+                    raise ValueError("tool message requires tool_call_id")
+                payload_messages.append({
+                    "role": "tool",
+                    "content": message.content,
+                    "tool_call_id": message.tool_call_id,
+                })
+                continue
+            role = message.role if message.role in {"system", "user", "assistant"} else "user"
+            item: Dict[str, Any] = {"role": role, "content": message.content}
+            if message.tool_calls:
+                if role != "assistant":
+                    raise ValueError("tool_calls are only valid on assistant messages")
+                item["tool_calls"] = list(message.tool_calls)
+            payload_messages.append(item)
+        return payload_messages
 
     def _build_headers(self) -> Dict[str, str]:
         """Build HTTP headers for the request."""
@@ -337,6 +382,61 @@ class OpenAICompatibleProvider:
             ) from exc
 
         return self._parse_response(raw, messages)
+
+    def complete_with_tools(
+        self,
+        messages: List[Message],
+        tools: List[Dict],
+        *,
+        tool_choice: str = "auto",
+        temperature: float = 0.2,
+        max_output_tokens: int = None,
+        request_context: Optional[ProviderRequestContext] = None,
+    ) -> LLMResult:
+        """Execute one native tools turn without falling back to JSON Action."""
+        if not self.native_tool_calling:
+            raise RuntimeError("%s native tool calling is disabled" % self.provider_name)
+        if not tools:
+            raise ValueError("native tool calling requires at least one tool")
+        missing = self.missing_configuration()
+        if missing:
+            raise RuntimeError(
+                "%s provider is not configured: missing %s"
+                % (self.provider_name, ", ".join(missing))
+            )
+        payload = self._build_tools_payload(
+            messages,
+            tools,
+            tool_choice=tool_choice,
+            temperature=temperature,
+            max_output_tokens=max_output_tokens,
+        )
+        try:
+            raw = self._perform_request(payload, self._build_headers())
+        except urllib.error.HTTPError as exc:
+            classified = self._classify_http_error(exc)
+            from auto_harness.providers.errors import ProviderError
+            raise ProviderError(
+                "%s HTTP error %s" % (self.provider_name, exc.code),
+                provider_name=self.provider_name,
+                status_code=int(exc.code),
+                category=classified["category"],
+                request_id=classified.get("request_id", ""),
+                safe_detail=classified.get("safe_detail", ""),
+            ) from exc
+        except urllib.error.URLError as exc:
+            from auto_harness.providers.errors import ProviderError, ErrorCategory
+            raise ProviderError(
+                "%s network error: %s" % (self.provider_name, str(exc.reason)),
+                provider_name=self.provider_name,
+                category=ErrorCategory.NETWORK_ERROR,
+                safe_detail=str(exc.reason)[:500],
+            ) from exc
+        result = self._parse_response(raw, messages)
+        result.protocol = "native_tools"
+        result.provider_name = self.provider_name
+        result.provider_model = self.model
+        return result
 
     def missing_configuration(self) -> List[str]:
         missing = []

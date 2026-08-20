@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -67,6 +68,12 @@ class AgentContributionAnalyzer:
 
         # Collect gate results to check real state improvement
         gate_results = self._collect_gate_results(run_dir)
+        native_deltas = [
+            item for item in gate_results
+            if item.get("provider_protocol") == "native_tools"
+        ]
+        if any(item.get("applied") for item in native_deltas):
+            helped_types.append("native_state_delta")
         any_gate_applied = any(
             g.get("policy_allowed") and (g.get("executed") or g.get("applied"))
             for g in gate_results
@@ -87,7 +94,10 @@ class AgentContributionAnalyzer:
             "llm_helped": llm_helped,
             "help_type": helped_types,
             "selection_source": self._selection_source(analyze),
-            "accepted_action_count": len(decision.get("accepted_actions") or []),
+            "accepted_action_count": (
+                len(decision.get("accepted_actions") or [])
+                + sum(1 for item in native_deltas if item.get("applied"))
+            ),
             "rejected_action_count": len(decision.get("rejected_actions") or []),
             "final_verify_status": final_verify,
             "llm_required_reason": "LLM helped this run, but no baseline comparison exists." if llm_helped else self._reason(helped_types),
@@ -127,7 +137,10 @@ class AgentContributionAnalyzer:
 
         baseline_failed = baseline_status in ("failed", "uncertain")
         agent_passed = agent_status in ("pass", "passed")
-        has_accepted_decision = bool(decision.get("accepted_actions"))
+        has_accepted_decision = bool(decision.get("accepted_actions")) or any(
+            item.get("provider_protocol") == "native_tools" and item.get("applied")
+            for item in gate_results
+        )
         any_gate_applied = any(
             g.get("policy_allowed") and (g.get("executed") or g.get("applied"))
             for g in gate_results
@@ -166,10 +179,8 @@ class AgentContributionAnalyzer:
     def _collect_gate_results(self, run_dir: Path) -> List[Dict]:
         """Collect gate results from agent_decision_gates directory."""
         gates_dir = Path(run_dir) / "agent_decision_gates"
-        if not gates_dir.exists():
-            return []
         results = []
-        for gate_file in sorted(gates_dir.glob("*_gate.json")):
+        for gate_file in sorted(gates_dir.glob("*_gate.json")) if gates_dir.exists() else []:
             try:
                 gate = read_json(gate_file)
                 results.append({
@@ -182,6 +193,33 @@ class AgentContributionAnalyzer:
                 })
             except (OSError, ValueError):
                 continue
+        native_path = Path(run_dir) / "reports" / "native_state_deltas.jsonl"
+        if native_path.exists():
+            try:
+                lines = native_path.read_text(encoding="utf-8").splitlines()
+            except OSError:
+                lines = []
+            for line in lines:
+                try:
+                    delta = json.loads(line)
+                except (TypeError, ValueError):
+                    continue
+                if not isinstance(delta, dict):
+                    continue
+                results.append({
+                    "stage": delta.get("stage", ""),
+                    "decision_status": "ok",
+                    "policy_allowed": bool(delta.get("policy_allowed", True)),
+                    "executed": bool(delta.get("executed", False)),
+                    "applied": bool(delta.get("applied", False)),
+                    "llm_helped": False,
+                    "provider_protocol": "native_tools",
+                    "call_id": delta.get("call_id", ""),
+                    "tool_name": delta.get("tool_name", ""),
+                    "changed_fields": delta.get("changed_fields", []),
+                    "before_state_hash": delta.get("before_state_hash", ""),
+                    "after_state_hash": delta.get("after_state_hash", ""),
+                })
         return results
 
     def _selection_source(self, analyze: Dict) -> str:

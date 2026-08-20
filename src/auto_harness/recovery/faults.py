@@ -13,6 +13,13 @@ FAULT_WINDOWS = frozenset({
     "before_side_effect",
     "after_side_effect_before_commit",
     "after_commit_before_checkpoint",
+    "after_provider_before_call_ledger",
+    "after_call_ledger_before_policy",
+    "after_journal_begin_before_side_effect",
+    "after_side_effect_before_journal_commit",
+    "after_journal_commit_before_tool_result",
+    "after_tool_result_before_provider_feedback",
+    "after_provider_feedback_before_checkpoint",
 })
 
 

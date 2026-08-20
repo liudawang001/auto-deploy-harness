@@ -31,6 +31,18 @@
   "agent_timeout_seconds": 900,
   "agent_mode": "off",
   "agent_provider": "deepseek",
+  "provider_protocol": "json_action",
+  "native_tool_calling": {
+    "enabled": false,
+    "max_turns": 6,
+    "max_calls_per_turn": 1,
+    "parallel_calls": false,
+    "allow_read_only_tools": true,
+    "allow_state_delta_tools": false,
+    "allow_side_effect_tools": false,
+    "max_tool_result_chars": 12000,
+    "tool_result_redaction": true
+  },
   "agent_plan_first_provider": "deepseek",
   "agent_repo_context_mode": "eager_compat",
   "agent_repo_inventory_budget_tokens": 4000,
@@ -78,6 +90,9 @@
 
       "timeout_seconds": 300,
       "max_retries": 2,
+      "native_tool_calling": false,
+      "native_tool_choice": "auto",
+      "native_parallel_tool_calls": false,
       "retry_base_seconds": 1.0,
       "retry_max_seconds": 8.0
     }

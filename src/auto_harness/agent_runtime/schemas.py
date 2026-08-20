@@ -44,6 +44,9 @@ class ToolCall:
     name: str
     input: Dict = field(default_factory=dict)
     idempotency_key: str = ""
+    call_id: str = ""
+    arguments_hash: str = ""
+    provider_protocol: str = "json_action"
 
 
 @dataclass
@@ -160,7 +163,20 @@ def parse_agent_decision(raw_response: str, allowed_tools: List[str] = None) -> 
         tool_input = tool_call_raw.get("input")
         if tool_input is not None and not isinstance(tool_input, dict):
             return AgentDecision(status="invalid", raw_response=raw_response, stop_reason="invalid_tool_input", hypothesis=hypothesis, confidence=confidence)
-        tool_call = ToolCall(name=tool_name, input=tool_input if isinstance(tool_input, dict) else {})
+        from auto_harness.providers.protocols import normalize_json_action_call
+        normalized = normalize_json_action_call({
+            "name": tool_name,
+            "input": tool_input if isinstance(tool_input, dict) else {},
+            "call_id": tool_call_raw.get("call_id", ""),
+        })
+        tool_call = ToolCall(
+            name=normalized.tool_name,
+            input=normalized.arguments,
+            idempotency_key=normalized.fingerprint,
+            call_id=normalized.call_id,
+            arguments_hash=normalized.arguments_hash,
+            provider_protocol=normalized.provider_protocol,
+        )
     elif status == "no_action":
         # no_action is valid, tool_call should be null or empty dict (no name)
         if tool_call_raw is not None and isinstance(tool_call_raw, dict) and tool_call_raw.get("name"):
@@ -171,7 +187,20 @@ def parse_agent_decision(raw_response: str, allowed_tools: List[str] = None) -> 
     # Parse fallback
     fallback_tool_call = None
     if isinstance(fallback_raw, dict) and fallback_raw.get("name"):
-        fallback_tool_call = ToolCall(name=str(fallback_raw["name"]), input=fallback_raw.get("input") if isinstance(fallback_raw.get("input"), dict) else {})
+        from auto_harness.providers.protocols import normalize_json_action_call
+        normalized_fallback = normalize_json_action_call({
+            "name": str(fallback_raw["name"]),
+            "input": fallback_raw.get("input") if isinstance(fallback_raw.get("input"), dict) else {},
+            "call_id": fallback_raw.get("call_id", ""),
+        }, call_index=1)
+        fallback_tool_call = ToolCall(
+            name=normalized_fallback.tool_name,
+            input=normalized_fallback.arguments,
+            idempotency_key=normalized_fallback.fingerprint,
+            call_id=normalized_fallback.call_id,
+            arguments_hash=normalized_fallback.arguments_hash,
+            provider_protocol=normalized_fallback.provider_protocol,
+        )
 
     return AgentDecision(
         status=status,

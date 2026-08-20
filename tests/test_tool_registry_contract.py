@@ -89,6 +89,13 @@ class TestImplementedTools:
             "discover_gradio_api",
             "discover_openapi_schema",
             "probe_browser_dom",
+            "select_runner_candidate",
+            "apply_dependency_constraint",
+            "select_environment_backend",
+            "select_torch_variant",
+            "select_model_source",
+            "select_model_asset_strategy",
+            "set_stage_hint",
         ])
 
     def test_unimplemented_tools_have_no_executor(self):

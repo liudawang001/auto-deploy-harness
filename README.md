@@ -14,6 +14,43 @@ auto-deploy-harness 是一个基于 LangGraph 编排的自动部署与证据化�
 - Checkpoint 只描述图状态；外部副作用恢复必须经过 Operation Journal 和 Reconciler。
 - 禁止副作用发生后自动从 LangGraph 切到 legacy。
 
+## Provider 协议版本（v0.3）
+
+`json_action` 与 `native_tools` 是两个独立演进、共用安全内核的协议。默认仍是 `json_action`，旧配置和现有部署路径无需修改。`native_tools` 必须显式开启；Provider 不支持或能力未启用时会直接失败，不会静默降级。
+
+```json
+{
+  "provider_protocol": "native_tools",
+  "native_tool_calling": {
+    "enabled": true,
+    "max_turns": 6,
+    "max_calls_per_turn": 1,
+    "parallel_calls": false,
+    "allow_read_only_tools": true,
+    "allow_state_delta_tools": false,
+    "allow_side_effect_tools": false,
+    "max_tool_result_chars": 12000,
+    "tool_result_redaction": true
+  },
+  "provider_configs": {
+    "deepseek": {
+      "native_tool_calling": true,
+      "native_tool_choice": "auto",
+      "native_parallel_tool_calls": false
+    }
+  }
+}
+```
+
+v0.3 开放受限仓库只读工具，以及在 `gated_actor` 下显式开启的内部 `state_delta` 工具。外部副作用工具即使由 Provider 请求也不会开放，需等待 v0.4 的独立 Side-effect Release Gate。所有原生调用仍经过 Schema、stage/mode allowlist、Policy、确定性 Executor、Tool Call Ledger 与 Evidence Gate；Provider 只能表达调用意图，不能授予审批或直接判定成功。
+
+运行产物位于 `agent_tool_calls/`、`reports/provider_protocol.json` 和 `reports/native_tool_calling_summary.json`。Fake Provider 只能达到 `fake_verified`，不能冒充真实 Provider 的 `live_read_only_verified`。真实 DeepSeek smoke 为显式外部门：
+
+```bash
+RUN_DEEPSEEK_LIVE_TESTS=1 DEEPSEEK_API_KEY=... \
+  pytest -q tests/live/test_native_tool_calling_live.py
+```
+
 项目发布名和主命令为 `auto-deploy-harness`。为避免破坏历史 import 和已有脚本，Python 包名继续保留为 `auto_harness`，旧命令 `auto-harness` 也继续兼容。
 
 ## 最快开始
@@ -81,7 +118,7 @@ auto-deploy-harness deploy \
 - 可扩展 Provider Registry、Mock/讯飞 Provider，以及通用 OpenAI-compatible Provider。
 - Claude Code executor wrapper。
 - Policy-constrained LLM Agent：`agent_mode=planner` 时 LLM 可通过 schema 化 action 影响 analyze plan；`agent_mode=gated_actor` 且显式开关打开时，LLM repair action 可在 policy gate 后执行安全动作；LLM 永远不能直接执行 shell、修改源码或判定成功。
-- Provider protocol：当前 Mock、讯飞与 OpenAI-compatible Provider 使用 `json_action`（模型输出 Schema 化 JSON，再由 Python 校验和执行），不是 provider-native function/tool calling；运行证据会显式记录 `provider_protocol`，避免把 JSON Action 包装成原生 Tool Calling。
+- Provider protocol：默认 Mock、讯飞和所有现有调用路径继续使用 `json_action`；DeepSeek 与显式声明能力的 OpenAI-compatible Provider 可选择 `native_tools`。两个协议共用归一化调用、Schema/Policy、Executor、Ledger 与 Evidence Gate，运行证据会记录实际选择及原因。
 - Self-healing 主流程：`deploy/resume --agent-self-heal` 会打开 bounded repair/resume loop，普通 `TaskRunner.run_existing()` 能在 policy-approved repair 后自动从 `host_preflight` / `env_solve` / `env_deploy` / `model_prepare` / `runner` / `verify` 安全阶段恢复，最终仍由 verify trace 判定成功。
 - Agent runtime 证据：每个 run 会生成 `agent_steps.jsonl`、`agent_state.json`、`agent_plan.json`、`agent_plan_revisions.jsonl` 和 `reports/agent_contribution.json`，记录 observe / plan / policy gate / tool call / observe / critique 的受控探索过程。
 - Tool registry：LLM 只能请求命名 tool，Python runtime 根据 `risk_level`、`side_effects`、`requires_policy` 和 `allowed_modes` 进行执行控制；side-effect tool 默认需要 policy gate。

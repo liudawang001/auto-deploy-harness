@@ -749,10 +749,78 @@ class DeepSeekProviderTests(unittest.TestCase):
                 self._make_provider()
         self.assertEqual(ctx.exception.category, ErrorCategory.CONFIGURATION_ERROR)
 
-    def test_native_tool_calling_true_is_rejected(self):
+    def test_native_tool_calling_true_is_supported_explicitly(self):
+        provider = self._make_provider(native_tool_calling=True)
+        self.assertTrue(provider.native_tool_calling)
+        self.assertTrue(provider.capabilities["supports_tool_calling"])
+
+    def test_native_tool_calling_disabled_fails_closed(self):
+        provider = self._make_provider_with_key(native_tool_calling=False)
         with self.assertRaises(ProviderError) as ctx:
-            self._make_provider(native_tool_calling=True)
-        self.assertEqual(ctx.exception.category, ErrorCategory.CONFIGURATION_ERROR)
+            provider.complete_with_tools(
+                [Message(role="user", content="inspect")],
+                [{"type": "function", "function": {
+                    "name": "inspect_repo_tree",
+                    "parameters": {"type": "object", "properties": {}},
+                }}],
+            )
+        self.assertEqual(ctx.exception.category, ErrorCategory.INVALID_REQUEST)
+
+    def test_native_tool_payload_preserves_assistant_and_tool_messages(self):
+        provider = self._make_provider_with_key(native_tool_calling=True)
+        call = {
+            "id": "call-1",
+            "type": "function",
+            "function": {"name": "inspect_repo_tree", "arguments": "{}"},
+        }
+        payload = provider._build_tools_payload(
+            [
+                Message(role="user", content="inspect"),
+                Message(role="assistant", content="", tool_calls=[call]),
+                Message(role="tool", content='{"status":"passed"}', tool_call_id="call-1"),
+            ],
+            [{"type": "function", "function": {
+                "name": "inspect_repo_tree",
+                "parameters": {"type": "object", "properties": {}},
+            }}],
+        )
+        self.assertEqual(payload["messages"][1]["tool_calls"], [call])
+        self.assertEqual(payload["messages"][2]["role"], "tool")
+        self.assertEqual(payload["messages"][2]["tool_call_id"], "call-1")
+        self.assertNotIn("response_format", payload)
+
+    def test_native_tool_response_allows_empty_text_with_tool_call(self):
+        response = {
+            "id": "resp-native-1",
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {
+                            "name": "inspect_repo_tree",
+                            "arguments": "{}",
+                        },
+                    }],
+                },
+                "finish_reason": "tool_calls",
+            }],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+        }
+        provider = self._make_provider_with_key(native_tool_calling=True)
+        provider.urlopen = _fake_urlopen_factory(response)
+        result = provider.complete_with_tools(
+            [Message(role="user", content="inspect")],
+            [{"type": "function", "function": {
+                "name": "inspect_repo_tree",
+                "parameters": {"type": "object", "properties": {}},
+            }}],
+        )
+        self.assertEqual(result.protocol, "native_tools")
+        self.assertEqual(result.text, "")
+        self.assertEqual(result.tool_calls[0]["id"], "call-1")
 
     def test_json_action_rejects_tool_messages(self):
         provider = self._make_provider_with_key()
@@ -789,10 +857,12 @@ class DeepSeekProviderTests(unittest.TestCase):
         provider = self._make_provider(purpose="agent")
         self.assertEqual(provider.provider_name, "deepseek")
 
-    def test_unimplemented_protocol_capabilities_are_false(self):
+    def test_protocol_capabilities_follow_feature_flag(self):
         provider = self._make_provider(purpose="agent")
         self.assertFalse(provider.capabilities["supports_tool_calling"])
         self.assertFalse(provider.capabilities["supports_streaming"])
+        enabled = self._make_provider(purpose="agent", native_tool_calling=True)
+        self.assertTrue(enabled.capabilities["supports_tool_calling"])
 
     def test_provider_not_instance_of_generic_openai_compatible(self):
         """DeepSeekProvider is a dedicated class, not generic OpenAICompatibleProvider."""
