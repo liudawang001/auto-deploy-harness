@@ -335,15 +335,29 @@ class ModelScopeSourceClient(ModelSourceClient):
         ).rstrip("/")
 
     def resolve_revision(self, repo_id: str, requested_revision: str) -> Dict[str, Any]:
+        """Pin the mutable branch to the immutable head commit.
+
+        ModelScope's website paths now serve HTML; only the ``api/v1`` JSON
+        API is machine-readable. The listing carries per-file last-commit
+        revisions plus the head commit metadata, from which the immutable
+        head revision is derived (falling back to the newest committed file
+        when the head id is unavailable).
+        """
         repo = self._quote(repo_id)
-        rev = urllib.parse.quote(requested_revision or "master", safe="")
-        url = "%s/%s/repo/files?Revision=%s" % (self.api_base, repo, rev)
+        requested = (requested_revision or "").strip() or "master"
+        if requested == "main":
+            requested = "master"
+        rev = urllib.parse.quote(requested, safe="")
+        url = "%s/api/v1/models/%s/repo/files?Revision=%s&Recursive=true" % (self.api_base, repo, rev)
         response = self._get(url)
         payload = self._parse_json(response.read(), "revision resolution")
         data = payload.get("Data") if isinstance(payload, dict) else payload
         if not isinstance(data, dict):
             raise SourceClientError("metadata_invalid", "modelscope revision payload invalid")
-        sha = data.get("Revision") or data.get("CommitID") or data.get("CommitId") or ""
+        items = data.get("Files") if isinstance(data, dict) else None
+        if not isinstance(items, list) or not items:
+            raise SourceClientError("metadata_invalid", "modelscope file listing is empty")
+        sha = self._head_commit(data, items)
         if not COMMIT_SHA.match(str(sha)):
             raise SourceClientError("metadata_invalid", "resolved revision is not an immutable commit SHA")
         return {
@@ -352,6 +366,28 @@ class ModelScopeSourceClient(ModelSourceClient):
             "license": str(data.get("License") or data.get("license") or ""),
             "private": bool(data.get("Private") or False),
         }
+
+    @staticmethod
+    def _head_commit(data: Dict[str, Any], items: List[Dict[str, Any]]) -> str:
+        """Derive the head commit from the listing metadata.
+
+        Per-file ``Revision`` values are the last commit touching each file;
+        the listing's ``LatestCommitter`` describes the head commit, whose
+        full id is matched back against the per-file revisions.
+        """
+        committer = data.get("LatestCommitter") if isinstance(data, dict) else None
+        short_id = str((committer or {}).get("ShortId") or "")
+        if short_id:
+            for item in items:
+                revision = str(item.get("Revision") or "")
+                if revision.startswith(short_id):
+                    return revision
+        best = max(
+            items,
+            key=lambda item: int(item.get("CommittedDate") or 0),
+            default=None,
+        )
+        return str(best.get("Revision") or "") if best else ""
 
     def fetch_model_config(self, repo_id: str, resolved_revision: str) -> Dict[str, Any]:
         repo = self._quote(repo_id)
@@ -365,8 +401,8 @@ class ModelScopeSourceClient(ModelSourceClient):
 
     def list_files(self, repo_id: str, resolved_revision: str) -> List[Dict[str, Any]]:
         repo = self._quote(repo_id)
-        rev = urllib.parse.quote(resolved_revision, safe="")
-        url = "%s/%s/repo/files?Revision=%s&Recursive=true" % (self.api_base, repo, rev)
+        rev = urllib.parse.quote(resolved_revision or "master", safe="")
+        url = "%s/api/v1/models/%s/repo/files?Revision=%s&Recursive=true" % (self.api_base, repo, rev)
         response = self._get(url)
         payload = self._parse_json(response.read(), "file tree")
         data = payload.get("Data") if isinstance(payload, dict) else payload
@@ -381,6 +417,8 @@ class ModelScopeSourceClient(ModelSourceClient):
         for item in items:
             if not isinstance(item, dict):
                 continue
+            if str(item.get("Type") or "blob") not in ("blob", "file"):
+                continue  # skip directory/tree entries
             path = item.get("Path") or item.get("path") or item.get("Name") or item.get("name") or ""
             if not path:
                 continue
