@@ -63,6 +63,9 @@ class CandidateComposer:
                     if environment else ""
                 ),
                 run_candidate_id=run_id,
+                # The run argv lets grounded LLM selection map a deployment
+                # candidate back to its registry command candidate (Phase B2).
+                run_cmd=list(run.argv),
                 expected_port=run.expected_port,
                 protocol_hints=[verify.protocol] if verify else [],
                 verify_candidate_ids=(

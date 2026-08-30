@@ -16,6 +16,7 @@ from auto_harness.agent_runtime.plan_compiler import PlanCompiler
 from auto_harness.agent_runtime.plan_policy import PlanPolicyGate
 from auto_harness.agent_runtime.project_snapshot import ProjectSnapshotBuilder
 from auto_harness.agent_runtime.planner_turn import PLANNER_TURN_SCHEMA
+from auto_harness.command_auth.schemas import canonical_hash
 from auto_harness.context import (
     ContextPriority,
     ContextSection,
@@ -62,6 +63,13 @@ Rules:
   candidate_id and argv exactly; do not invent a command or reuse an id for
   different argv. Prefer a documented --serve-only candidate for API
   verification when one is present.
+- Prefer selection over invention: set selection.selected_run_candidate_id
+  to an existing command_registry candidate id and reference the matching
+  deployment candidate ids when they resolve the capability gaps. Only when
+  no existing candidate fits may you emit candidate_requests (max 2), and
+  every request must cite existing command_registry evidence ids in
+  grounding_evidence_ids. Requests cannot change the backend, network, or
+  filesystem sandbox; the framework forces docker/none and requires approval.
 - Every grounding.file must be an exact repository path present in file_tree or
   selected_files. Snapshot metadata keys such as command_registry,
   repository_inventory, and detected_signals are not files and must never be
@@ -202,26 +210,60 @@ DEPLOYMENT_PLAN_SCHEMA = {
                     "line_end": {"type": "integer"},
                     "sha256": {"type": "string"},
                     "observation_id": {"type": "string"},
+                    "evidence_id": {
+                        "type": "string",
+                        "description": "optional command_registry evidence id backing this claim",
+                    },
                 },
             },
         },
         "environment": {
             "type": "object",
-            "required": ["install_commands"],
+            "required": [],
             "properties": {
                 "backend": {"type": "string"},
                 "python": {"type": "string"},
                 "install_commands": {"type": "array", "items": {"type": "array", "items": {"type": "string"}}},
             },
         },
+        "selection": {
+            "type": "object",
+            "description": "Prefer referencing existing candidates by id instead of inventing commands.",
+            "properties": {
+                "selected_environment_candidate_id": {"type": "string"},
+                "selected_run_candidate_id": {"type": "string"},
+                "selected_verify_candidate_id": {"type": "string"},
+            },
+        },
+        "candidate_requests": {
+            "type": "array",
+            "maxItems": 2,
+            "description": "Only when no existing candidate fits. Requests are revalidated and authorized by the framework.",
+            "items": {
+                "type": "object",
+                "required": ["type", "phase", "argv", "grounding_evidence_ids"],
+                "properties": {
+                    "type": {"type": "string", "enum": ["candidate_request"]},
+                    "phase": {"type": "string", "enum": ["install", "setup", "run"]},
+                    "argv": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+                    "cwd": {"type": "string"},
+                    "expected_port": {"type": "integer"},
+                    "grounding_evidence_ids": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": {"type": "string"},
+                        "description": "existing command_registry evidence ids only",
+                    },
+                },
+            },
+        },
         "model_assets": {"type": "object"},
         "run": {
             "type": "object",
-            "required": ["candidates", "selected_candidate_id"],
+            "required": [],
             "properties": {
                 "candidates": {
                     "type": "array",
-                    "minItems": 1,
                     "items": {
                         "type": "object",
                         "required": ["id", "cmd", "expected_port", "reason"],
@@ -967,6 +1009,14 @@ class PlanFirstDeploymentLoop:
         verify_result = pipeline_results.get("verify", {})
         verify_status = verify_result.get("status", "")
         replan_count = 0
+        # Phase B2 bounded replan budget: runner replan 2, verify replan 2,
+        # the same failure signature at most twice, and never re-execute an
+        # identical plan.
+        replan_budget = {"runner": 2, "verify": 2}
+        replan_used = {"runner": 0, "verify": 0}
+        failure_signatures = []
+        seen_plan_hashes = set()
+        replan_stopped_reason = ""
 
         # 8. Replan loop on failure
         while verify_status not in ("passed", "pass") and replan_count < self.max_replans:
@@ -982,8 +1032,17 @@ class PlanFirstDeploymentLoop:
                 plan=parsed_plan,
             )
 
-            # Route failure-specific skills for replan
             failure_category = self._classify_failure_category(failure_context)
+            budget_key = "verify" if failed_stage == "verify" else "runner"
+            failure_signature = "%s:%s" % (failed_stage, failure_category)
+            if failure_signatures.count(failure_signature) >= 2:
+                replan_stopped_reason = "same_failure_signature_budget_exhausted"
+                break
+            if replan_used[budget_key] >= replan_budget.get(budget_key, 2):
+                replan_stopped_reason = "replan_budget_exhausted"
+                break
+
+            # Route failure-specific skills for replan
             _, replan_skill_context = self._route_skills(
                 stage=failed_stage,
                 analysis=analysis,
@@ -1012,9 +1071,11 @@ class PlanFirstDeploymentLoop:
             try:
                 new_plan = self.parser.parse(replan_result.text)
             except ValueError:
+                replan_stopped_reason = "replan_parse_failed"
                 break
 
             if new_plan.status != "ok":
+                replan_stopped_reason = "replan_not_ok"
                 break
 
             # Policy gate new plan
@@ -1029,7 +1090,16 @@ class PlanFirstDeploymentLoop:
                 config=self.config,
             )
             if not new_policy["allowed"]:
+                replan_stopped_reason = "replan_policy_rejected"
                 break
+
+            normalized_plan_hash = self._plan_decision_hash(
+                new_policy.get("normalized_plan") or {}
+            )
+            if normalized_plan_hash in seen_plan_hashes:
+                replan_stopped_reason = "replan_no_material_change"
+                break
+            seen_plan_hashes.add(normalized_plan_hash)
 
             # Determine resume stage
             resume_from = self._determine_resume_stage(parsed_plan.to_dict(), new_plan.to_dict())
@@ -1067,7 +1137,9 @@ class PlanFirstDeploymentLoop:
             )
             verify_result = pipeline_results.get("verify", {})
             verify_status = verify_result.get("status", "")
+            replan_used[budget_key] += 1
             replan_count += 1
+            failure_signatures.append(failure_signature)
 
         # Write pipeline results
         artifacts.write_pipeline_results(pipeline_results)
@@ -1082,8 +1154,21 @@ class PlanFirstDeploymentLoop:
         )
         artifacts.write_contribution_evidence(contribution)
 
+        llm_resolution = self._build_llm_resolution(
+            plan=parsed_plan,
+            policy_result=policy_result,
+            snapshot=snapshot,
+            pipeline_results=pipeline_results,
+            replan_count=replan_count,
+            failure_signatures=failure_signatures,
+            stopped_reason=replan_stopped_reason,
+        )
+        artifacts.write_llm_resolution(llm_resolution)
+
         stop_reason = "verify_passed" if verify_status in ("passed", "pass") else "verify_failed"
-        return self._build_result(
+        if replan_stopped_reason and stop_reason != "verify_passed":
+            stop_reason = replan_stopped_reason
+        result = self._build_result(
             task_id=task_id,
             plan=parsed_plan,
             policy_result=policy_result,
@@ -1092,6 +1177,129 @@ class PlanFirstDeploymentLoop:
             artifacts=artifacts,
             replan_count=replan_count,
         )
+        result["llm_resolution"] = llm_resolution
+        return result
+
+    @staticmethod
+    def _plan_decision_hash(normalized_plan: Dict) -> str:
+        decision_core = {
+            "environment": (normalized_plan.get("environment") or {}).get("install_commands"),
+            "run": [
+                {
+                    "cmd": item.get("cmd"),
+                    "expected_port": item.get("expected_port"),
+                }
+                for item in (normalized_plan.get("run") or {}).get("candidates") or []
+            ],
+            "selected": (normalized_plan.get("run") or {}).get("selected_candidate_id"),
+            "selection": normalized_plan.get("selection") or {},
+            "verify": (normalized_plan.get("verify") or {}).get("request"),
+        }
+        return canonical_hash(decision_core)
+
+    def _build_llm_resolution(
+        self,
+        *,
+        plan: DeploymentPlan,
+        policy_result: Dict,
+        snapshot: Dict,
+        pipeline_results: Dict,
+        replan_count: int,
+        failure_signatures: List,
+        stopped_reason: str,
+    ) -> Dict:
+        """Phase B2: explain what the LLM actually contributed (doc 7.8)."""
+        verify_status = (pipeline_results.get("verify") or {}).get("status", "")
+        selection = plan.selection or {}
+        rejected_codes = [
+            str(item.get("reason_code") or item.get("reason") or "")
+            for item in policy_result.get("rejected_items") or []
+        ]
+        harmful = [
+            code for code in rejected_codes
+            if code.endswith("hard_denied") or code in (
+                "fabricated_evidence_id_rejected",
+                "candidate_request_budget_exceeded",
+                "selected_run_candidate_not_in_registry",
+                "selected_verify_candidate_not_found",
+                "selected_environment_candidate_not_found",
+            )
+        ]
+        contributions = []
+        deterministic = snapshot.get("deployment_candidates") or []
+        selected_top = (
+            deterministic
+            and selection.get("selected_run_candidate_id")
+            and str(selection["selected_run_candidate_id"])
+            == str((deterministic[0] or {}).get("run_candidate_id") or "")
+            and replan_count == 0
+        )
+        if selection.get("selected_run_candidate_id"):
+            if selected_top:
+                contributions.append("no_material_contribution")
+            else:
+                contributions.append(
+                    "resolved_ambiguity" if len(deterministic) > 1
+                    else "selected_existing_candidate"
+                )
+        if selection.get("selected_verify_candidate_id"):
+            contributions.append("filled_verify_candidate")
+        if selection.get("selected_environment_candidate_id"):
+            contributions.append("selected_existing_candidate")
+        authorized_requests = 0
+        for decision in policy_result.get("normalized_plan", {}).get("command_decisions") or []:
+            if decision.get("candidate_id", "").startswith("cmd_") and decision.get("verdict") in (
+                "auto_allowed", "approval_required",
+            ):
+                if plan.candidate_requests:
+                    authorized_requests += 1
+        if plan.candidate_requests and authorized_requests:
+            contributions.append("requested_valid_candidate")
+        verify_request = (plan.verify or {}).get("request") or {}
+        contract_verify = (snapshot.get("deployment_contract") or {}).get("verify") or {}
+        deterministic_protocols = set()
+        for candidate in snapshot.get("deployment_candidates") or []:
+            if isinstance(candidate, dict):
+                deterministic_protocols.update(
+                    str(item) for item in candidate.get("protocol_hints") or []
+                )
+        service_type = str((plan.verify or {}).get("service_type") or "")
+        if (
+            verify_request
+            and not contract_verify
+            and not deterministic_protocols
+        ) or (verify_request and deterministic_protocols and service_type not in deterministic_protocols):
+            contributions.append("filled_protocol")
+        if not contributions and harmful:
+            contributions.append("harmful_proposal_rejected")
+        if not contributions:
+            contributions.append("no_material_contribution")
+        deterministic_ready = any(
+            (candidate.get("missing_capabilities") or []) == []
+            for candidate in snapshot.get("deployment_candidates") or []
+        )
+        material = [item for item in contributions if item != "no_material_contribution"]
+        llm_helped = verify_status in ("passed", "pass") and (
+            replan_count > 0 or bool(material)
+        ) and not (deterministic_ready and replan_count == 0 and not material)
+        return {
+            "schema_version": 1,
+            "contribution": contributions[0],
+            "contributions": contributions,
+            "harmful_proposals_rejected": harmful,
+            "llm_helped": llm_helped,
+            "verify_status": verify_status,
+            "replan_count": replan_count,
+            "failure_signatures": list(failure_signatures),
+            "stopped_reason": stopped_reason or ("verify_passed" if verify_status in ("passed", "pass") else "verify_failed"),
+            "candidate_requests": list(plan.candidate_requests or []),
+            "selection": dict(selection),
+            "safety": {
+                "llm_executed_commands": False,
+                "requests_require_authorization": True,
+                "deterministic_result_preserved": contributions == ["no_material_contribution"],
+            },
+        }
 
     def _plan_with_observations(
         self,

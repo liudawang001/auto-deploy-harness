@@ -95,6 +95,12 @@ class PlanArtifactWriter:
         write_json(path, evidence)
         return path
 
+    def write_llm_resolution(self, resolution: Dict) -> Path:
+        """Phase B2: persist the grounded-LLM resolution audit record."""
+        path = self.reports_dir / "llm_resolution.json"
+        write_json(path, resolution)
+        return path
+
     def write_pipeline_results(self, results: Dict) -> Path:
         path = self.reports_dir / "pipeline_results.json"
         write_json(path, results)

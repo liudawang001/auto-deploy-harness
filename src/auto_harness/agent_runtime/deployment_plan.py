@@ -14,6 +14,9 @@ from auto_harness.providers.json_utils import parse_json_object
 # Allowed status values
 VALID_STATUSES = frozenset({"ok", "needs_human_input", "no_safe_plan", "invalid"})
 
+# Candidate request phases mirror the command registry phases.
+CANDIDATE_REQUEST_PHASES = frozenset({"install", "setup", "run"})
+
 
 @dataclass
 class DeploymentPlan:
@@ -28,6 +31,8 @@ class DeploymentPlan:
     verify: Dict = field(default_factory=dict)
     risks: List[Dict] = field(default_factory=list)
     fallbacks: List[Dict] = field(default_factory=list)
+    selection: Dict = field(default_factory=dict)
+    candidate_requests: List[Dict] = field(default_factory=list)
     raw_response: str = ""
 
     def to_dict(self) -> Dict:
@@ -42,6 +47,8 @@ class DeploymentPlan:
             "verify": self.verify,
             "risks": self.risks,
             "fallbacks": self.fallbacks,
+            "selection": self.selection,
+            "candidate_requests": self.candidate_requests,
         }
 
 
@@ -109,14 +116,38 @@ class DeploymentPlanParser:
             for field_name in ("line_start", "line_end"):
                 if field_name in g and not isinstance(g[field_name], int):
                     raise ValueError("grounding[%d].%s must be an integer" % (i, field_name))
+            if "evidence_id" in g and not str(g.get("evidence_id") or "").strip():
+                raise ValueError("grounding[%d].evidence_id must be a non-empty string" % i)
+
+        # Grounded selection: reference existing registry candidates by id.
+        # This is the Phase B2 alternative to inventing run candidates.
+        selection = data.get("selection", {})
+        if not isinstance(selection, dict):
+            raise ValueError("'selection' must be a dict")
+        for key in (
+            "selected_environment_candidate_id",
+            "selected_run_candidate_id",
+            "selected_verify_candidate_id",
+        ):
+            if key in selection and not str(selection.get(key) or "").strip():
+                raise ValueError("selection.%s must be a non-empty string when present" % key)
+        selected_run_candidate = str(selection.get("selected_run_candidate_id") or "")
 
         # Validate environment
         environment = data.get("environment", {})
         if not isinstance(environment, dict):
             raise ValueError("'environment' must be a dict")
         install_commands = environment.get("install_commands", [])
-        if not isinstance(install_commands, list) or len(install_commands) == 0:
-            raise ValueError("environment.install_commands must be a non-empty list")
+        if not isinstance(install_commands, list):
+            raise ValueError("environment.install_commands must be a list")
+        selected_environment_candidate = str(
+            selection.get("selected_environment_candidate_id") or ""
+        )
+        if not install_commands and not selected_environment_candidate:
+            raise ValueError(
+                "environment.install_commands must be a non-empty list unless "
+                "selection.selected_environment_candidate_id is provided"
+            )
         for i, cmd in enumerate(install_commands):
             self._validate_command(cmd, "environment.install_commands[%d]" % i)
 
@@ -130,8 +161,8 @@ class DeploymentPlanParser:
         if not isinstance(run, dict):
             raise ValueError("'run' must be a dict")
         candidates = run.get("candidates", [])
-        if not isinstance(candidates, list) or len(candidates) == 0:
-            raise ValueError("run.candidates must be a non-empty list")
+        if not isinstance(candidates, list):
+            raise ValueError("run.candidates must be a list")
         candidate_ids = set()
         for i, cand in enumerate(candidates):
             if not isinstance(cand, dict):
@@ -144,12 +175,17 @@ class DeploymentPlanParser:
             self._validate_command(cmd, "run.candidates[%d].cmd" % i)
             if not isinstance(cand.get("expected_port"), (int, float)):
                 raise ValueError("run.candidates[%d] must have numeric 'expected_port'" % i)
+        if not candidates and not selected_run_candidate:
+            raise ValueError(
+                "run.candidates must be a non-empty list unless "
+                "selection.selected_run_candidate_id is provided"
+            )
 
         # Validate selected_candidate_id
         selected_id = str(run.get("selected_candidate_id", ""))
-        if not selected_id:
+        if not selected_id and not selected_run_candidate:
             raise ValueError("run.selected_candidate_id must be specified")
-        if selected_id not in candidate_ids:
+        if selected_id and candidates and selected_id not in candidate_ids:
             raise ValueError(
                 "run.selected_candidate_id '%s' does not match any candidate id: %s"
                 % (selected_id, sorted(candidate_ids))
@@ -182,6 +218,34 @@ class DeploymentPlanParser:
         if not isinstance(fallbacks, list):
             raise ValueError("'fallbacks' must be a list")
 
+        # Validate candidate requests (Phase B2): the LLM may only *request*
+        # new candidates grounded in registry evidence; the framework still
+        # normalizes, revalidates, and authorizes them.
+        candidate_requests = data.get("candidate_requests", [])
+        if not isinstance(candidate_requests, list):
+            raise ValueError("'candidate_requests' must be a list")
+        for i, request in enumerate(candidate_requests):
+            if not isinstance(request, dict):
+                raise ValueError("candidate_requests[%d] must be a dict" % i)
+            if str(request.get("type", "")) != "candidate_request":
+                raise ValueError("candidate_requests[%d].type must be 'candidate_request'" % i)
+            if str(request.get("phase", "")) not in CANDIDATE_REQUEST_PHASES:
+                raise ValueError("candidate_requests[%d].phase must be one of %s" % (
+                    i, sorted(CANDIDATE_REQUEST_PHASES),
+                ))
+            self._validate_command(request.get("argv"), "candidate_requests[%d].argv" % i)
+            grounding_ids = request.get("grounding_evidence_ids", [])
+            if not isinstance(grounding_ids, list) or not grounding_ids or not all(
+                isinstance(item, str) and item.strip() for item in grounding_ids
+            ):
+                raise ValueError(
+                    "candidate_requests[%d].grounding_evidence_ids must be a non-empty list of strings" % i
+                )
+            if "expected_port" in request and not isinstance(request.get("expected_port"), (int, float)):
+                raise ValueError("candidate_requests[%d].expected_port must be numeric" % i)
+            if "cwd" in request and not isinstance(request.get("cwd"), str):
+                raise ValueError("candidate_requests[%d].cwd must be a string" % i)
+
         return DeploymentPlan(
             status=status,
             plan_id=plan_id,
@@ -193,6 +257,8 @@ class DeploymentPlanParser:
             verify=verify,
             risks=risks,
             fallbacks=fallbacks,
+            selection=selection,
+            candidate_requests=candidate_requests,
             raw_response=raw_text,
         )
 

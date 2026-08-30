@@ -74,6 +74,7 @@ class DeploymentCandidate:
     install_candidate_ids: List[str] = field(default_factory=list)
     setup_candidate_ids: List[str] = field(default_factory=list)
     run_candidate_id: str = ""
+    run_cmd: List[str] = field(default_factory=list)
     expected_port: int = 0
     protocol_hints: List[str] = field(default_factory=list)
     verify_candidate_ids: List[str] = field(default_factory=list)

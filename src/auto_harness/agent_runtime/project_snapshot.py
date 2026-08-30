@@ -180,6 +180,35 @@ class ProjectSnapshotBuilder:
                 )
             )
             deployment_candidates.append(deployment_candidate.to_dict())
+        else:
+            # Phase B2: expose adapter-composed deployment candidates so the
+            # planner can select existing candidates by id even without an
+            # explicit contract. Composition grants no execution authority.
+            from auto_harness.deployment_adapters import (
+                CandidateComposer,
+                DeploymentAdapterRegistry,
+                DetectionContext,
+            )
+            from auto_harness.modules.analyzer import ProjectAnalyzer
+
+            legacy_frameworks = ProjectAnalyzer()._detect_frameworks(
+                repo_dir, file_tree,
+            )
+            adapter_context = DetectionContext(
+                repo_dir=Path(repo_dir),
+                files=tuple(file_tree),
+                capabilities=capabilities,
+                legacy_frameworks=tuple(legacy_frameworks),
+            )
+            proposals = DeploymentAdapterRegistry.builtins().proposals(adapter_context)
+            deployment_candidates = [
+                item.to_dict()
+                for item in CandidateComposer().compose(
+                    proposals["run"],
+                    proposals["environment"],
+                    proposals["verify"],
+                )
+            ]
 
         return {
             "schema_version": 2,

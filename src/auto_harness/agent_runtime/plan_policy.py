@@ -21,7 +21,11 @@ from auto_harness.command_auth import (
     CommandRegistry,
 )
 from auto_harness.command_auth.approval import build_command_approval_request
-from auto_harness.command_auth.schemas import sandbox_policy_fingerprint
+from auto_harness.command_auth.evidence import revalidate_evidence
+from auto_harness.command_auth.schemas import (
+    CommandCandidate,
+    sandbox_policy_fingerprint,
+)
 
 
 # Command root allowlist - only these programs may be proposed
@@ -61,6 +65,10 @@ WEAK_EVIDENCE_PATTERNS = re.compile(
     r"^HTTP\s*\d{3}$|^status\s*code\s*\d{3}$|^2\d{2}$",
     re.IGNORECASE,
 )
+
+# Phase B2 replan budget: the LLM may request at most this many new
+# candidates per planning round (doc: candidate request per round = 2).
+MAX_CANDIDATE_REQUESTS_PER_ROUND = 2
 
 
 class PlanPolicyGate:
@@ -132,9 +140,40 @@ class PlanPolicyGate:
                 },
             }
 
+        # Phase B2: grounded LLM fallback. Candidate requests are registered
+        # into the registry copy with evidence revalidation; selection
+        # injects an existing registry candidate by id. Both paths still go
+        # through the same command authorization below.
+        candidate_request_rejections = self._register_candidate_requests(
+            plan, registry, snapshot,
+        )
+        rejected_items.extend(candidate_request_rejections)
+        grounding_evidence_rejections = self._validate_grounding_evidence_ids(
+            plan, registry,
+        )
+        rejected_items.extend(grounding_evidence_rejections)
+
         # Validate environment.install_commands
         env = plan.get("environment", {})
-        install_commands = env.get("install_commands", [])
+        install_commands = list(env.get("install_commands", []) or [])
+        env_selection_id = str(
+            (plan.get("selection") or {}).get("selected_environment_candidate_id") or ""
+        )
+        if not install_commands and env_selection_id:
+            env_candidate = next((
+                item for item in registry.candidates
+                if item.candidate_id == env_selection_id
+                and item.phase in ("install", "setup")
+            ), None)
+            if env_candidate is None:
+                rejected_items.append({
+                    "section": "selection.selected_environment_candidate_id",
+                    "item_index": -1,
+                    "reason": "selected environment candidate not found in registry",
+                    "reason_code": "selected_environment_candidate_not_found",
+                })
+            else:
+                install_commands = [list(env_candidate.argv)]
         safe_install_commands = []
         for i, cmd in enumerate(install_commands):
             # Reject command as string (must be list)
@@ -298,17 +337,62 @@ class PlanPolicyGate:
 
         # Validate run.candidates
         run = plan.get("run", {})
-        candidates = run.get("candidates", [])
+        candidates = list(run.get("candidates", []) or [])
+        selection = plan.get("selection") or {}
+        selected_run_candidate_id = str(selection.get("selected_run_candidate_id") or "")
+        if selected_run_candidate_id:
+            selected_registry_candidate = next((
+                item for item in registry.candidates
+                if item.candidate_id == selected_run_candidate_id
+                and item.phase == "run"
+            ), None)
+            if selected_registry_candidate is None:
+                # Deployment candidate ids (deploy_*/adapter_run_*) map back
+                # to their registry command via the composed run argv.
+                for candidate in snapshot.get("deployment_candidates") or []:
+                    if not isinstance(candidate, dict):
+                        continue
+                    if str(candidate.get("run_candidate_id")) != selected_run_candidate_id:
+                        continue
+                    if str(candidate.get("candidate_id")) == selected_run_candidate_id:
+                        selected_run_candidate_id = str(candidate.get("run_candidate_id") or "")
+                    run_cmd = list(candidate.get("run_cmd") or [])
+                    if run_cmd:
+                        selected_registry_candidate = registry.candidate_for_argv(run_cmd)
+                        break
+            if selected_registry_candidate is None:
+                rejected_items.append({
+                    "section": "selection.selected_run_candidate_id",
+                    "item_index": -1,
+                    "reason": "selected run candidate does not exist in the command registry",
+                    "reason_code": "selected_run_candidate_not_in_registry",
+                })
+            else:
+                candidates.append({
+                    "id": "llm_selected_%s" % selected_registry_candidate.candidate_id[:12],
+                    "cmd": list(selected_registry_candidate.argv),
+                    "expected_port": int(getattr(selected_registry_candidate, "expected_port", 0) or 0),
+                    "grounded_candidate_id": selected_registry_candidate.candidate_id,
+                    "selected_by": "llm_grounded_selection",
+                })
         safe_candidates = []
         for i, cand in enumerate(candidates):
             cand = dict(cand)
+            grounded_candidate_id = str(cand.get("grounded_candidate_id") or "")
             cand["cmd"] = self._normalize_declared_console_script(
                 cand.get("cmd", []), snapshot,
             )
-            registry_candidate = (
-                self._registry_candidate_for_command(registry, cand.get("cmd", []))
-                if registry_present else None
-            )
+            registry_candidate = None
+            if grounded_candidate_id:
+                registry_candidate = next((
+                    item for item in registry.candidates
+                    if item.candidate_id == grounded_candidate_id
+                ), None)
+            if registry_candidate is None:
+                registry_candidate = (
+                    self._registry_candidate_for_command(registry, cand.get("cmd", []))
+                    if registry_present else None
+                )
             if registry_candidate is not None:
                 cand["cmd"] = list(registry_candidate.argv)
             result = (
@@ -397,7 +481,23 @@ class PlanPolicyGate:
         verify_result = self._validate_verify(verify)
         if verify_result["allowed"]:
             accepted_sections.append("verify")
-            normalized_plan["verify"] = verify
+            normalized_verify = dict(verify)
+            selected_verify_candidate_id = str(
+                (plan.get("selection") or {}).get("selected_verify_candidate_id") or ""
+            )
+            if selected_verify_candidate_id:
+                known_verify_ids = self._known_verify_candidate_ids(snapshot)
+                if selected_verify_candidate_id in known_verify_ids:
+                    normalized_verify["selected_candidate_id"] = selected_verify_candidate_id
+                    normalized_verify["selection_source"] = "llm_grounded_selection"
+                else:
+                    rejected_items.append({
+                        "section": "selection.selected_verify_candidate_id",
+                        "item_index": -1,
+                        "reason": "selected verify candidate is unknown",
+                        "reason_code": "selected_verify_candidate_not_found",
+                    })
+            normalized_plan["verify"] = normalized_verify
         else:
             rejected_items.append(verify_result["rejection"])
 
@@ -498,6 +598,149 @@ class PlanPolicyGate:
                 ).isoformat(),
             )
         return result
+
+    @staticmethod
+    def _known_verify_candidate_ids(snapshot: Dict) -> set:
+        """Verify candidate ids the LLM may select: composer outputs plus
+        the built-in protocol verifier registry ids."""
+        known = set()
+        for candidate in snapshot.get("deployment_candidates") or []:
+            if isinstance(candidate, dict):
+                known.update(str(item) for item in candidate.get("verify_candidate_ids") or [])
+        try:
+            from auto_harness.verify.protocols import ProtocolVerifierRegistry
+
+            known.update(item.verifier_id for item in ProtocolVerifierRegistry.builtins().all())
+        except Exception:  # noqa: BLE001 - registry unavailability must not break planning
+            pass
+        return known
+
+    def _register_candidate_requests(
+        self, plan: Dict, registry: CommandRegistry, snapshot: Dict,
+    ) -> List[Dict]:
+        """Phase B2: turn grounded LLM candidate requests into registry candidates.
+
+        The LLM never executes anything here. Each request goes through:
+        schema parse (parser) → argv normalization/hard-deny → evidence
+        revalidation → CommandCandidate creation → CommandAuthorizationEngine
+        (called later by the standard run-candidate loop).
+        """
+        requests = plan.get("candidate_requests") or []
+        if not requests:
+            return []
+        rejections: List[Dict] = []
+        if len(requests) > MAX_CANDIDATE_REQUESTS_PER_ROUND:
+            rejections.append({
+                "section": "candidate_requests",
+                "item_index": MAX_CANDIDATE_REQUESTS_PER_ROUND,
+                "reason": "candidate request budget per round exceeded",
+                "reason_code": "candidate_request_budget_exceeded",
+            })
+            requests = requests[:MAX_CANDIDATE_REQUESTS_PER_ROUND]
+        repo_dir = snapshot.get("repo_dir")
+        evidence_by_id = registry.evidence_by_id()
+        for i, request in enumerate(requests):
+            if not isinstance(request, dict) or str(request.get("type", "")) != "candidate_request":
+                rejections.append({
+                    "section": "candidate_requests[%d]" % i,
+                    "item_index": i,
+                    "reason": "candidate request type must be candidate_request",
+                    "reason_code": "candidate_request_invalid",
+                })
+                continue
+            argv = request.get("argv")
+            if not isinstance(argv, list) or not argv or not all(isinstance(item, str) and item for item in argv):
+                rejections.append({
+                    "section": "candidate_requests[%d].argv" % i,
+                    "item_index": i,
+                    "reason": "candidate request argv must be a non-empty list of strings",
+                    "reason_code": "command_schema_invalid",
+                })
+                continue
+            temp = CommandCandidate.build(
+                phase=str(request.get("phase") or "run"),
+                argv=argv,
+                source_kind="llm_candidate_request",
+            )
+            hard = CommandAuthorizationEngine.hard_deny_reason(temp)
+            if hard:
+                rejections.append({
+                    "section": "candidate_requests[%d].argv" % i,
+                    "item_index": i,
+                    "reason": hard,
+                    "reason_code": hard,
+                })
+                continue
+            grounding_ids = list(request.get("grounding_evidence_ids") or [])
+            evidence_items = []
+            stale = False
+            for evidence_id in grounding_ids:
+                item = evidence_by_id.get(evidence_id)
+                if item is None or item.repository_fingerprint != registry.repository_fingerprint:
+                    rejections.append({
+                        "section": "candidate_requests[%d].grounding_evidence_ids" % i,
+                        "item_index": i,
+                        "reason": "grounding evidence id does not exist in the registry",
+                        "reason_code": "fabricated_evidence_id_rejected",
+                    })
+                    stale = True
+                    break
+                evidence_items.append(item)
+            if stale:
+                continue
+            if repo_dir and any(
+                not revalidate_evidence(Path(repo_dir), item) for item in evidence_items
+            ):
+                rejections.append({
+                    "section": "candidate_requests[%d].grounding_evidence_ids" % i,
+                    "item_index": i,
+                    "reason": "grounding evidence changed after discovery",
+                    "reason_code": "evidence_hash_mismatch",
+                })
+                continue
+            try:
+                port = int(request.get("expected_port") or 0)
+            except (TypeError, ValueError):
+                port = 0
+            candidate = CommandCandidate.build(
+                phase=str(request.get("phase") or "run"),
+                argv=[str(item) for item in argv],
+                cwd=str(request.get("cwd") or "."),
+                source_kind="llm_candidate_request",
+                expected_port=port,
+                evidence_ids=[item.evidence_id for item in evidence_items],
+                declared_executable=Path(argv[0]).name,
+                environment_binding={"kind": "llm_grounded_request"},
+                # An LLM request can never relax the sandbox: the backend,
+                # network, and filesystem profiles are fixed here.
+                required_backend="docker",
+                network_profile="none",
+                filesystem_profile="runtime_read_only",
+                risk_level="high",
+                score=0.5,
+                score_reasons=["grounded LLM candidate request"],
+                fallback_group="run",
+            )
+            registry.candidates.append(candidate)
+        return rejections
+
+    @staticmethod
+    def _validate_grounding_evidence_ids(plan: Dict, registry: CommandRegistry) -> List[Dict]:
+        """Grounding entries may cite registry evidence ids; they must exist."""
+        rejections: List[Dict] = []
+        evidence_by_id = registry.evidence_by_id()
+        for i, entry in enumerate(plan.get("grounding") or []):
+            if not isinstance(entry, dict):
+                continue
+            evidence_id = str(entry.get("evidence_id") or "")
+            if evidence_id and evidence_id not in evidence_by_id:
+                rejections.append({
+                    "section": "grounding[%d].evidence_id" % i,
+                    "item_index": i,
+                    "reason": "grounding evidence id does not exist in the registry",
+                    "reason_code": "fabricated_evidence_id_rejected",
+                })
+        return rejections
 
     def _validate_command(self, cmd: Any, section: str, index: int) -> Dict:
         """Validate a single command (list of strings)."""
