@@ -4,6 +4,8 @@ All notable changes are documented here.
 
 ## 0.3.0 - Unreleased
 
+- Wired the Document A preparation chain (resolve, file closure, resource decision, download) into the mainline model_prepare stage behind `model_inference_enabled`, with a host-facts adapter (nvidia-smi/disk/RAM) that fails closed without GPU facts; preparation artifacts now feed the managed vLLM runtime gate directly.
+- Added explicit mirror-endpoint opt-in for model source clients (`HF_ENDPOINT`/`MODELSCOPE_ENDPOINT`), a proper User-Agent, and LFS `oid`-to-SHA-256 mapping so real HuggingFace trees satisfy strong weight integrity.
 - Added a read-only performance & cost profiler (`cost-profile`) that aggregates persisted LLM telemetry (`context.usage`, `latency_ms`), events.jsonl stage timing, and terminal outcomes into per-run and cross-run reports with token totals split by `provider_reported`/`estimated` provenance and optional config-provided pricing; usage without pricing is reported as unpriced tokens, never as invented cost.
 - Added the `cost_profile` config block (currency, pricing table per model with `pricing_as_of` metadata) and a Performance & Cost section in deployment reports.
 - Added opt-in Hybrid Evidence Retrieval with safe repository/memory ingestion, deterministic chunking, SQLite manifests, BM25 fallback, optional embeddings, exact cosine search, and RRF fusion.

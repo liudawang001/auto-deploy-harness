@@ -341,6 +341,28 @@ class AgentStageExecutor:
         self, task_id, run_dir, repo_dir, resource_data, analysis,
         before_status, dry_run,
     ):
+        # Document A: when model inference is enabled, the stage runs the
+        # deterministic preparation chain (resolve -> file closure -> resource
+        # decision -> download) whose artifacts the managed runtime gate
+        # consumes; the legacy asset-discovery module stays the default path.
+        if self.config and getattr(self.config, "model_inference_enabled", False):
+            from auto_harness.model_runtime.mainline import ModelPreparationStageRunner
+
+            result = ModelPreparationStageRunner().run(
+                run_dir=run_dir,
+                task_id=task_id,
+                repo_dir=repo_dir,
+                config=self.config,
+                execute=not dry_run,
+            )
+            return StageExecutionResult(
+                stage="model_prepare",
+                before_status=before_status,
+                after_status=result.status,
+                result=to_plain(result),
+                changed=before_status != result.status,
+                error=result.error,
+            )
         if not self.model_prepare:
             return StageExecutionResult(
                 stage="model_prepare",

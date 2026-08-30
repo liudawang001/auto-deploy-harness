@@ -1,11 +1,14 @@
 """Deterministic model source clients (Document A Phase A3).
 
 These clients resolve mutable revisions to immutable commit SHAs, fetch model
-config, and list files — strictly against the official host for each source.
+config, and list files — against the official host for each source, or an
+explicitly configured mirror endpoint (``api_base``).
 
 Security invariants:
-  - only the official host per source is contacted
-  - redirects are re-checked against the allowed host
+  - only the official host per source is contacted; an explicit ``api_base``
+    override additionally allows that exact host (operator opt-in, e.g. an
+    HF mirror), never a blanket host family
+  - redirects are re-checked against the allowed hosts
   - an injected transport is used; tests never touch the public network
   - response size, file count, JSON depth, and timeouts are bounded
   - 429 honours a bounded Retry-After; 401/403 never leak the token
@@ -115,6 +118,11 @@ class ModelSourceClient:
         self.timeout = timeout
         self.max_attempts = max(1, int(max_attempts))
         self.api_base = (api_base or API_BASES.get(self.source, "")).rstrip("/")
+        allowed = set(ALLOWED_HOSTS[self.source])
+        base_host = (urlparse(self.api_base).hostname or "").lower()
+        if base_host:
+            allowed.add(base_host)
+        self._allowed_hosts = frozenset(allowed)
         self._token = token if token is not None else os.environ.get(self.token_env)
 
     # ---- public interface ----
@@ -140,7 +148,11 @@ class ModelSourceClient:
     # ---- shared plumbing ----
 
     def _get(self, url: str) -> TransportResponse:
-        headers: Dict[str, str] = {"Accept": "application/json"}
+        headers: Dict[str, str] = {
+            "Accept": "application/json",
+            # Mirrors (e.g. hf-mirror.com) reject the default Python-urllib UA.
+            "User-Agent": "auto-deploy-harness/0.3 (+https://github.com/liudawang001/auto-deploy-harness)",
+        }
         if self._token:
             headers["Authorization"] = "Bearer %s" % self._token
         attempts = self.max_attempts
@@ -187,7 +199,7 @@ class ModelSourceClient:
         if not final_url:
             return
         host = (urlparse(final_url).hostname or "").lower()
-        if host not in ALLOWED_HOSTS[self.source]:
+        if host not in self._allowed_hosts:
             raise SourceClientError(
                 "network_failed",
                 "redirect or request resolved to disallowed host: %s" % host,
@@ -296,11 +308,16 @@ class HuggingFaceSourceClient(ModelSourceClient):
             path = item.get("path") or item.get("rfilename") or ""
             if not path:
                 continue
+            lfs = item.get("lfs") or {}
             files.append({
                 "path": path,
                 "size_bytes": item.get("size"),
-                "sha256": item.get("sha256"),
-                "etag": item.get("oid") or item.get("blob_id") or (item.get("lfs") or {}).get("oid"),
+                # An LFS oid is by specification the SHA-256 of the stored
+                # content, so it satisfies strong weight integrity. A plain
+                # git oid is a SHA-1 tree hash and must never be used for
+                # content verification.
+                "sha256": item.get("sha256") or lfs.get("oid"),
+                "etag": item.get("oid") or item.get("blob_id") or lfs.get("oid"),
             })
         return files
 
@@ -376,12 +393,16 @@ class ModelScopeSourceClient(ModelSourceClient):
         return files
 
 
-def source_client_for(source: str, transport=None, token: Optional[str] = None) -> ModelSourceClient:
-    """Build a source client for a validated source string."""
+def source_client_for(source: str, transport=None, token: Optional[str] = None, api_base: Optional[str] = None) -> ModelSourceClient:
+    """Build a source client for a validated source string.
+
+    ``api_base`` overrides the default host (e.g. an HF mirror endpoint);
+    the per-source URL templates stay unchanged.
+    """
     if source == "huggingface":
-        return HuggingFaceSourceClient(transport=transport, token=token)
+        return HuggingFaceSourceClient(transport=transport, token=token, api_base=api_base)
     if source == "modelscope":
-        return ModelScopeSourceClient(transport=transport, token=token)
+        return ModelScopeSourceClient(transport=transport, token=token, api_base=api_base)
     raise ValueError("unsupported model source: %s" % source)
 
 

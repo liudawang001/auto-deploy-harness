@@ -142,6 +142,66 @@ class TestSourceClient:
             client.resolve_revision("org/model", "main")
         assert exc.value.status == "network_failed"
 
+    def test_explicit_mirror_endpoint_allowed(self):
+        mirror = "https://hf-mirror.com"
+        transport = FakeTransport({
+            "%s/api/models/org/model/revision/main" % mirror: TransportResponse(
+                200, json.dumps({"sha": SHA}).encode(), url="%s/api/models/org/model/revision/main" % mirror
+            ),
+        })
+        client = HuggingFaceSourceClient(transport=transport, api_base=mirror)
+        assert client.resolve_revision("org/model", "main")["resolved_revision"] == SHA
+
+    def test_mirror_endpoint_does_not_allow_third_party_hosts(self):
+        mirror = "https://hf-mirror.com"
+        transport = FakeTransport({
+            "%s/api/models/org/model/revision/main" % mirror: TransportResponse(
+                200, json.dumps({"sha": SHA}).encode(), url="https://evil.example.com/revision/main"
+            ),
+        })
+        client = HuggingFaceSourceClient(transport=transport, api_base=mirror)
+        with pytest.raises(SourceClientError) as exc:
+            client.resolve_revision("org/model", "main")
+        assert exc.value.status == "network_failed"
+
+    def test_source_client_factory_passes_api_base(self):
+        client = source_client_for("huggingface", transport=FakeTransport({}), api_base="https://hf-mirror.com")
+        assert client.api_base == "https://hf-mirror.com"
+        client = source_client_for("huggingface", transport=FakeTransport({}))
+        assert client.api_base == "https://huggingface.co"
+
+    def test_lfs_oid_maps_to_content_sha256(self):
+        tree = [
+            {"type": "file", "path": "config.json", "size": 100, "oid": "a6344aac8c09"},
+            {
+                "type": "file", "path": "model.safetensors", "size": 4000,
+                "oid": "9127f71e7314",
+                "lfs": {"oid": "d" * 64, "size": 4000, "pointerSize": 135},
+            },
+        ]
+        routes = {
+            "https://huggingface.co/api/models/org/model/revision/main": TransportResponse(
+                200, json.dumps({"sha": SHA}).encode(),
+                url="https://huggingface.co/api/models/org/model/revision/main",
+            ),
+            "https://huggingface.co/org/model/resolve/%s/config.json" % SHA: TransportResponse(
+                200, json.dumps(HF_CONFIG).encode(),
+                url="https://huggingface.co/org/model/resolve/%s/config.json" % SHA,
+            ),
+            "https://huggingface.co/api/models/org/model/tree/%s?recursive=true" % SHA: TransportResponse(
+                200, json.dumps(tree).encode(),
+                url="https://huggingface.co/api/models/org/model/tree/%s?recursive=true" % SHA,
+            ),
+        }
+        client = HuggingFaceSourceClient(transport=FakeTransport(routes))
+        files = client.list_files("org/model", SHA)
+        by_path = {f["path"]: f for f in files}
+        # LFS oid is the content SHA-256; a plain git oid is a SHA-1 and is
+        # only used as the etag.
+        assert by_path["model.safetensors"]["sha256"] == "d" * 64
+        assert by_path["model.safetensors"]["etag"] == "9127f71e7314"
+        assert by_path["config.json"]["sha256"] is None
+
     def test_invalid_json_metadata_invalid(self):
         transport = FakeTransport({
             "https://huggingface.co/api/models/org/model/revision/main": TransportResponse(
