@@ -37,15 +37,27 @@ class FailureObserver:
 
         # Extract basic fields with truncation
         summary = self._truncate(str(failed_result.get("summary", "")))
-        error = self._truncate(str(failed_result.get("error", "")))
+        error = self._truncate(str(failed_result.get("error") or ""))
         status = failed_result.get("status", "failed")
 
         # Extract stdout/stderr tails
         data = failed_result.get("data", {}) if isinstance(failed_result, dict) else {}
         if not isinstance(data, dict):
             data = {}
-        stdout_tail = self._truncate(str(data.get("stdout", ""))[-2000:])
-        stderr_tail = self._truncate(str(data.get("stderr", ""))[-2000:])
+        stdout_value = data.get("stdout") or data.get("stdout_tail") or ""
+        stderr_value = data.get("stderr") or data.get("stderr_tail") or ""
+        nested_diagnosis = (
+            data.get("diagnosis")
+            if isinstance(data.get("diagnosis"), dict)
+            else {}
+        )
+        diagnostic_signal = str(nested_diagnosis.get("signal") or "")
+        if diagnostic_signal and diagnostic_signal not in str(stderr_value):
+            stderr_value = "%s\n%s" % (stderr_value, diagnostic_signal)
+        if not error and diagnostic_signal:
+            error = self._truncate(diagnostic_signal)
+        stdout_tail = self._truncate(str(stdout_value)[-2000:])
+        stderr_tail = self._truncate(str(stderr_value)[-2000:])
 
         # Extract checks and evidence paths
         checks = data.get("checks", [])

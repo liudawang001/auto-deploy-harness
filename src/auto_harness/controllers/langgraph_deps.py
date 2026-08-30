@@ -16,6 +16,26 @@ from auto_harness.controllers.langgraph import (
 from auto_harness.graph.nodes import GraphNodeDependencies, merge_plan_analysis
 
 
+def _build_replan_failure(state: Dict, failed_stage: str, failed_result: Dict) -> Dict:
+    """Preserve the sanitized failure evidence collected before diagnosis."""
+    observed = state.get("failure_context")
+    failure = dict(observed) if isinstance(observed, dict) else {}
+    failure.setdefault("failed_stage", failed_stage)
+    failure.setdefault("stage_status", failed_result.get("status", ""))
+    failure.setdefault("summary", failed_result.get("summary", ""))
+    failure.setdefault("error", str(failed_result.get("error") or "")[:2000])
+    diagnosis = state.get("diagnosis")
+    if isinstance(diagnosis, dict):
+        failure["diagnosis"] = {
+            "status": diagnosis.get("status", ""),
+            "summary": diagnosis.get("summary", ""),
+            "diagnosis": diagnosis.get("diagnosis", {}),
+            "rerun_from": diagnosis.get("rerun_from", ""),
+            "rerun_reason": diagnosis.get("rerun_reason", ""),
+        }
+    return failure
+
+
 class LangGraphControllerDependencies:
     """Dependencies object for LangGraphController.
 
@@ -157,12 +177,7 @@ class LangGraphControllerDependencies:
                     previous_plan = read_json(Path(previous_plan_path))
                 except (OSError, ValueError):
                     pass
-            failure = {
-                "failed_stage": failed_stage,
-                "stage_status": failed_result.get("status", ""),
-                "summary": failed_result.get("summary", ""),
-                "error": str(failed_result.get("error", ""))[:2000],
-            }
+            failure = _build_replan_failure(state, failed_stage, failed_result)
             return snapshot, previous_plan, failure
 
         def determine_resume_stage(previous, current):
@@ -393,15 +408,18 @@ class LangGraphControllerDependencies:
             )
         verify_status = values.get("verify_status", "")
         is_dry_run = bool(values.get("dry_run"))
+        verified = verify_status in ("passed", "pass")
         return DeploymentResult(
             task_id=values.get("task_id", ""),
             status=(
                 "completed_dry_run"
-                if is_dry_run and verify_status not in ("passed", "pass")
-                else "completed"
+                if is_dry_run and not verified
+                else "completed" if verified else "stopped"
             ),
             stop_reason=(
-                "dry_run_completed" if is_dry_run else "already_completed"
+                "dry_run_completed"
+                if is_dry_run and not verified
+                else "already_completed" if verified else "graph_ended_without_verify_pass"
             ),
             controller="langgraph",
             verify_status=verify_status,

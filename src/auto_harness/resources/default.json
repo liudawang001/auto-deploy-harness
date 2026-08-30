@@ -23,7 +23,7 @@
     "default_network_profile": "none",
     "install_network_profile": "registry_only"
   },
-  "docker_image": "python:3.10-slim",
+  "docker_image": "python:3.13-slim",
   "docker_network": "bridge",
   "docker_gpus": "none",
   "docker_model_cache_dir": "",

@@ -73,7 +73,7 @@ class DockerSandboxBackend:
 
     def __init__(
         self,
-        image: str = "python:3.10-slim",
+        image: str = "python:3.13-slim",
         network: str = "bridge",
         gpus: str = "none",
         model_cache_dir: Optional[Path] = None,
@@ -255,8 +255,16 @@ class DockerSandboxBackend:
             security_options=security_options,
         )
 
-    def wrap(self, repo_dir: Path, cmd: List[str], ports: Optional[List[int]] = None, container_name: str = "", auto_remove: bool = True, detached: bool = False, labels: Optional[Dict[str, str]] = None) -> SandboxCommand:
+    def wrap(self, repo_dir: Path, cmd: List[str], ports: Optional[List[int]] = None, container_name: str = "", auto_remove: bool = True, detached: bool = False, labels: Optional[Dict[str, str]] = None, port_mappings: Optional[List[tuple]] = None) -> SandboxCommand:
         ports = [int(port) for port in (ports or []) if int(port) > 0]
+        mappings = [
+            (int(host), int(container))
+            for host, container in (port_mappings or [])
+            if int(host) > 0 and int(container) > 0
+        ]
+        if not mappings:
+            mappings = [(port, port) for port in ports]
+        host_ports = [host for host, _ in mappings]
         repo_dir = Path(repo_dir).resolve()
         effective = [
             "docker",
@@ -302,6 +310,16 @@ class DockerSandboxBackend:
         if self.phase in ("runtime", "verify"):
             effective.extend(["-e", "HOME=/tmp"])
             effective.extend(["-e", "PYTHONDONTWRITEBYTECODE=1"])
+            if mappings:
+                # Containerized web services must listen beyond container
+                # loopback for Docker's published-port proxy to reach them.
+                # These common, non-secret compatibility variables are ignored
+                # by applications that do not support them.
+                for name, value in self._published_port_bind_env().items():
+                    effective.extend(["-e", "%s=%s" % (name, value)])
+        install_build_env = self._install_build_env(cmd)
+        for name, value in install_build_env.items():
+            effective.extend(["-e", "%s=%s" % (name, value)])
 
         effective.extend([
             "-v",
@@ -331,8 +349,11 @@ class DockerSandboxBackend:
                 "env": "AUTO_HARNESS_MODEL_CACHE",
                 "mount_mode": self.model_cache_mount_mode,
             }
-        for port in ports:
-            effective.extend(["-p", "127.0.0.1:%s:%s" % (port, port)])
+        for host_port, container_port in mappings:
+            effective.extend([
+                "-p",
+                "127.0.0.1:%s:%s" % (host_port, container_port),
+            ])
         effective.append(self.image)
         effective.extend(cmd)
         log_command = ["docker", "logs", container_name] if container_name else []
@@ -350,6 +371,15 @@ class DockerSandboxBackend:
             "user": self.user,
             "phase": self.phase,
             "model_cache_mount_mode": self.model_cache_mount_mode,
+            "port_mappings": [
+                {"host_port": host, "container_port": container}
+                for host, container in mappings
+            ],
+            "published_port_bind_env": (
+                self._published_port_bind_env()
+                if mappings else {}
+            ),
+            "install_build_env": install_build_env,
         }
 
         return SandboxCommand(
@@ -358,7 +388,7 @@ class DockerSandboxBackend:
             original_cmd=list(cmd),
             effective_cmd=effective,
             workdir="/workspace/repo",
-            ports=ports,
+            ports=host_ports,
             network=self.network,
             gpus=self.gpus,
             model_cache_mount=model_cache_mount,
@@ -367,3 +397,36 @@ class DockerSandboxBackend:
             cleanup_command=cleanup_command,
             security_options=security_options,
         )
+
+    @staticmethod
+    def _published_port_bind_env():
+        """Compatibility variables for common Python web servers in Docker."""
+        return {
+            "API_HOST": "0.0.0.0",
+            "WEBUI_HOST": "0.0.0.0",
+            "LANGFLOW_HOST": "0.0.0.0",
+            "LANGFLOW_CONFIG_DIR": "/tmp/langflow",
+            "LANGFLOW_SAVE_DB_IN_CONFIG_DIR": "true",
+            "GRADIO_SERVER_NAME": "0.0.0.0",
+            "STREAMLIT_SERVER_ADDRESS": "0.0.0.0",
+        }
+
+    def _install_build_env(self, cmd: List[str]) -> Dict[str, str]:
+        """Avoid downloading browser runtimes during a Node asset build."""
+        executable = Path(str(cmd[0])).name if cmd else ""
+        if self.phase != "install":
+            return {}
+        if executable == "uv":
+            return {
+                "UV_HTTP_RETRIES": "5",
+                "UV_HTTP_TIMEOUT": "120",
+            }
+        if executable not in {
+            "npm", "npx", "node", "corepack", "pnpm", "yarn",
+        }:
+            return {}
+        return {
+            "NODE_OPTIONS": "--max-old-space-size=6144",
+            "PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD": "1",
+            "PUPPETEER_SKIP_DOWNLOAD": "true",
+        }

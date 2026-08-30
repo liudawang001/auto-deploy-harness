@@ -68,7 +68,12 @@ class VerifyModule:
         self._progress("streamlit_probe_completed", {"check": streamlit_evidence["check"] if streamlit_evidence else {}})
         if streamlit_evidence:
             checks.append(streamlit_evidence["check"])
-        browser_evidence = self._execute_browser_probe(trace_id, service, analysis, evidence_dir)
+        # A browser probe is supplementary. Avoid requiring a local browser
+        # runtime after another probe has already produced strong current-run
+        # evidence.
+        browser_evidence = None
+        if not self._can_pass(service, checks):
+            browser_evidence = self._execute_browser_probe(trace_id, service, analysis, evidence_dir)
         self._progress("browser_probe_completed", {"check": browser_evidence["check"] if browser_evidence else {}})
         if browser_evidence:
             checks.append(browser_evidence["check"])
@@ -311,16 +316,45 @@ class VerifyModule:
             for name, value in headers.items():
                 req.add_header(name, value)
             self._progress("http_trace_request_sent", {"method": method, "url": traced_url})
-            with self.urlopen(req, timeout=10) as resp:
+            request_timeout = max(45, int(request_plan.get("timeout") or 30))
+            with self.urlopen(req, timeout=min(request_timeout, 120)) as resp:
                 body = resp.read().decode("utf-8", errors="replace")
                 response_record = {
                     "status_code": getattr(resp, "status", None) or getattr(resp, "code", None),
                     "body_tail": body[-4000:],
                     "stream_detected": self._body_looks_like_sse(body),
+                    "timeout_seconds": min(request_timeout, 120),
                 }
                 if trace_id in body:
                     status = "pass"
                     reason = "HTTP response contains trace id"
+                elif (
+                    request_plan.get("expected_status") is not None
+                    and response_record["status_code"] == request_plan["expected_status"]
+                    and self._service_log_contains_trace(service, trace_id)
+                ):
+                    status = "pass"
+                    reason = "expected HTTP status and service access log contain trace id"
+                    response_record["trace_in_service_log"] = True
+                    response_record["service_log_path"] = service.get("log_path")
+                elif (
+                    method == "GET"
+                    and request_plan.get("expected_status") is not None
+                    and response_record["status_code"] == request_plan["expected_status"]
+                    and service.get("process_alive")
+                    and service.get("port_ready")
+                    and (
+                        self._looks_like_static_web_app(body)
+                        or self._looks_like_openapi_document(body)
+                    )
+                ):
+                    status = "pass"
+                    if self._looks_like_openapi_document(body):
+                        reason = "fresh nonce-tagged request returned a valid OpenAPI document"
+                        response_record["openapi_document"] = True
+                    else:
+                        reason = "fresh nonce-tagged request returned a valid static web application"
+                        response_record["static_web_app"] = True
                 elif request_plan.get("follow_up_url_template"):
                     self._progress("http_trace_follow_up_started", {"trace_id": trace_id})
                     follow_up_record = self._execute_follow_up_trace(
@@ -360,6 +394,35 @@ class VerifyModule:
         evidence_path = evidence_dir / ("%s_http_trace_%s.json" % (trace_id, safe_label))
         evidence_path.write_text(json.dumps(evidence, ensure_ascii=False, indent=2), encoding="utf-8")
         return {"path": str(evidence_path), "check": evidence["check"]}
+
+    @staticmethod
+    def _looks_like_static_web_app(body: str) -> bool:
+        normalized = str(body or "").lower()
+        error_markers = (
+            "traceback (most recent call last)",
+            "application startup failed",
+            "internal server error",
+        )
+        return (
+            ("<!doctype html" in normalized or "<html" in normalized)
+            and "<script" in normalized
+            and any(marker in normalized for marker in ('id="root"', "id='root'", "<title>"))
+            and not any(marker in normalized for marker in error_markers)
+        )
+
+    @staticmethod
+    def _looks_like_openapi_document(body: str) -> bool:
+        try:
+            document = json.loads(str(body or ""))
+        except (TypeError, ValueError):
+            return False
+        return (
+            isinstance(document, dict)
+            and isinstance(document.get("openapi"), str)
+            and isinstance(document.get("info"), dict)
+            and isinstance(document.get("paths"), dict)
+            and bool(document["paths"])
+        )
 
     def _execute_health_fallback(
         self, trace_id: str, service: Dict, analysis: Dict, status_code=None,
@@ -425,7 +488,20 @@ class VerifyModule:
         if not endpoint:
             return None
         screenshot_path = evidence_dir / ("%s_browser.png" % trace_id)
-        check = self.browser_verifier.probe(endpoint, trace_id, frameworks=frameworks, screenshot_path=screenshot_path)
+        try:
+            check = self.browser_verifier.probe(
+                endpoint,
+                trace_id,
+                frameworks=frameworks,
+                screenshot_path=screenshot_path,
+            )
+        except Exception as exc:  # noqa: BLE001 - browser runtimes are optional
+            check = {
+                "name": "browser_dom_probe",
+                "status": "uncertain",
+                "evidence": [],
+                "reason": "browser probe unavailable: %s" % type(exc).__name__,
+            }
         evidence = {"check": check}
         evidence_path = evidence_dir / ("%s_browser_probe.json" % trace_id)
         evidence_path.write_text(json.dumps(evidence, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -464,7 +540,7 @@ class VerifyModule:
 
         base_endpoint = endpoint
         method = str(request_hint.get("method") or "GET").upper()
-        path = request_hint.get("path")
+        path = self._replace_trace(request_hint.get("path"), trace_id)
         if path:
             endpoint = urllib.parse.urljoin(endpoint.rstrip("/") + "/", path.lstrip("/"))
 
@@ -497,7 +573,41 @@ class VerifyModule:
             "headers": headers,
             "discovery": discovered,
             "follow_up_url_template": follow_up_url_template,
+            "expected_status": self._expected_status(request_hint),
+            "timeout": self._request_timeout(request_hint),
         }
+
+    @staticmethod
+    def _expected_status(request_hint: Dict) -> Optional[int]:
+        value = request_hint.get("expected_status") if isinstance(request_hint, dict) else None
+        try:
+            return int(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _request_timeout(request_hint: Dict) -> int:
+        value = request_hint.get("timeout") if isinstance(request_hint, dict) else None
+        try:
+            return max(1, min(int(value), 120)) if value is not None else 30
+        except (TypeError, ValueError):
+            return 30
+
+    @staticmethod
+    def _service_log_contains_trace(service: Dict, trace_id: str) -> bool:
+        raw_path = service.get("log_path") if isinstance(service, dict) else None
+        if not raw_path:
+            return False
+        path = Path(str(raw_path))
+        try:
+            with path.open("rb") as log_file:
+                log_file.seek(0, 2)
+                size = log_file.tell()
+                log_file.seek(max(0, size - 65536))
+                tail = log_file.read().decode("utf-8", errors="replace")
+        except OSError:
+            return False
+        return trace_id in tail
 
     def _is_openai_compatible(self, analysis: Dict, verify_hint: Dict) -> bool:
         frameworks = set(analysis.get("frameworks") or []) if isinstance(analysis, dict) else set()

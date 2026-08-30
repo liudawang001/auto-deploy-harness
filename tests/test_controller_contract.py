@@ -111,6 +111,32 @@ class TestControllerFactory:
             create_controller("unknown", deps)
 
 
+class TestLangGraphCompletedResult:
+    def test_completed_checkpoint_requires_verified_pass(self):
+        from auto_harness.controllers.langgraph_deps import LangGraphControllerDependencies
+
+        result = LangGraphControllerDependencies(object()).completed_result({
+            "task_id": "t1",
+            "verify_status": "uncertain",
+            "dry_run": False,
+        })
+
+        assert result.status == "stopped"
+        assert result.stop_reason == "graph_ended_without_verify_pass"
+
+    def test_verified_checkpoint_is_completed(self):
+        from auto_harness.controllers.langgraph_deps import LangGraphControllerDependencies
+
+        result = LangGraphControllerDependencies(object()).completed_result({
+            "task_id": "t1",
+            "verify_status": "pass",
+            "dry_run": False,
+        })
+
+        assert result.status == "completed"
+        assert result.stop_reason == "already_completed"
+
+
 class TestLegacyControllerContract:
     def test_implements_protocol(self):
         """LegacyController must satisfy the DeploymentController Protocol."""

@@ -5,7 +5,11 @@ from auto_harness.agent.repair_actions import install_package_command
 from auto_harness.command_auth import CommandAuthorizationEngine
 from auto_harness.models.base import write_json
 from auto_harness.repair.actions import RepairActionNormalizer, RepairActionRegistry
-from auto_harness.runtime import ChildEnvironmentPolicy
+from auto_harness.runtime import (
+    ChildEnvironmentPolicy,
+    DockerSandboxBackend,
+    local_docker_environment,
+)
 from auto_harness.utils.shell import run_command
 
 
@@ -31,6 +35,11 @@ class RepairApplier:
         allowed_commands: List[str] = None,
         env_context: Dict = None,
     ) -> Dict:
+        if (
+            command_runner is None
+            and (env_context or {}).get("execution_backend") == "docker"
+        ):
+            command_runner = self._docker_command_runner(run_dir, env_context or {})
         repair_dir = run_dir / "repairs"
         repair_dir.mkdir(parents=True, exist_ok=True)
         normalized_actions = self.normalizer.normalize_many(plan.get("actions", []))
@@ -219,6 +228,34 @@ class RepairApplier:
             "stderr_tail": result.stderr[-4000:],
             "timed_out": result.timed_out,
         }
+
+    def _docker_command_runner(self, run_dir: Path, env_context: Dict):
+        repo_dir = run_dir / "workspace" / "repo"
+
+        def execute(cmd, cwd, timeout_seconds):
+            effective_cmd = DockerSandboxBackend.for_phase(
+                "install",
+                image=str(env_context.get("docker_image") or "python:3.13-slim"),
+                network=str(env_context.get("docker_network") or "bridge"),
+                gpus=str(env_context.get("docker_gpus") or "none"),
+            ).wrap(repo_dir, cmd).effective_cmd
+            result = run_command(
+                effective_cmd,
+                cwd,
+                timeout_seconds=timeout_seconds,
+                env=self.child_environment_policy.build_for_install(
+                    home_dir=run_dir / "workspace" / "install_home",
+                    extra=local_docker_environment(),
+                ),
+            )
+            return {
+                "exit_code": result.exit_code,
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+                "timed_out": result.timed_out,
+            }
+
+        return execute
 
     def _sanitize(self, value):
         if isinstance(value, dict):

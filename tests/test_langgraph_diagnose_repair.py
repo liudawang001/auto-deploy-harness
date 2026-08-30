@@ -67,6 +67,29 @@ class TestFailureObserver:
         context = observer.build(state)
         assert len(context["summary"]) <= 4100  # 4000 + truncation suffix
 
+    def test_build_extracts_nested_runner_diagnostic_signal(self):
+        """Docker runner diagnostics remain visible to diagnosis and replan."""
+        signal = "Bind for 0.0.0.0:8000 failed: port is already allocated"
+        state = {
+            "failed_stage": "runner",
+            "stage_results": {
+                "runner": {
+                    "status": "failed",
+                    "summary": "service process exited",
+                    "error": None,
+                    "data": {"diagnosis": {"signal": signal}},
+                },
+            },
+            "compiled_analysis": {},
+            "runtime_policy": {"execution_backend": "docker"},
+        }
+
+        context = FailureObserver().build(state)
+
+        assert signal in context["error"]
+        assert signal in context["stderr_tail"]
+        assert FailureObserver._categorize_error(context["error"]) == "port_conflict"
+
     def test_compute_signature_stable(self):
         """相同输入产生相同 signature。"""
         context = {

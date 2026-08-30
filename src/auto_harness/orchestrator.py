@@ -186,7 +186,12 @@ class TaskRunner:
             for child in source.iterdir():
                 target = repo_dir / child.name
                 if child.is_dir():
-                    shutil.copytree(str(child), str(target), dirs_exist_ok=True)
+                    shutil.copytree(
+                        str(child),
+                        str(target),
+                        dirs_exist_ok=True,
+                        symlinks=True,
+                    )
                 else:
                     shutil.copy2(str(child), str(target))
             self.store.events(spec.task_id).append("clone", "copy_local_repo", {"source": str(source)})
@@ -1477,6 +1482,20 @@ class TaskRunner:
 
         self._apply_plan_gate(task_id, analysis, results, run_dir, revision=True)
 
+        # Tag the newly appended revision with the failure that triggered it.
+        if revisions_path.exists():
+            try:
+                import json
+                lines = revisions_path.read_text(encoding="utf-8").strip().split("\n")
+                if lines:
+                    last = json.loads(lines[-1])
+                    last["source_stage"] = stage
+                    last["trigger_status"] = result.status
+                    lines[-1] = json.dumps(last, ensure_ascii=False)
+                    revisions_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            except (OSError, ValueError):
+                pass
+
     def _load_plan_hints(self, run_dir: Path) -> Dict:
         """Load plan hints from agent_plan_initial.json or agent_strategy.json.
 
@@ -1505,20 +1524,6 @@ class TaskRunner:
             }
         except (OSError, ValueError):
             return {"stage_hints": {}, "deployment_strategy": ""}
-
-        # Tag the revision with source stage
-        if revisions_path.exists():
-            try:
-                import json
-                lines = revisions_path.read_text(encoding="utf-8").strip().split("\n")
-                if lines:
-                    last = json.loads(lines[-1])
-                    last["source_stage"] = stage
-                    last["trigger_status"] = result.status
-                    lines[-1] = json.dumps(last, ensure_ascii=False)
-                    revisions_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-            except (OSError, ValueError):
-                pass
 
     def _apply_env_gate(self, task_id: str, env_result, deploy_analysis: Dict, run_dir: Path) -> Dict:
         """Apply env decision gate: LLM diagnoses dependency conflicts and proposes constraints."""

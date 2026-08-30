@@ -9,7 +9,7 @@ class DockerSmokeChecker:
     def __init__(self, command_runner: Optional[Callable[[List[str], int], Dict]] = None) -> None:
         self.command_runner = command_runner or self._run_command
 
-    def check(self, probe: bool = False, image: str = "python:3.10-slim", require_gpu: bool = False) -> Dict:
+    def check(self, probe: bool = False, image: str = "python:3.13-slim", require_gpu: bool = False) -> Dict:
         checks = self._planned_checks(image=image, require_gpu=require_gpu)
         if probe:
             for item in checks:

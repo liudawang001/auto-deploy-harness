@@ -44,7 +44,7 @@ def diagnosis_prompt(observation: AgentObservation) -> str:
         "summary": "short summary",
         "confidence": 0.0,
         "diagnosis": {
-            "category": "dependency_missing | dependency_conflict | verify_hint_missing | unknown",
+            "category": "dependency_missing | dependency_conflict | port_conflict | verify_hint_missing | unknown",
             "root_cause": "specific root cause",
             "confidence": 0.0,
             "evidence": [],
@@ -60,8 +60,14 @@ def diagnosis_prompt(observation: AgentObservation) -> str:
         ],
         "rerun_from": "env_deploy | runner | verify | analyze",
         "rerun_reason": "why this rerun stage is sufficient and safe",
+        "plan_change_required": False,
     }
-    return _prompt("deployment failure diagnoser", observation, schema)
+    prompt = _prompt("deployment failure diagnoser", observation, schema)
+    return prompt + (
+        "\nFor a port conflict, do not propose dependency installation or a plain rerun. "
+        "Return no repair actions, set plan_change_required=true, and require replanning "
+        "with a free host/application port."
+    )
 
 
 def verify_prompt(observation: AgentObservation) -> str:

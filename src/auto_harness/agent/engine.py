@@ -202,6 +202,9 @@ class AgentDecisionEngine:
         if parsed.get("rerun_reason"):
             plan_delta = dict(plan_delta)
             plan_delta["rerun_reason"] = parsed.get("rerun_reason")
+        if parsed.get("plan_change_required"):
+            plan_delta = dict(plan_delta)
+            plan_delta["plan_change_required"] = True
         if isinstance(parsed.get("verify_candidates"), list):
             plan_delta = dict(plan_delta)
             plan_delta["verify_candidates"] = parsed.get("verify_candidates")

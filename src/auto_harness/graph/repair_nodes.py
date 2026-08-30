@@ -189,7 +189,7 @@ def repair_apply_node(state, deps, config=None):
         }
 
     # Build env_context from state
-    env_context = _extract_env_context(state)
+    env_context = _extract_env_context(state, config=config)
 
     # Determine execute flag
     enable_repair = True
@@ -294,7 +294,7 @@ def select_repair_resume_node(state, deps):
     }
 
 
-def _extract_env_context(state):
+def _extract_env_context(state, config=None):
     """Extract environment context for repair applier."""
     env_context = {}
     runtime_policy = state.get("runtime_policy", {})
@@ -304,4 +304,18 @@ def _extract_env_context(state):
         env_context["can_start_service"] = True
     env_context["dry_run"] = state.get("dry_run", True)
     env_context["run_dir"] = state.get("run_dir", "")
+    compiled = state.get("compiled_analysis") or {}
+    candidates = compiled.get("run_candidates") or []
+    if any(
+        isinstance(candidate, dict)
+        and candidate.get("required_backend") == "docker"
+        for candidate in candidates
+    ):
+        env_context["execution_backend"] = "docker"
+    elif config and getattr(config, "execution_backend", "local") == "docker":
+        env_context["execution_backend"] = "docker"
+    if config:
+        env_context["docker_image"] = getattr(config, "docker_image", "python:3.13-slim")
+        env_context["docker_network"] = getattr(config, "docker_network", "bridge")
+        env_context["docker_gpus"] = getattr(config, "docker_gpus", "none")
     return env_context

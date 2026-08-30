@@ -1,6 +1,7 @@
 import subprocess
 import time
 import json
+import socket
 from pathlib import Path
 from typing import Dict, List
 
@@ -32,7 +33,7 @@ class RunnerModule:
         wait_seconds: int = 30,
         allowed_commands=None,
         execution_backend: str = "local",
-        docker_image: str = "python:3.10-slim",
+        docker_image: str = "python:3.13-slim",
         docker_network: str = "bridge",
         docker_gpus: str = "none",
         docker_model_cache_dir: str = "",
@@ -93,6 +94,7 @@ class RunnerModule:
             docker_gpus,
             docker_model_cache_dir,
             docker_security_options,
+            remap_occupied_port=execute,
         )
         if not execute:
             return StageResult(
@@ -204,18 +206,23 @@ class RunnerModule:
                 run_dir, max_candidate_attempts,
             )
         log_file.close()
-        port = int(candidate.get("expected_port") or 0)
+        port = int(effective_candidate.get("expected_port") or 0)
         deadline = time.monotonic() + max(0, float(wait_seconds))
         ready = bool(port and is_port_open("127.0.0.1", port))
         while proc.poll() is None and port and not ready and time.monotonic() < deadline:
             time.sleep(min(0.25, max(0, deadline - time.monotonic())))
             ready = is_port_open("127.0.0.1", port)
         # A pre-existing listener can make the first port probe look ready
-        # before the child finishes binding.  Require a short survival window
-        # after readiness so an address-in-use exit cannot be reported as a
-        # successful deployment.
+        # before the child finishes binding. Docker's published-port proxy can
+        # also accept connections before the application inside the container
+        # has finished starting. Require a survival window after readiness so
+        # neither case is reported as a successful deployment prematurely.
         if proc.poll() is None and ready:
-            stability_deadline = time.monotonic() + 1.0
+            stability_seconds = 10.0 if effective_backend == "docker" else 1.0
+            stability_deadline = time.monotonic() + min(
+                stability_seconds,
+                max(1.0, float(wait_seconds)),
+            )
             while proc.poll() is None and time.monotonic() < stability_deadline:
                 time.sleep(min(0.1, stability_deadline - time.monotonic()))
             ready = proc.poll() is None and is_port_open("127.0.0.1", port)
@@ -573,6 +580,7 @@ class RunnerModule:
         docker_gpus: str,
         docker_model_cache_dir: str,
         docker_security_options: Dict = None,
+        remap_occupied_port: bool = True,
     ):
         if execution_backend != "docker":
             effective = dict(candidate)
@@ -586,7 +594,14 @@ class RunnerModule:
                     effective["cmd"] = CondaBackend(backend=env_solution["backend"]).run_cmd(spec, raw_cmd)
             return effective, {"backend": "local", "environment_backend": env_solution.get("backend", "venv")}
         port = int(candidate.get("expected_port") or 0)
-        container_name = "auto-harness-%s-%s" % (short_hash(str(repo_dir), 8), port or "svc")
+        host_port, remapped = (
+            self._select_host_port(port)
+            if remap_occupied_port
+            else (port, False)
+        )
+        container_name = "auto-harness-%s-%s" % (
+            short_hash(str(repo_dir), 8), host_port or "svc",
+        )
         sandbox_command = DockerSandboxBackend.for_phase(
             "runtime",
             image=docker_image,
@@ -597,9 +612,22 @@ class RunnerModule:
         ).wrap(
             repo_dir,
             candidate.get("cmd", []),
-            ports=[port] if port else [],
+            ports=[host_port] if host_port else [],
+            port_mappings=[(host_port, port)] if host_port and port else [],
             container_name=container_name,
         )
         effective = dict(candidate)
         effective["cmd"] = sandbox_command.effective_cmd
+        effective["expected_port"] = host_port
+        if remapped:
+            effective["container_port"] = port
+            effective["port_remapped"] = True
         return effective, sandbox_command.to_dict()
+
+    @staticmethod
+    def _select_host_port(container_port: int):
+        if not container_port or not is_port_open("127.0.0.1", container_port):
+            return container_port, False
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind(("127.0.0.1", 0))
+            return int(sock.getsockname()[1]), True

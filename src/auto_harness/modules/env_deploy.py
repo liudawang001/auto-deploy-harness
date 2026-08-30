@@ -22,6 +22,10 @@ from auto_harness.utils.shell import run_command
 from auto_harness.command_auth import CommandAuthorizationEngine, CommandRegistry
 
 
+UV_DOCKER_IMAGE = "ghcr.io/astral-sh/uv:python3.13-bookworm-slim"
+NODE_DOCKER_IMAGE = "node:22-bookworm-slim"
+
+
 class EnvDeployModule:
     def __init__(
         self,
@@ -48,7 +52,7 @@ class EnvDeployModule:
         timeout_seconds: int = 900,
         allowed_commands=None,
         execution_backend: str = "local",
-        docker_image: str = "python:3.10-slim",
+        docker_image: str = "python:3.13-slim",
         docker_network: str = "bridge",
         docker_gpus: str = "none",
         docker_model_cache_dir: str = "",
@@ -552,9 +556,16 @@ class EnvDeployModule:
         sandbox_commands = []
         for cmd in plan:
             network = "none" if profiles.get(tuple(cmd)) == "none" else docker_network
+            executable = Path(str(cmd[0])).name if cmd else ""
+            if executable == "uv":
+                command_image = UV_DOCKER_IMAGE
+            elif executable in {"npm", "npx", "node", "corepack", "pnpm", "yarn"}:
+                command_image = NODE_DOCKER_IMAGE
+            else:
+                command_image = docker_image
             backend = DockerSandboxBackend.for_phase(
                 "install",
-                image=docker_image,
+                image=command_image,
                 network=network,
                 gpus=docker_gpus,
                 model_cache_dir=Path(docker_model_cache_dir) if docker_model_cache_dir else None,
@@ -564,6 +575,7 @@ class EnvDeployModule:
         return [item["effective_cmd"] for item in sandbox_commands], {
             "backend": "docker",
             "image": docker_image,
+            "command_images": [item.get("image", docker_image) for item in sandbox_commands],
             "network": (
                 "mixed" if len({item.get("network") for item in sandbox_commands}) > 1
                 else sandbox_commands[0].get("network", docker_network)

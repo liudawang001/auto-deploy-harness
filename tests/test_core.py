@@ -716,6 +716,42 @@ class CoreTests(unittest.TestCase):
         checks = {check["name"]: check for check in result.data["checks"]}
         self.assertEqual(checks["http_trace_response"]["status"], "uncertain")
 
+    def test_verify_accepts_expected_status_with_trace_in_service_log(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / "workspace" / "repo").mkdir(parents=True)
+            log_path = run_dir / "logs" / "runner.log"
+            log_path.parent.mkdir()
+
+            def fake_urlopen(req, timeout):
+                log_path.write_text(req.full_url, encoding="utf-8")
+                return FakeHttpResponse('{"openapi":"3.1.0"}')
+
+            result = VerifyModule(urlopen=fake_urlopen).verify(
+                run_dir,
+                analysis={
+                    "verify_hint": {
+                        "endpoint": "http://127.0.0.1:8088",
+                        "request": {
+                            "method": "GET",
+                            "path": "/openapi.json?trace_id={{trace_id}}",
+                            "expected_status": 200,
+                        },
+                    },
+                },
+                runner_result={
+                    "pid": 1234,
+                    "expected_port": 8088,
+                    "service_ready": True,
+                    "log_path": str(log_path),
+                },
+            )
+            evidence = json.loads(Path(result.evidence[1]).read_text(encoding="utf-8"))
+
+        self.assertEqual(result.status, "passed")
+        self.assertNotIn("%7B%7Btrace_id%7D%7D", evidence["request"]["url"])
+        self.assertTrue(evidence["response"]["trace_in_service_log"])
+
     def test_verify_discovers_gradio_config_request(self):
         captured = {"config_called": False}
 
@@ -1863,6 +1899,41 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(result.data["sandbox"]["network"], "none")
             self.assertEqual(result.data["sandbox"]["gpus"], "all")
 
+    def test_env_deploy_uses_toolchain_image_for_uv_sync(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = EnvDeployModule().deploy(
+                Path(tmp),
+                {"install_plan": [["uv", "sync", "--frozen", "--no-dev"]]},
+                execute=False,
+                execution_backend="docker",
+                docker_image="python:3.13-slim",
+            )
+
+        command = result.data["effective_commands"][0]
+        assert "ghcr.io/astral-sh/uv:python3.13-bookworm-slim" in command
+        assert "UV_HTTP_RETRIES=5" in command
+        assert "UV_HTTP_TIMEOUT=120" in command
+        assert result.data["sandbox"]["command_images"] == [
+            "ghcr.io/astral-sh/uv:python3.13-bookworm-slim"
+        ]
+
+    def test_env_deploy_uses_node_image_for_locked_frontend_build(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = EnvDeployModule().deploy(
+                Path(tmp),
+                {"install_plan": [["npm", "--prefix", "src/frontend", "ci"]]},
+                execute=False,
+                execution_backend="docker",
+                docker_image="python:3.13-slim",
+            )
+
+        command = result.data["effective_commands"][0]
+        assert "node:22-bookworm-slim" in command
+        assert "NODE_OPTIONS=--max-old-space-size=6144" in command
+        assert "PUPPETEER_SKIP_DOWNLOAD=true" in command
+        assert "PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1" in command
+        assert result.data["sandbox"]["command_images"] == ["node:22-bookworm-slim"]
+
     def test_env_deploy_docker_wrapper_authorizes_original_command(self):
         captured = []
 
@@ -1947,6 +2018,35 @@ class CoreTests(unittest.TestCase):
             self.assertTrue(result.data["sandbox"]["log_command"])
             self.assertTrue(result.data["sandbox"]["cleanup_command"])
             self.assertIn("disallowed command: docker", result.error)
+
+    def test_runner_docker_backend_remaps_occupied_host_port(self):
+        runner = RunnerModule()
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+            runner, "_select_host_port", return_value=(49123, True)
+        ):
+            effective, sandbox = runner._effective_candidate(
+                Path(tmp),
+                {"cmd": ["python3", "app.py"], "expected_port": 8000},
+                "docker",
+                "python:3.11-slim",
+                "bridge",
+                "none",
+                "",
+                None,
+            )
+
+        self.assertEqual(effective["expected_port"], 49123)
+        self.assertEqual(effective["container_port"], 8000)
+        self.assertTrue(effective["port_remapped"])
+        self.assertIn("127.0.0.1:49123:8000", effective["cmd"])
+        self.assertIn("API_HOST=0.0.0.0", effective["cmd"])
+        self.assertIn("WEBUI_HOST=0.0.0.0", effective["cmd"])
+        self.assertIn("LANGFLOW_HOST=0.0.0.0", effective["cmd"])
+        self.assertIn("LANGFLOW_CONFIG_DIR=/tmp/langflow", effective["cmd"])
+        self.assertIn("LANGFLOW_SAVE_DB_IN_CONFIG_DIR=true", effective["cmd"])
+        self.assertIn("GRADIO_SERVER_NAME=0.0.0.0", effective["cmd"])
+        self.assertIn("STREAMLIT_SERVER_ADDRESS=0.0.0.0", effective["cmd"])
+        self.assertEqual(sandbox["ports"], [49123])
 
     def test_huggingface_downloader_resumes_partial_file(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2850,6 +2950,120 @@ class CoreTests(unittest.TestCase):
             checks = {check["name"]: check for check in result.data["checks"]}
             self.assertEqual(checks["browser_dom_probe"]["status"], "pass")
             self.assertEqual(result.status, "passed")
+
+    def test_verify_skips_browser_probe_after_strong_http_evidence(self):
+        class RaisingBrowserVerifier:
+            def probe(self, *args, **kwargs):
+                raise AssertionError("browser probe should not run")
+
+        def fake_urlopen(req, timeout):
+            trace = req.full_url.split("_auto_harness_trace=", 1)[1]
+            return FakeHttpResponse("handled %s" % trace)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / "workspace" / "repo").mkdir(parents=True)
+            result = VerifyModule(
+                urlopen=fake_urlopen,
+                browser_verifier=RaisingBrowserVerifier(),
+            ).verify(
+                run_dir,
+                analysis={"frameworks": ["gradio"], "verify_hint": {"endpoint": "http://127.0.0.1:7860"}},
+                runner_result={"pid": 1234, "expected_port": 7860, "service_ready": True},
+            )
+
+        self.assertEqual(result.status, "passed")
+        self.assertNotIn("browser_dom_probe", {check["name"] for check in result.data["checks"]})
+
+    def test_verify_browser_runtime_failure_is_uncertain(self):
+        class RaisingBrowserVerifier:
+            def probe(self, *args, **kwargs):
+                raise RuntimeError("browser executable is unavailable")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / "workspace" / "repo").mkdir(parents=True)
+            result = VerifyModule(
+                urlopen=lambda req, timeout: FakeHttpResponse("healthy without trace"),
+                browser_verifier=RaisingBrowserVerifier(),
+            ).verify(
+                run_dir,
+                analysis={"frameworks": ["gradio"], "verify_hint": {"endpoint": "http://127.0.0.1:7860"}},
+                runner_result={"pid": 1234, "expected_port": 7860, "service_ready": True},
+            )
+
+        checks = {check["name"]: check for check in result.data["checks"]}
+        self.assertEqual(result.status, "uncertain")
+        self.assertEqual(checks["browser_dom_probe"]["status"], "uncertain")
+        self.assertIn("RuntimeError", checks["browser_dom_probe"]["reason"])
+
+    def test_verify_static_spa_passes_with_fresh_nonce_request(self):
+        class RaisingBrowserVerifier:
+            def probe(self, *args, **kwargs):
+                raise AssertionError("strong HTTP evidence should skip browser")
+
+        page = (
+            '<!doctype html><html><head><title>Langflow</title>'
+            '<script type="module" src="/assets/app.js"></script></head>'
+            '<body><div id="root"></div></body></html>'
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / "workspace" / "repo").mkdir(parents=True)
+            result = VerifyModule(
+                urlopen=lambda req, timeout: FakeHttpResponse(page),
+                browser_verifier=RaisingBrowserVerifier(),
+            ).verify(
+                run_dir,
+                analysis={
+                    "verify_hint": {
+                        "endpoint": "http://127.0.0.1:7860",
+                        "request": {
+                            "method": "GET",
+                            "path": "/?trace_id={{trace_id}}",
+                            "expected_status": 200,
+                        },
+                    },
+                },
+                runner_result={"pid": 1234, "expected_port": 7860, "service_ready": True},
+            )
+
+        checks = {check["name"]: check for check in result.data["checks"]}
+        self.assertEqual(result.status, "passed")
+        self.assertIn("valid static web application", checks["http_trace_response"]["reason"])
+
+    def test_verify_openapi_document_passes_with_fresh_nonce_request(self):
+        document = json.dumps({
+            "openapi": "3.1.0",
+            "info": {"title": "Langflow", "version": "1.12.0"},
+            "paths": {"/health": {"get": {"responses": {"200": {"description": "OK"}}}}},
+        })
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / "workspace" / "repo").mkdir(parents=True)
+            result = VerifyModule(
+                urlopen=lambda req, timeout: FakeHttpResponse(document),
+            ).verify(
+                run_dir,
+                analysis={
+                    "verify_hint": {
+                        "endpoint": "http://127.0.0.1:7860",
+                        "request": {
+                            "method": "GET",
+                            "path": "/openapi.json?trace_id={{trace_id}}",
+                            "expected_status": 200,
+                        },
+                    },
+                },
+                runner_result={"pid": 1234, "expected_port": 7860, "service_ready": True},
+            )
+
+            evidence = json.loads(Path(result.evidence[1]).read_text(encoding="utf-8"))
+
+        checks = {check["name"]: check for check in result.data["checks"]}
+        self.assertEqual(result.status, "passed")
+        self.assertIn("valid OpenAPI document", checks["http_trace_response"]["reason"])
+        self.assertEqual(evidence["response"]["timeout_seconds"], 45)
 
     def test_browser_dom_probe_fails_on_error_marker(self):
         browser = BrowserVerifier(
