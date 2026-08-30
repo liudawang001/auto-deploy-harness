@@ -17,6 +17,7 @@ Allowed capability statuses:
 Prohibited: production_ready (never allowed)
 """
 import json
+import os
 import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Optional

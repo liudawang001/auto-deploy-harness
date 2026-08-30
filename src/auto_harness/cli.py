@@ -1,6 +1,7 @@
 import argparse
 import json
 from pathlib import Path
+from typing import Any, Dict
 
 from auto_harness.agent import AgentMetricsCollector
 from auto_harness.config import HarnessConfig

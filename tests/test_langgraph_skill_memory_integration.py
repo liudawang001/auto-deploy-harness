@@ -4,8 +4,10 @@ Verifies:
 1. LangGraphDependencies exposes memory and skill services
 2. Initial state has serializable skill/memory fields
 """
-import pytest
 from pathlib import Path
+from unittest.mock import MagicMock
+
+import pytest
 
 from auto_harness.config import HarnessConfig
 from auto_harness.orchestrator import TaskRunner

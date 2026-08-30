@@ -14,20 +14,19 @@ def test_push_ci_uses_offline_development_gate_only():
     assert "--agent-plan-first-provider mock" in workflow
 
 
-def test_push_can_skip_only_python_version_matrix():
+def test_push_and_pull_request_use_python313_fast_quality_gate():
     workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
 
     tests_job = workflow.split("\n  tests:\n", 1)[1].split(
         "\n  development-readiness:\n", 1
     )[0]
 
-    assert workflow.count("[skip-python-matrix]") == 1
-    assert "github.event_name != 'push'" in tests_job
-    assert (
-        "!contains(github.event.head_commit.message, '[skip-python-matrix]')"
-        in tests_job
-    )
-    assert "python: ['3.10', '3.11', '3.12', '3.13']" in tests_job
+    assert "[skip-python-matrix]" not in workflow
+    assert "matrix:" not in tests_job
+    assert "python-version: '3.13'" in tests_job
+    assert "python -m pip install -e '.[dev]'" in tests_job
+    assert "python -m ruff check src tests" in tests_job
+    assert "bash scripts/test_stage1.sh" in tests_job
 
 
 def test_release_readiness_is_manual_and_keeps_strict_gates():
