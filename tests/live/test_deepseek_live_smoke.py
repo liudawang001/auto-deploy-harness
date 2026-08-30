@@ -69,10 +69,10 @@ class TestLevel1_ProviderInit:
         assert provider.model in ("deepseek-v4-flash", "deepseek-v4-pro")
         assert bool(provider.api_key)
 
-    def test_plan_first_uses_pro_model(self):
-        """plan_first purpose selects V4 Pro with thinking enabled."""
+    def test_plan_first_uses_flash_model(self):
+        """plan_first purpose selects V4 Flash with thinking enabled."""
         provider = _make_provider(purpose="plan_first")
-        assert provider.model == "deepseek-v4-pro"
+        assert provider.model == "deepseek-v4-flash"
         assert provider.thinking_mode == "enabled"
 
     def test_agent_uses_flash_model(self):
@@ -242,7 +242,7 @@ class TestLevel3_PurposeModels:
             ],
         )
 
-        assert result.provider_model == "deepseek-v4-pro"
+        assert result.provider_model == "deepseek-v4-flash"
         assert result.text
         # Check reasoning privacy
         ctx = result.context

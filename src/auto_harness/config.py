@@ -13,7 +13,7 @@ def _default_deepseek_provider_configs() -> Dict[str, Dict[str, Any]]:
             "api_base": "https://api.deepseek.com",
             "api_key_env": "DEEPSEEK_API_KEY",
             "require_api_key": True,
-            "model": "deepseek-v4-pro",
+            "model": "deepseek-v4-flash",
             "context_window_tokens": 262144,
             "max_tokens": 16384,
             "thinking": {

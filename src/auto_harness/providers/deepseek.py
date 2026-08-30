@@ -62,13 +62,13 @@ _V4_MODELS = frozenset({
     "deepseek-v4-pro",
 })
 
-# Purpose → model defaults (all default to V4 Pro)
+# Purpose → model defaults (all default to V4 Flash)
 _DEFAULT_PURPOSE_MODELS = {
-    "plan_first": "deepseek-v4-pro",
-    "agent": "deepseek-v4-pro",
-    "memory_evolution": "deepseek-v4-pro",
-    "llm_test": "deepseek-v4-pro",
-    "live_smoke": "deepseek-v4-pro",
+    "plan_first": "deepseek-v4-flash",
+    "agent": "deepseek-v4-flash",
+    "memory_evolution": "deepseek-v4-flash",
+    "llm_test": "deepseek-v4-flash",
+    "live_smoke": "deepseek-v4-flash",
 }
 
 # Purpose → thinking defaults
@@ -206,12 +206,17 @@ class DeepSeekProvider(OpenAICompatibleProvider):
                     self.model = str(purpose_model)
             elif not self.model:
                 self.model = _DEFAULT_PURPOSE_MODELS.get(
-                    self.purpose, "deepseek-v4-pro"
+                    self.purpose, "deepseek-v4-flash"
                 )
 
         # Thinking
         thinking_config = self.settings.get("thinking", {})
-        if isinstance(thinking_config, dict) and self.purpose in thinking_config:
+        thinking_env = os.environ.get(
+            "DEEPSEEK_%s_THINKING" % self.purpose.upper()
+        )
+        if thinking_env:
+            self.thinking_mode = thinking_env
+        elif isinstance(thinking_config, dict) and self.purpose in thinking_config:
             self.thinking_mode = str(thinking_config[self.purpose])
         else:
             self.thinking_mode = _DEFAULT_PURPOSE_THINKING.get(

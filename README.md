@@ -66,7 +66,7 @@ RUN_DEEPSEEK_LIVE_TESTS=1 DEEPSEEK_API_KEY=... \
 
 ## 最快开始
 
-新安装项目后，只需设置 API Key 即可使用默认的 DeepSeek V4 Pro：
+新安装项目后，只需设置 API Key 即可使用默认的 DeepSeek V4 Flash：
 
 ```bash
 export DEEPSEEK_API_KEY="sk-..."
@@ -75,13 +75,13 @@ auto-deploy-harness llm-test
 
 无需 `--provider`、`--interactive-provider` 或手动输入 API 地址、模型名称等参数。
 
-**临时切换到 Flash 模型：**
+**临时切换到 Pro 模型：**
 
 ```bash
-auto-deploy-harness llm-test --model deepseek-v4-flash
+auto-deploy-harness llm-test --model deepseek-v4-pro
 ```
 
-命令结束后默认模型恢复为 V4 Pro。
+命令结束后默认模型恢复为 V4 Flash。
 
 **调整 Token 预算：**
 
@@ -284,7 +284,7 @@ ollama
 ```
 
 DeepSeek 专用 Provider 特性：
-- **Purpose 驱动模型选择**：`plan_first` 默认用 `deepseek-v4-pro`（Thinking enabled），`agent` 默认用 `deepseek-v4-flash`
+- **Purpose 驱动模型选择**：所有 purpose 默认使用 `deepseek-v4-flash`；需要更强推理时可通过命令行或 purpose 配置显式切换 `deepseek-v4-pro`
 - **Thinking Mode**：显式控制 `thinking` 和 `reasoning_effort`（`high`/`max`）
 - **JSON Output**：`json_mode=true` 时请求 `response_format: {"type": "json_object"}`
 - **结构化错误**：401/402/422 不重试；429/500/503 有界指数退避重试

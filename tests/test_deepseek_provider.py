@@ -110,11 +110,30 @@ class DeepSeekProviderTests(unittest.TestCase):
         provider = self._make_provider(purpose="agent")
         self.assertEqual(provider.model, "deepseek-v4-flash")
 
-    def test_v4_pro_model_selection_for_plan_first(self):
-        """V4 Pro model is selected for plan_first purpose."""
+    def test_v4_flash_model_selection_for_plan_first(self):
+        """V4 Flash model is selected for plan_first purpose by default."""
         # No model in config → uses purpose-specific default
         provider = self._make_provider(purpose="plan_first", model=None)
-        self.assertEqual(provider.model, "deepseek-v4-pro")
+        self.assertEqual(provider.model, "deepseek-v4-flash")
+
+    def test_plan_first_thinking_can_be_overridden_for_one_process(self):
+        settings = {
+            "api_base": "https://api.deepseek.com",
+            "model": "deepseek-v4-flash",
+            "require_api_key": False,
+        }
+        with patch.dict(
+            os.environ,
+            {"DEEPSEEK_PLAN_FIRST_THINKING": "disabled"},
+            clear=False,
+        ):
+            provider = DeepSeekProvider(
+                provider_name="deepseek",
+                config={"provider_configs": {"deepseek": settings}},
+                purpose="plan_first",
+            )
+
+        self.assertEqual(provider.thinking_mode, "disabled")
 
     def test_purpose_specific_model_override(self):
         """Purpose-specific model config overrides defaults."""

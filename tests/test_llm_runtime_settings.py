@@ -67,7 +67,7 @@ class TestFreshDefaults:
         deepseek = config.provider_configs["deepseek"]
         assert deepseek["api_base"] == "https://api.deepseek.com"
         assert deepseek["api_key_env"] == "DEEPSEEK_API_KEY"
-        assert deepseek["model"] == "deepseek-v4-pro"
+        assert deepseek["model"] == "deepseek-v4-flash"
         assert deepseek["context_window_tokens"] == 262144
         assert deepseek["max_tokens"] == 16384
         assert "api_key" not in deepseek
