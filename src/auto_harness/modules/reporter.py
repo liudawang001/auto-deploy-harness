@@ -299,8 +299,107 @@ class ReportGenerator:
             for name in required_env:
                 lines.append("- `%s`: value required from operator or secret manager" % name)
             lines.append("")
+        lines.extend(self._deployment_capability_audit(run_dir, results))
         report_path.write_text("\n".join(lines), encoding="utf-8")
         return StageResult("report", "passed", "report generated", {"report_path": str(report_path)}, evidence=[str(report_path)])
+
+    def _deployment_capability_audit(
+        self, run_dir: Path, results: Dict[str, Dict],
+    ) -> List[str]:
+        """Phase B4: deployment capability and candidate decision audit."""
+        analysis = results.get("analyze", {}).get("data", {})
+        if not isinstance(analysis, dict) or not analysis.get("schema_version"):
+            return []
+        capabilities = analysis.get("capabilities") or {}
+        deployability = analysis.get("deployability") or {}
+        candidates = analysis.get("deployment_candidates") or []
+        discovery = analysis.get("entrypoint_discovery") or {}
+        feature_config = analysis.get("deployment_foundation_config") or {}
+        llm_resolution = self._read_optional(
+            Path(run_dir) / "reports" / "llm_resolution.json"
+        )
+        metrics = self._read_optional(
+            Path(run_dir) / "reports" / "deployment_metrics.json"
+        )
+        fallbacks = []
+        fallbacks_path = Path(run_dir) / "reports" / "command_fallbacks.jsonl"
+        if fallbacks_path.exists():
+            for line in fallbacks_path.read_text(
+                encoding="utf-8", errors="ignore",
+            ).splitlines():
+                try:
+                    item = json.loads(line)
+                except (TypeError, ValueError):
+                    continue
+                if isinstance(item, dict):
+                    fallbacks.append(item)
+        lines = [
+            "## Deployment Capability Audit",
+            "",
+            "### Project Capabilities",
+            "",
+            "- Languages: `%s`" % ", ".join(capabilities.get("languages") or []) or "`none`",
+            "- Service frameworks: `%s`" % ", ".join(capabilities.get("service_frameworks") or []) or "`none`",
+            "- Evidence entries: `%d`" % len(analysis.get("capability_evidence") or []),
+            "",
+            "### Deployment Contract",
+            "",
+            "- Found: `%s`" % str(bool((analysis.get("deployment_contract") or {}).get("found"))).lower(),
+            "- Valid: `%s`" % str(bool((analysis.get("deployment_contract") or {}).get("valid"))).lower(),
+            "",
+            "### Capability Gaps",
+            "",
+        ]
+        gaps = deployability.get("missing_capabilities") or []
+        if gaps:
+            for gap in gaps:
+                lines.append("- `%s`" % gap)
+        else:
+            lines.append("- `none`")
+        lines.extend([
+            "",
+            "### Candidate Composition",
+            "",
+            "- Deterministic candidates: `%d`" % len(analysis.get("run_candidates") or []),
+            "- Deployment candidates: `%d`" % len(candidates),
+            "- Discovery source kinds: `%s`" % (
+                ", ".join(discovery.get("discovery_source_kinds") or []) or "`none`"
+            ),
+            "- Discovery rejections: `%d`" % len(discovery.get("rejections") or []),
+            "",
+            "### Candidate Fallback History",
+            "",
+        ])
+        if fallbacks:
+            for record in fallbacks:
+                lines.append(
+                    "- `%s`: %s (signature: `%s`)" % (
+                        record.get("candidate_id", ""),
+                        record.get("reason", ""),
+                        record.get("failure_signature", ""),
+                    )
+                )
+        else:
+            lines.append("- `none`")
+        lines.extend([
+            "",
+            "### LLM Resolution",
+            "",
+            "- Contribution: `%s`" % (llm_resolution or {}).get("contribution", "deterministic_no_llm"),
+            "- LLM helped: `%s`" % str(bool((llm_resolution or {}).get("llm_helped"))).lower(),
+            "",
+            "### Rollout Decision",
+            "",
+            "- Mode: `%s`" % str(feature_config.get("deployment_capability_mode") or "shadow"),
+            "",
+            "### Final Deployability Decision",
+            "",
+            "- Status: `%s`" % str(deployability.get("status") or "unknown"),
+            "- Next resolution: `%s`" % str(deployability.get("next_resolution") or ""),
+            "- Metrics: `reports/deployment_metrics.json`",
+            "",
+        ])
+        return lines
 
     def _write_deployment_foundation_artifacts(
         self, run_dir: Path, results: Dict[str, Dict],
@@ -319,6 +418,8 @@ class ReportGenerator:
                 analysis.get("deployment_foundation_config_hash") or ""
             ),
         }
+        llm_resolution_path = reports / "llm_resolution.json"
+        llm_resolution = self._read_optional(llm_resolution_path)
         artifacts = {
             "project_capabilities.json": analysis.get("capabilities") or {},
             "capability_evidence.json": analysis.get("capability_evidence") or [],
@@ -332,13 +433,58 @@ class ReportGenerator:
                     "reason": "verify stage did not produce protocol selection",
                 }
             ),
+            # Phase B4/B5 audit artifacts. The rollout decision records the
+            # configured control-chain mode, the shadow diff and the
+            # fail-closed enforce gate.
+            "rollout_decision.json": self._rollout_decision(analysis),
+            "llm_resolution.json": (
+                llm_resolution
+                if isinstance(llm_resolution, dict) and llm_resolution
+                else {
+                    "contribution": "deterministic_no_llm",
+                    "llm_helped": False,
+                    "deterministic_result_preserved": True,
+                }
+            ),
         }
         paths = []
         for name in sorted(artifacts):
             path = reports / name
             write_json(path, {**common, "data": artifacts[name]})
             paths.append(str(path))
+        from auto_harness.observability.metrics import compute_deployment_metrics
+
+        metrics_path = reports / "deployment_metrics.json"
+        write_json(metrics_path, {
+            **common,
+            "data": compute_deployment_metrics(run_dir),
+        })
+        paths.append(str(metrics_path))
         return paths
+
+    @staticmethod
+    def _rollout_decision(analysis: Dict) -> Dict:
+        """Phase B5: control-chain rollout decision with fail-closed gate."""
+        feature_config = analysis.get("deployment_foundation_config") or {}
+        shadow_diff = analysis.get("rollout_shadow_diff") or {}
+        blockers = list(analysis.get("rollout_enforce_blockers") or [])
+        mode = str(feature_config.get("deployment_capability_mode") or "shadow")
+        decision = {
+            "mode": mode,
+            "contract_enabled": bool(feature_config.get("deployment_contract_enabled")),
+            "adapter_registry_enabled": bool(
+                feature_config.get("deployment_adapter_registry_enabled")
+            ),
+            "protocol_verify_registry_enabled": bool(
+                feature_config.get("protocol_verify_registry_enabled")
+            ),
+            "shadow_diff": shadow_diff,
+            "enforce": {
+                "allowed": not blockers and mode == "enforce",
+                "blockers": blockers,
+            },
+        }
+        return decision
 
     def _native_tool_summary(self, run_dir: Path) -> Dict:
         existing = self._read_optional(

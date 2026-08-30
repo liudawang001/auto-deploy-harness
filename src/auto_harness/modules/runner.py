@@ -79,6 +79,8 @@ class RunnerModule:
                 {"authorization_attempts": authorization_attempts},
                 error="no_safe_command_candidate" if execute else "",
             )
+        if execute:
+            self._write_candidate_attempt(run_dir, analysis, candidate, "authorized")
         candidate["env_solution"] = analysis.get("env_solution") if isinstance(analysis.get("env_solution"), dict) else {}
         effective_backend = candidate.get("required_backend") or execution_backend
         effective_network = (
@@ -569,6 +571,11 @@ class RunnerModule:
             "attempt_key": attempt_key,
         }
         self._write_fallback(run_dir, fallback_record)
+        self._write_candidate_attempt(
+            run_dir, analysis, candidate,
+            "fallback_after_start_failure" if terminal_data is not None else "fallback_before_start",
+            failure_signature=failure_signature,
+        )
         if remaining and remaining_budget:
             next_analysis = dict(analysis)
             next_analysis["run_candidates"] = remaining
@@ -622,6 +629,34 @@ class RunnerModule:
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(fallback, ensure_ascii=False, sort_keys=True) + "\n")
+
+    @staticmethod
+    def _write_candidate_attempt(run_dir, analysis, candidate, outcome, failure_signature=""):
+        """Phase B4: deployment-candidate level attempt journal."""
+        if not run_dir:
+            return
+        registry_data = analysis.get("command_registry") or {}
+        source_kind = str(candidate.get("source_kind") or "")
+        if not source_kind and isinstance(registry_data, dict):
+            wanted = str(candidate.get("command_candidate_id") or "")
+            for item in registry_data.get("candidates", []):
+                if isinstance(item, dict) and item.get("candidate_id") == wanted:
+                    source_kind = str(item.get("source_kind") or "")
+                    break
+        record = {
+            "outcome": outcome,
+            "candidate_id": candidate.get("command_candidate_id") or candidate.get("id", ""),
+            "argv": list(candidate.get("cmd") or []),
+            "source_kind": source_kind,
+            "expected_port": int(candidate.get("expected_port") or 0),
+            "required_backend": str(candidate.get("required_backend") or ""),
+            "repository_fingerprint": str(analysis.get("repository_fingerprint") or ""),
+            "failure_signature": failure_signature,
+        }
+        path = Path(run_dir) / "reports" / "candidate_attempts.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
 
     def _reorder_candidates_by_hints(self, candidates: List[Dict], prefer_patterns: List[str]) -> List[Dict]:
         """Reorder candidates based on plan hints.
