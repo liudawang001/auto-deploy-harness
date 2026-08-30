@@ -412,7 +412,9 @@ class RunnerModule:
                 continue
             approval = analysis.get("command_approval") or None
             if (
-                declared.source_kind in {"make_target", "repository_script", "python_entrypoint"}
+                declared.source_kind in {
+                    "make_target", "repository_script", "python_entrypoint", "manifest_command",
+                }
                 and self._command_approval_consumed(
                     run_dir, declared, registry.repository_fingerprint,
                 )

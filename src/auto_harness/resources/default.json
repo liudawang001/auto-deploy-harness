@@ -7,6 +7,10 @@
   "allow_dependency_install": false,
   "allow_service_start": false,
   "execution_backend": "local",
+  "deployment_capability_mode": "shadow",
+  "deployment_contract_enabled": true,
+  "deployment_adapter_registry_enabled": false,
+  "protocol_verify_registry_enabled": false,
   "repository_command_policy": {
     "enabled": true,
     "unknown_repository_backend": "docker",

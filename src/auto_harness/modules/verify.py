@@ -13,7 +13,12 @@ from auto_harness.models.verify import VerifyResult
 from auto_harness.utils.files import diff_snapshot, snapshot_files, short_hash
 from auto_harness.utils.ports import is_port_open
 from auto_harness.utils.time import compact_timestamp
-from auto_harness.verify import BrowserVerifier, StreamlitVerifier
+from auto_harness.verify import (
+    BrowserVerifier,
+    ProtocolVerifierRegistry,
+    StreamlitVerifier,
+)
+from auto_harness.verify.protocols import ProbeEvidence
 
 
 class VerifyModule:
@@ -25,6 +30,7 @@ class VerifyModule:
         progress_callback=None,
         verify_planner=None,
         agent_verify_config: Optional[Dict] = None,
+        protocol_verify_registry_enabled: bool = False,
     ) -> None:
         self._base_urlopen = urlopen or urllib.request.urlopen
         self._custom_urlopen = urlopen is not None
@@ -36,6 +42,7 @@ class VerifyModule:
         self.progress_callback = progress_callback
         self.verify_planner = verify_planner
         self.agent_verify_config = agent_verify_config or {}
+        self.protocol_verify_registry_enabled = protocol_verify_registry_enabled
 
     def _open_url(self, req, timeout=10):
         url = getattr(req, "full_url", req)
@@ -50,6 +57,14 @@ class VerifyModule:
     def verify(self, run_dir: Path, analysis: Dict, runner_result: Dict, stage_hints: Dict = None) -> StageResult:
         trace_id = "verify_%s_%s" % (compact_timestamp(), short_hash(str(run_dir), 6))
         service = self._service_discovery(runner_result)
+        protocol_registry = ProtocolVerifierRegistry.builtins()
+        protocol_verifier, protocol_selection = protocol_registry.select(
+            analysis,
+            candidate={
+                "expected_port": runner_result.get("expected_port"),
+                "protocol": runner_result.get("protocol"),
+            },
+        )
         self._progress("service_discovered", {"service": service})
         evidence_dir = run_dir / "evidence"
         evidence_dir.mkdir(parents=True, exist_ok=True)
@@ -143,6 +158,25 @@ class VerifyModule:
             next_action="report",
         )
         result_data = result.__dict__
+        protocol_evidence = self._protocol_probe_evidence(
+            protocol_verifier,
+            protocol_selection.protocol,
+            trace_id,
+            service,
+            runner_result,
+            checks,
+        )
+        protocol_decision = protocol_verifier.evaluate(
+            protocol_evidence,
+            {"trace_id": trace_id},
+        )
+        result_data["protocol_verify_selection"] = {
+            **protocol_selection.to_dict(),
+            "mode": (
+                "enforce" if self.protocol_verify_registry_enabled else "shadow"
+            ),
+            "shadow_decision": protocol_decision.to_dict(),
+        }
         if planner_result:
             result_data["llm_verify_planner"] = planner_result.get("planner", {})
         if agent_verify_result:
@@ -159,6 +193,16 @@ class VerifyModule:
             }
         if self.stage_context:
             result_data["control_context"] = self.stage_context
+        protocol_selection_path = evidence_dir / "protocol_verify_selection.json"
+        protocol_selection_path.write_text(
+            json.dumps(
+                result_data["protocol_verify_selection"],
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
         evidence_path = evidence_dir / ("%s_verify.json" % trace_id)
         evidence_path.write_text(json.dumps(result_data, ensure_ascii=False, indent=2), encoding="utf-8")
         return StageResult(
@@ -172,7 +216,51 @@ class VerifyModule:
                 + ([streamlit_evidence["path"]] if streamlit_evidence else [])
                 + ([browser_evidence["path"]] if browser_evidence else [])
                 + [evidence["path"] for evidence in planner_evidences]
+                + [str(protocol_selection_path)]
             ),
+        )
+
+    def _protocol_probe_evidence(
+        self,
+        verifier,
+        protocol,
+        trace_id,
+        service,
+        runner_result,
+        checks,
+    ):
+        endpoint = (service.get("endpoint_candidates") or [""])[0]
+        trace_observed = any(
+            check.get("status") == "pass"
+            and (
+                check.get("trace_observed") is True
+                or (
+                    "trace_observed" not in check
+                    and trace_id in json.dumps(
+                        check.get("evidence"), ensure_ascii=False,
+                    )
+                )
+            )
+            for check in checks
+            if check.get("name") in {
+                "artifact_download_validation",
+                "http_trace_response",
+                "browser_dom_probe",
+                "agent_verify_probe",
+            }
+        )
+        return ProbeEvidence(
+            verifier_id=verifier.verifier_id,
+            protocol=protocol,
+            trace_id=trace_id,
+            endpoint=endpoint,
+            expected_port=int(runner_result.get("expected_port") or 0),
+            process_alive=bool(service.get("process_alive")),
+            port_ready=bool(service.get("port_ready")),
+            status="pass" if self._can_pass(service, checks) else "uncertain",
+            trace_observed=trace_observed,
+            operation_id=str(runner_result.get("operation_id") or ""),
+            details={"check_names": [item.get("name") for item in checks]},
         )
 
     def verify_model_runtime(
@@ -310,6 +398,7 @@ class VerifyModule:
         response_record = {}
         follow_up_record = None
         status = "uncertain"
+        trace_observed = False
         reason = "HTTP response did not contain trace id"
         try:
             req = urllib.request.Request(traced_url, data=body, method=method)
@@ -327,6 +416,7 @@ class VerifyModule:
                 }
                 if trace_id in body:
                     status = "pass"
+                    trace_observed = True
                     reason = "HTTP response contains trace id"
                 elif (
                     request_plan.get("expected_status") is not None
@@ -334,6 +424,7 @@ class VerifyModule:
                     and self._service_log_contains_trace(service, trace_id)
                 ):
                     status = "pass"
+                    trace_observed = True
                     reason = "expected HTTP status and service access log contain trace id"
                     response_record["trace_in_service_log"] = True
                     response_record["service_log_path"] = service.get("log_path")
@@ -364,6 +455,7 @@ class VerifyModule:
                     )
                     if follow_up_record.get("trace_found"):
                         status = "pass"
+                        trace_observed = True
                         reason = "HTTP follow-up response contains trace id"
                     elif follow_up_record.get("error"):
                         reason = "HTTP follow-up request failed"
@@ -377,6 +469,7 @@ class VerifyModule:
                 response_record["health_fallback"] = fallback
                 if fallback.get("trace_found"):
                     status = "pass"
+                    trace_observed = True
                     reason = "fresh successful health response to trace-tagged request"
         evidence = {
             "request": request_record,
@@ -387,6 +480,7 @@ class VerifyModule:
                 "name": "http_trace_response",
                 "status": status,
                 "evidence": "trace_id=%s" % trace_id,
+                "trace_observed": trace_observed,
                 "reason": reason,
             },
         }

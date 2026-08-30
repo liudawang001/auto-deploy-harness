@@ -52,6 +52,10 @@ class HarnessConfig:
     allow_dependency_install: bool = False
     allow_service_start: bool = False
     execution_backend: str = "local"
+    deployment_capability_mode: str = "shadow"
+    deployment_contract_enabled: bool = True
+    deployment_adapter_registry_enabled: bool = False
+    protocol_verify_registry_enabled: bool = False
     docker_image: str = "python:3.13-slim"
     docker_network: str = "bridge"
     docker_gpus: str = "none"
@@ -608,6 +612,10 @@ class HarnessConfig:
                 raise ValueError("invalid langgraph fault injection point: %s" % point)
         if self.docker_network == "host":
             raise ValueError("host network is not allowed")
+        if self.deployment_capability_mode not in {"off", "shadow", "enforce"}:
+            raise ValueError(
+                "deployment_capability_mode must be off, shadow, or enforce"
+            )
         if not self.docker_memory:
             raise ValueError("docker_memory must be non-empty")
         if self.docker_cpus <= 0:

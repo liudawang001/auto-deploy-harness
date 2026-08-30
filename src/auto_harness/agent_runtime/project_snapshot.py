@@ -12,7 +12,12 @@ from typing import Dict, List, Optional
 from auto_harness.agent.safety import AgentInputSanitizer
 from auto_harness.agent_runtime.core_evidence import CoreEvidenceSelector
 from auto_harness.agent_runtime.repository_inventory import RepositoryInventoryBuilder
+from auto_harness.capabilities import CapabilityDetector
 from auto_harness.command_auth.discovery import CommandDiscoveryService
+from auto_harness.deployment_contract import (
+    DeploymentContractCompiler,
+    DeploymentContractParser,
+)
 from auto_harness.tools.repository_policy import RepositoryReadPolicy
 
 
@@ -21,6 +26,7 @@ PRIORITY_FILES = (
     "README.md",
     "readme.md",
     "requirements.txt",
+    "auto-deploy.yaml",
     "pyproject.toml",
     "uv.lock",
     "Makefile",
@@ -113,6 +119,9 @@ class ProjectSnapshotBuilder:
 
         # 3. Detect signals
         detected_signals = self._detect_signals(repo_dir, file_tree, selected_files)
+        capabilities, dependency_manifests = CapabilityDetector().detect(
+            repo_dir, file_tree,
+        )
 
         # 4. Redact secrets
         sanitizer = AgentInputSanitizer()
@@ -160,6 +169,17 @@ class ProjectSnapshotBuilder:
             file_tree,
             inventory["repository_fingerprint"],
         )
+        contract_result = DeploymentContractParser().parse_repo(repo_dir)
+        deployment_candidates = []
+        if contract_result.get("valid"):
+            command_registry, deployment_candidate = (
+                DeploymentContractCompiler().compile_registry(
+                    repo_dir,
+                    contract_result["contract"],
+                    command_registry,
+                )
+            )
+            deployment_candidates.append(deployment_candidate.to_dict())
 
         return {
             "schema_version": 2,
@@ -171,6 +191,8 @@ class ProjectSnapshotBuilder:
             "repository_fingerprint": inventory["repository_fingerprint"],
             "repository_inventory": inventory,
             "command_registry": command_registry.to_dict(),
+            "deployment_contract": self._contract_snapshot(contract_result),
+            "deployment_candidates": deployment_candidates,
             "file_tree": file_tree,
             "file_tree_summary": {
                 "total_file_count": self._last_total_file_count,
@@ -181,12 +203,35 @@ class ProjectSnapshotBuilder:
             },
             "selected_files": selected_with_meta,
             "detected_signals": detected_signals,
+            "capabilities": capabilities.to_dict(),
+            "capability_evidence": [
+                item.to_dict() for item in capabilities.evidence
+            ],
+            "dependency_manifests": [
+                item.to_dict() for item in dependency_manifests
+            ],
             "memory_hits": memory_hits,
             "selected_skills": selected_skills,
             "skill_context": skill_context,
             "redactions": sanitizer.redactions,
             "untrusted_content_risks": sanitizer.risks,
         }
+
+    @staticmethod
+    def _contract_snapshot(result: Dict) -> Dict:
+        snapshot = {
+            "found": bool(result.get("found")),
+            "valid": bool(result.get("valid")),
+            "path": str(result.get("path") or "auto-deploy.yaml"),
+        }
+        if result.get("reason_code"):
+            snapshot["reason_code"] = str(result["reason_code"])
+        if result.get("disabled"):
+            snapshot["disabled"] = True
+        contract = result.get("contract")
+        if result.get("valid") and contract is not None:
+            snapshot.update(contract.to_dict())
+        return snapshot
 
     def _collect_file_tree(self, repo_dir: Path) -> List[str]:
         """Collect the full file tree, skipping .git and binary dirs."""
@@ -401,7 +446,10 @@ class ProjectSnapshotBuilder:
 
         # Dependency files
         dependency_files = [
-            name for name in ("requirements.txt", "pyproject.toml", "uv.lock", "setup.py", "environment.yml", "environment.yaml")
+            name for name in (
+                "auto-deploy.yaml", "requirements.txt", "pyproject.toml", "uv.lock",
+                "setup.py", "environment.yml", "environment.yaml",
+            )
             if name in file_set
         ]
 

@@ -618,6 +618,14 @@ class TaskRunner:
                 runtime_policy=task.runtime,
                 task_id=task_id,
                 agent_max_file_chars=self.config.agent_max_file_chars,
+                deployment_capability_mode=self.config.deployment_capability_mode,
+                deployment_contract_enabled=self.config.deployment_contract_enabled,
+                deployment_adapter_registry_enabled=(
+                    self.config.deployment_adapter_registry_enabled
+                ),
+                protocol_verify_registry_enabled=(
+                    self.config.protocol_verify_registry_enabled
+                ),
             )
             analyze_result = analyzer.analyze(repo_dir)
             results["analyze"] = to_plain(analyze_result)
@@ -784,6 +792,9 @@ class TaskRunner:
             progress_callback=lambda progress: self.store.update_stage(task_id, "verify", "running_verify", progress=progress),
             verify_planner=self._agent_verify_planner(verify_trace_writer) if self._agent_verify_planner_enabled() else None,
             agent_verify_config=agent_verify_config,
+            protocol_verify_registry_enabled=(
+                self.config.protocol_verify_registry_enabled
+            ),
         ).verify(run_dir, deploy_analysis, runner_data, stage_hints=verify_hints)
         self._attach_repair_overlay(verify_result, repair_overlay)
         results["verify"] = to_plain(verify_result)

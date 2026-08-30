@@ -111,7 +111,7 @@ class CommandAuthorizationEngine:
                 )
 
         needs_approval = candidate.source_kind in {
-            "make_target", "repository_script", "python_entrypoint",
+            "make_target", "repository_script", "python_entrypoint", "manifest_command",
         }
         if needs_approval:
             approval_reason = approval_valid(
@@ -123,6 +123,7 @@ class CommandAuthorizationEngine:
                     verdict="approval_required", reason_code=(
                         "make_target_requires_approval" if candidate.source_kind == "make_target"
                         else "python_entrypoint_requires_approval" if candidate.source_kind == "python_entrypoint"
+                        else "manifest_command_requires_approval" if candidate.source_kind == "manifest_command"
                         else "repository_script_requires_approval"
                     ),
                     reasons=[approval_reason], required_approval=True, **base,
@@ -186,8 +187,12 @@ class CommandAuthorizationEngine:
 
     @staticmethod
     def _evidence_reason(candidate, evidence_types):
-        if candidate.source_kind not in {"node_install", "python_entrypoint", "source_build"} and "readme_reference" not in evidence_types:
+        if candidate.source_kind not in {
+            "manifest_command", "node_install", "python_entrypoint", "source_build",
+        } and "readme_reference" not in evidence_types:
             return "readme_reference_missing"
+        if candidate.source_kind == "manifest_command" and "manifest_command" not in evidence_types:
+            return "manifest_command_evidence_missing"
         if candidate.source_kind == "node_install" and not {"package_manifest", "lockfile"}.issubset(evidence_types):
             return "node_manifest_or_lockfile_missing"
         if candidate.source_kind == "pep621_script" and "pep621_script" not in evidence_types:

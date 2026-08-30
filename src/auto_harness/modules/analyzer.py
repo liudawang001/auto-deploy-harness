@@ -1,10 +1,26 @@
+import hashlib
 import json
-import re
 from pathlib import Path
 from typing import Dict, List, Optional
 
 from auto_harness.agent import AgentActionPolicy, AgentDecisionEngine, AgentInputSanitizer, AgentObservation
 from auto_harness.agents.base import AgentExecutor, AgentRequest
+from auto_harness.capabilities import (
+    CapabilityDetector,
+    DeployabilityAssessor,
+    LegacyAnalysisCompiler,
+)
+from auto_harness.agent_runtime.repository_inventory import RepositoryInventoryBuilder
+from auto_harness.command_auth.discovery import CommandDiscoveryService
+from auto_harness.deployment_contract import (
+    DeploymentContractCompiler,
+    DeploymentContractParser,
+)
+from auto_harness.deployment_adapters import (
+    CandidateComposer,
+    DeploymentAdapterRegistry,
+    DetectionContext,
+)
 from auto_harness.models.result import StageResult
 from auto_harness.models.task import RuntimePolicy
 from auto_harness.providers.json_utils import parse_json_object
@@ -22,6 +38,10 @@ class ProjectAnalyzer:
         runtime_policy: Optional[RuntimePolicy] = None,
         task_id: str = "",
         agent_max_file_chars: int = 6000,
+        deployment_capability_mode: str = "shadow",
+        deployment_contract_enabled: bool = True,
+        deployment_adapter_registry_enabled: bool = False,
+        protocol_verify_registry_enabled: bool = False,
     ) -> None:
         self.agent_executor = agent_executor
         self.use_agent = use_agent
@@ -32,20 +52,57 @@ class ProjectAnalyzer:
         self.runtime_policy = runtime_policy or RuntimePolicy(workspace_root="")
         self.task_id = task_id
         self.agent_max_file_chars = agent_max_file_chars
+        self.deployment_capability_mode = deployment_capability_mode
+        self.deployment_contract_enabled = deployment_contract_enabled
+        self.deployment_adapter_registry_enabled = deployment_adapter_registry_enabled
+        self.protocol_verify_registry_enabled = protocol_verify_registry_enabled
         self.agent_policy = AgentActionPolicy()
 
     def analyze(self, repo_dir: Path) -> StageResult:
         files = self._collect_files(repo_dir)
-        frameworks = self._detect_frameworks(repo_dir, files)
+        capabilities, dependency_manifests = CapabilityDetector().detect(repo_dir, files)
+        manifest_paths = [item.path for item in dependency_manifests]
+        if "auto-deploy.yaml" in files:
+            manifest_paths.append("auto-deploy.yaml")
+        repository_inventory = RepositoryInventoryBuilder().build(
+            repo_dir,
+            files,
+            detected_signals={"dependency_files": sorted(set(manifest_paths))},
+        )
+        legacy_frameworks = self._detect_frameworks(repo_dir, files)
+        adapter_context = DetectionContext(
+            repo_dir=Path(repo_dir),
+            files=tuple(files),
+            capabilities=capabilities,
+            legacy_frameworks=tuple(legacy_frameworks),
+        )
+        adapter_registry = DeploymentAdapterRegistry.builtins()
+        adapter_detections = adapter_registry.detect_all(adapter_context)
+        adapter_proposals = adapter_registry.proposals(
+            adapter_context, adapter_detections,
+        )
+        frameworks = adapter_registry.legacy_frameworks(
+            adapter_context, adapter_detections,
+        )
         install_plan = self._install_plan(files)
-        run_candidates = self._run_candidates(repo_dir, files, frameworks)
+        run_candidates = adapter_registry.legacy_run_candidates(
+            adapter_context, adapter_detections,
+        )
         self._normalize_candidate_ranking(run_candidates)
+        verify_hint = adapter_registry.legacy_verify_hint(
+            adapter_context, adapter_detections,
+        )
+        deployment_candidates = CandidateComposer().compose(
+            adapter_proposals["run"],
+            adapter_proposals["environment"],
+            adapter_proposals["verify"],
+        )
         data: Dict = {
             "files": files[:200],
             "frameworks": frameworks,
             "install_plan": install_plan,
             "run_candidates": run_candidates,
-            "verify_hint": self._verify_hint(frameworks),
+            "verify_hint": verify_hint,
             "environment_strategy": self._environment_strategy(files, frameworks),
             "deterministic_facts": {
                 "file_count": len(files),
@@ -60,7 +117,82 @@ class ProjectAnalyzer:
             "selected_candidate": run_candidates[0] if run_candidates else {},
             "selection_source": "deterministic" if run_candidates else "none",
             "llm_required_reason": "LLM planner disabled or no material contribution.",
+            "repository_fingerprint": repository_inventory[
+                "repository_fingerprint"
+            ],
+            "adapter_detections": [
+                item.to_dict() for item in adapter_detections if item.matched
+            ],
+            "adapter_proposals": {
+                name: [item.to_dict() for item in items]
+                for name, items in adapter_proposals.items()
+            },
         }
+        feature_modes = {
+            "deployment_capability_mode": self.deployment_capability_mode,
+            "deployment_contract_enabled": self.deployment_contract_enabled,
+            "deployment_adapter_registry_enabled": self.deployment_adapter_registry_enabled,
+            "protocol_verify_registry_enabled": self.protocol_verify_registry_enabled,
+        }
+        data["deployment_foundation_config"] = feature_modes
+        data["deployment_foundation_config_hash"] = hashlib.sha256(
+            json.dumps(feature_modes, sort_keys=True).encode("utf-8")
+        ).hexdigest()
+        deployability = DeployabilityAssessor().assess(
+            run_candidates=run_candidates,
+            verify_hint=verify_hint,
+            deployment_candidates=deployment_candidates,
+        )
+        data = LegacyAnalysisCompiler().compile(
+            data,
+            capabilities=capabilities,
+            manifests=dependency_manifests,
+            deployability=deployability,
+            deployment_candidates=deployment_candidates,
+        )
+        contract_result = (
+            DeploymentContractParser().parse_repo(repo_dir)
+            if self.deployment_contract_enabled
+            else {
+                "found": False,
+                "valid": False,
+                "path": "auto-deploy.yaml",
+                "disabled": True,
+            }
+        )
+        data["deployment_contract"] = self._contract_snapshot(contract_result)
+        if contract_result.get("valid"):
+            registry = CommandDiscoveryService().discover(
+                repo_dir,
+                files,
+                repository_inventory["repository_fingerprint"],
+            )
+            registry, deployment_candidate = (
+                DeploymentContractCompiler().compile_registry(
+                    repo_dir,
+                    contract_result["contract"],
+                    registry,
+                )
+            )
+            data = DeploymentContractCompiler().compile_analysis(
+                data,
+                contract_result["contract"],
+                registry,
+                deployment_candidate,
+            )
+            data["deployability"] = DeployabilityAssessor().assess(
+                run_candidates=data["run_candidates"],
+                verify_hint=data["verify_hint"],
+                deployment_candidates=[deployment_candidate],
+            ).to_dict()
+        elif contract_result.get("found"):
+            data["deployability"] = {
+                **data["deployability"],
+                "status": "blocked",
+                "missing_capabilities": ["deployment_contract.valid"],
+                "risk_reasons": [str(contract_result.get("reason_code") or "invalid_contract")],
+                "next_resolution": "fix_contract",
+            }
         if self.stage_context:
             data["control_context"] = self.stage_context
         agent_advice = self._agent_advice(repo_dir, data)
@@ -77,6 +209,22 @@ class ProjectAnalyzer:
             data=data,
             evidence=[],
         )
+
+    @staticmethod
+    def _contract_snapshot(result: Dict) -> Dict:
+        snapshot = {
+            "found": bool(result.get("found")),
+            "valid": bool(result.get("valid")),
+            "path": str(result.get("path") or "auto-deploy.yaml"),
+        }
+        if result.get("reason_code"):
+            snapshot["reason_code"] = str(result["reason_code"])
+        if result.get("disabled"):
+            snapshot["disabled"] = True
+        contract = result.get("contract")
+        if result.get("valid") and contract is not None:
+            snapshot.update(contract.to_dict())
+        return snapshot
 
     def _collect_files(self, repo_dir: Path) -> List[str]:
         result: List[str] = []
@@ -133,92 +281,29 @@ class ProjectAnalyzer:
         return plan
 
     def _run_candidates(self, repo_dir: Path, files: List[str], frameworks: List[str]) -> List[Dict]:
-        candidates: List[Dict] = []
-        for entry in ("app.py", "main.py", "server.py", "webui.py", "demo.py"):
-            if entry in files:
-                port = self._python_entry_port(repo_dir / entry) or 7860
-                confidence = 0.75 if port != 7860 else 0.7
-                candidates.append({"cmd": [".venv/bin/python", entry], "expected_port": port, "confidence": confidence})
-        if "streamlit" in frameworks:
-            for entry in ("app.py", "main.py", "demo.py"):
-                if entry in files:
-                    candidates.append({"cmd": [".venv/bin/streamlit", "run", entry], "expected_port": 8501, "confidence": 0.8})
-        if "vllm" in frameworks:
-            candidates.append({
-                "cmd": [
-                    ".venv/bin/python",
-                    "-m",
-                    "vllm.entrypoints.openai.api_server",
-                    "--host",
-                    "127.0.0.1",
-                    "--port",
-                    "8000",
-                ],
-                "expected_port": 8000,
-                "confidence": 0.5,
-            })
-        return candidates
-
-    def _python_entry_port(self, path: Path) -> int:
-        try:
-            text = path.read_text(encoding="utf-8", errors="ignore")
-        except OSError:
-            return 0
-        patterns = (
-            r"HTTPServer\(\s*\(\s*['\"][^'\"]*['\"]\s*,\s*(\d+)\s*\)",
-            r"uvicorn\.run\([^)]*port\s*=\s*(\d+)",
-            r"\.run\([^)]*port\s*=\s*(\d+)",
+        capabilities, _ = CapabilityDetector().detect(repo_dir, files)
+        context = DetectionContext(
+            repo_dir=Path(repo_dir),
+            files=tuple(files),
+            capabilities=capabilities,
+            legacy_frameworks=tuple(frameworks),
         )
-        for pattern in patterns:
-            match = re.search(pattern, text, flags=re.DOTALL)
-            if match:
-                return int(match.group(1))
-        return 0
+        registry = DeploymentAdapterRegistry.builtins()
+        detections = registry.detect_all(context)
+        return registry.legacy_run_candidates(context, detections)
 
     def _verify_hint(self, frameworks: List[str]) -> Dict:
-        if "gradio" in frameworks:
-            return {
-                "service_type": "webui",
-                "expected_output": "web_result",
-                "request": {
-                    "method": "POST",
-                    "path": "/api/predict",
-                    "json": {"data": ["{{trace_id}}"]},
-                },
-            }
-        if "fastapi" in frameworks or "flask" in frameworks:
-            return {
-                "service_type": "api",
-                "expected_output": "json_or_text",
-                "request": {"method": "GET"},
-            }
-        if "http.server" in frameworks:
-            return {
-                "service_type": "http",
-                "expected_output": "trace_echo",
-                "request": {
-                    "method": "GET",
-                    "path": "/?_auto_harness_trace={{trace_id}}",
-                },
-            }
-        if "vllm" in frameworks or "openai_compatible" in frameworks:
-            return {
-                "service_type": "openai_compatible",
-                "expected_output": "chat_completion",
-                "request": {
-                    "method": "POST",
-                    "path": "/v1/chat/completions",
-                    "json": {
-                        "model": "{{model}}",
-                        "messages": [
-                            {"role": "user", "content": "auto harness trace {{trace_id}}"}
-                        ],
-                        "temperature": 0,
-                        "max_tokens": 16,
-                    },
-                },
-            }
-        return {"service_type": "unknown", "expected_output": "unknown"}
+        from auto_harness.capabilities.schemas import ProjectCapabilities
+
+        context = DetectionContext(
+            repo_dir=Path("."),
+            files=(),
+            capabilities=ProjectCapabilities(),
+            legacy_frameworks=tuple(frameworks),
+        )
+        registry = DeploymentAdapterRegistry.builtins()
+        detections = registry.detect_all(context)
+        return registry.legacy_verify_hint(context, detections)
 
     def _agent_advice(self, repo_dir: Path, analysis: Dict) -> Optional[Dict]:
         if not self.use_agent or not self.agent_executor:

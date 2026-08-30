@@ -4,6 +4,7 @@ from typing import Callable, Dict, Iterable, List, Optional, Tuple
 
 
 _MANIFESTS = {
+    "auto-deploy.yaml",
     "pyproject.toml", "requirements.txt", "setup.py", "setup.cfg",
     "environment.yml", "environment.yaml", "poetry.lock", "Pipfile",
     "Makefile", "package.json",

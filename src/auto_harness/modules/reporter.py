@@ -76,6 +76,23 @@ class ReportGenerator:
                 "- Next action: `%s`" % verify.get("next_action", ""),
                 "",
             ])
+        foundation_artifacts = self._write_deployment_foundation_artifacts(
+            run_dir, results,
+        )
+        if foundation_artifacts:
+            selection = verify.get("protocol_verify_selection") or {}
+            lines.extend([
+                "## Deployment Foundation",
+                "",
+                "- Deployability: `%s`" % (
+                    results.get("analyze", {}).get("data", {})
+                    .get("deployability", {}).get("status", "")
+                ),
+                "- Protocol verifier: `%s`" % selection.get("verifier_id", ""),
+                "- Protocol selection source: `%s`" % selection.get("source", ""),
+                "- Audit artifacts: `%s`" % len(foundation_artifacts),
+                "",
+            ])
         repair_rerun = self._repair_rerun_summary(run_dir, results)
         if repair_rerun:
             lines.extend([
@@ -284,6 +301,44 @@ class ReportGenerator:
             lines.append("")
         report_path.write_text("\n".join(lines), encoding="utf-8")
         return StageResult("report", "passed", "report generated", {"report_path": str(report_path)}, evidence=[str(report_path)])
+
+    def _write_deployment_foundation_artifacts(
+        self, run_dir: Path, results: Dict[str, Dict],
+    ) -> List[str]:
+        analysis = results.get("analyze", {}).get("data", {})
+        verify = results.get("verify", {}).get("data", {})
+        if not isinstance(analysis, dict) or not analysis.get("schema_version"):
+            return []
+        reports = Path(run_dir) / "reports"
+        common = {
+            "schema_version": 1,
+            "repository_fingerprint": str(
+                analysis.get("repository_fingerprint") or ""
+            ),
+            "config_hash": str(
+                analysis.get("deployment_foundation_config_hash") or ""
+            ),
+        }
+        artifacts = {
+            "project_capabilities.json": analysis.get("capabilities") or {},
+            "capability_evidence.json": analysis.get("capability_evidence") or [],
+            "deployment_contract.json": analysis.get("deployment_contract") or {},
+            "adapter_detections.json": analysis.get("adapter_detections") or [],
+            "deployment_candidates.json": analysis.get("deployment_candidates") or [],
+            "deployability_assessment.json": analysis.get("deployability") or {},
+            "protocol_verify_selection.json": (
+                verify.get("protocol_verify_selection") or {
+                    "status": "not_run",
+                    "reason": "verify stage did not produce protocol selection",
+                }
+            ),
+        }
+        paths = []
+        for name in sorted(artifacts):
+            path = reports / name
+            write_json(path, {**common, "data": artifacts[name]})
+            paths.append(str(path))
+        return paths
 
     def _native_tool_summary(self, run_dir: Path) -> Dict:
         existing = self._read_optional(
