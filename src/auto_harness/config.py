@@ -612,9 +612,9 @@ class HarnessConfig:
                 raise ValueError("invalid langgraph fault injection point: %s" % point)
         if self.docker_network == "host":
             raise ValueError("host network is not allowed")
-        if self.deployment_capability_mode not in {"off", "shadow", "enforce"}:
+        if self.deployment_capability_mode not in {"legacy", "off", "shadow", "enforce"}:
             raise ValueError(
-                "deployment_capability_mode must be off, shadow, or enforce"
+                "deployment_capability_mode must be legacy, off, shadow, or enforce"
             )
         if not self.docker_memory:
             raise ValueError("docker_memory must be non-empty")

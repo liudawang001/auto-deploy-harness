@@ -13,8 +13,10 @@ from auto_harness.capabilities import (
     score_run_candidates,
 )
 from auto_harness.agent_runtime.repository_inventory import RepositoryInventoryBuilder
+from auto_harness.capabilities.shadow_diff import compute_shadow_diff, enforce_blockers
 from auto_harness.command_auth.adapters.entrypoint import ENTRYPOINT_SOURCE_KINDS
 from auto_harness.command_auth.discovery import CommandDiscoveryService
+from auto_harness.command_auth import CommandAuthorizationEngine
 from auto_harness.deployment_contract import (
     DeploymentContractCompiler,
     DeploymentContractParser,
@@ -105,23 +107,55 @@ class ProjectAnalyzer:
         # authorization engine before it can execute.  The discovery registry
         # is only attached when it contributes a new entrypoint candidate so
         # legacy-only projects keep their existing deterministic path.
-        discovery_registry = CommandDiscoveryService().discover(
-            repo_dir,
-            files,
-            repository_inventory["repository_fingerprint"],
-        )
-        run_candidates, entrypoint_registry_attached = self._merge_entrypoint_candidates(
-            run_candidates, discovery_registry,
-        )
-        score_run_candidates(
-            run_candidates,
-            detections=adapter_detections,
-            registry=discovery_registry,
-        )
-        run_candidates = order_run_candidates(run_candidates)
-        entrypoint_discovery = self._entrypoint_discovery_summary(
-            run_candidates, discovery_registry,
-        )
+        # Phase B5 rollout modes: legacy/off keep the baseline chain (no
+        # discovery merge, no registry attach, no scoring), shadow computes
+        # the auditable diff, enforce fails closed on blockers.
+        baseline_run_candidates = list(run_candidates)
+        baseline_deployability = DeployabilityAssessor().assess(
+            run_candidates=baseline_run_candidates,
+            verify_hint=verify_hint,
+            deployment_candidates=deployment_candidates,
+        ).to_dict()
+        baseline_snapshot = {
+            "frameworks": frameworks,
+            "install_plan": install_plan,
+            "run_candidates": baseline_run_candidates,
+            "verify_hint": verify_hint,
+            "deployability": baseline_deployability,
+        }
+        legacy_mode = self.deployment_capability_mode in ("legacy", "off")
+        entrypoint_registry_attached = False
+        if legacy_mode:
+            run_candidates = baseline_run_candidates
+            entrypoint_discovery = {
+                "deterministic_candidates": len(run_candidates),
+                "discovery_source_kinds": [],
+                "registry_candidates": 0,
+                "rejections": [],
+                "dockerfile_evidence": [],
+                "skipped_reason": "deployment_capability_mode=%s" % (
+                    self.deployment_capability_mode
+                ),
+            }
+            discovery_registry = None
+        else:
+            discovery_registry = CommandDiscoveryService().discover(
+                repo_dir,
+                files,
+                repository_inventory["repository_fingerprint"],
+            )
+            run_candidates, entrypoint_registry_attached = self._merge_entrypoint_candidates(
+                run_candidates, discovery_registry,
+            )
+            score_run_candidates(
+                run_candidates,
+                detections=adapter_detections,
+                registry=discovery_registry,
+            )
+            run_candidates = order_run_candidates(run_candidates)
+            entrypoint_discovery = self._entrypoint_discovery_summary(
+                run_candidates, discovery_registry,
+            )
         data: Dict = {
             "files": files[:200],
             "frameworks": frameworks,
@@ -220,6 +254,38 @@ class ProjectAnalyzer:
         if entrypoint_registry_attached:
             data["command_registry"] = discovery_registry.to_dict()
             data["command_registry_scope"] = "discovery"
+        if legacy_mode:
+            data["rollout_shadow_diff"] = {
+                "mode": self.deployment_capability_mode,
+                "computed": False,
+            }
+        else:
+            candidate_snapshot = {
+                "frameworks": frameworks,
+                "install_plan": install_plan,
+                "run_candidates": run_candidates,
+                "verify_hint": verify_hint,
+                "deployability": data.get("deployability") or {},
+                "authorization_attempts": self._authorization_preview(
+                    run_candidates, discovery_registry, repo_dir,
+                ),
+            }
+            diff = compute_shadow_diff(baseline_snapshot, candidate_snapshot)
+            diff["mode"] = self.deployment_capability_mode
+            diff["computed"] = True
+            data["rollout_shadow_diff"] = diff
+            if self.deployment_capability_mode == "enforce":
+                blockers = enforce_blockers(diff)
+                data["rollout_enforce_blockers"] = blockers
+                if blockers:
+                    data["deployability"] = {
+                        **data.get("deployability", {}),
+                        "status": "blocked",
+                        "risk_reasons": list(
+                            (data.get("deployability") or {}).get("risk_reasons") or []
+                        ) + blockers,
+                        "next_resolution": "human_input",
+                    }
         agent_advice = self._agent_advice(repo_dir, data)
         if agent_advice:
             data["agent_advice"] = agent_advice
@@ -250,6 +316,41 @@ class ProjectAnalyzer:
         if result.get("valid") and contract is not None:
             snapshot.update(contract.to_dict())
         return snapshot
+
+    @staticmethod
+    def _authorization_preview(run_candidates: List[Dict], registry, repo_dir: Path) -> List[Dict]:
+        """Pre-execute authorization verdicts used by the shadow diff.
+
+        This is a read-only preview over the discovery registry; it never
+        executes commands and never grants more than the runner would.
+        """
+        if registry is None or not registry.candidates:
+            return []
+        engine = CommandAuthorizationEngine()
+        preview = []
+        for item in run_candidates:
+            declared = None
+            wanted_id = item.get("command_candidate_id")
+            if wanted_id:
+                declared = next(
+                    (c for c in registry.candidates if c.candidate_id == wanted_id),
+                    None,
+                )
+            if declared is None:
+                declared = registry.candidate_for_argv(item.get("cmd") or [])
+            if declared is None:
+                continue
+            decision = engine.authorize(
+                declared,
+                registry,
+                repo_dir=Path(repo_dir) if repo_dir else None,
+            )
+            preview.append({
+                "normalized_argv": list(declared.argv),
+                "verdict": decision.verdict,
+                "reason_code": decision.reason_code,
+            })
+        return preview
 
     @staticmethod
     def _entrypoint_discovery_summary(run_candidates: List[Dict], registry) -> Dict:
