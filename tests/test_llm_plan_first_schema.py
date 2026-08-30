@@ -22,7 +22,16 @@ from pathlib import Path
 import copy
 
 from auto_harness.agent_runtime.deployment_plan import DeploymentPlan, DeploymentPlanParser
+from auto_harness.agent_runtime.plan_first_loop import PLANNER_SYSTEM_PROMPT
 from auto_harness.agent_runtime.project_snapshot import ProjectSnapshotBuilder
+
+
+def test_planner_prompt_forbids_metadata_keys_as_grounding_files():
+    assert "command_registry" in PLANNER_SYSTEM_PROMPT
+    assert "must never be" in PLANNER_SYSTEM_PROMPT
+    assert "/openapi.json?trace_id={{trace_id}}" in PLANNER_SYSTEM_PROMPT
+    assert '["uv", "sync", "--frozen", "--no-dev"]' in PLANNER_SYSTEM_PROMPT
+    assert "Distinguish package quickstarts from source-checkout instructions" in PLANNER_SYSTEM_PROMPT
 
 
 # A valid minimal deployment plan matching the spec

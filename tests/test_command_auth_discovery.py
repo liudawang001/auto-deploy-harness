@@ -29,6 +29,77 @@ def test_discovers_pep621_and_poetry_cli(tmp_path):
     assert {item.source_kind for item in registry.candidates} == {"pep621_script", "poetry_script"}
 
 
+def test_discovers_uv_run_cli_declared_in_monorepo_subpackage(tmp_path):
+    package = tmp_path / "src" / "backend" / "base"
+    package.mkdir(parents=True)
+    (tmp_path / "pyproject.toml").write_text('[project]\nname = "workspace"\n', encoding="utf-8")
+    (package / "pyproject.toml").write_text(
+        '[project.scripts]\nlangflow = "langflow.launcher:main"\n', encoding="utf-8",
+    )
+    (tmp_path / "README.md").write_text("uv run langflow run\n", encoding="utf-8")
+
+    registry = CommandDiscoveryService().discover(tmp_path, _files(tmp_path), "repo-mono")
+
+    candidate = next(item for item in registry.candidates if item.declared_executable == "langflow")
+    assert candidate.argv == [".venv/bin/langflow", "run"]
+    assert candidate.source_kind == "pep621_script"
+    evidence = registry.evidence_by_id()
+    assert {evidence[item].path for item in candidate.evidence_ids} == {
+        "README.md",
+        "src/backend/base/pyproject.toml",
+    }
+
+
+def test_discovers_source_frontend_cli_and_locked_build(tmp_path):
+    package = tmp_path / "src" / "backend" / "base"
+    cli = package / "langflow"
+    frontend = tmp_path / "src" / "frontend"
+    cli.mkdir(parents=True)
+    frontend.mkdir(parents=True)
+    (package / "pyproject.toml").write_text(
+        '[project.scripts]\nlangflow = "langflow.__main__:app"\n', encoding="utf-8",
+    )
+    (cli / "__main__.py").write_text(
+        'frontend_path: str | None = typer.Option(None, help="frontend")\n', encoding="utf-8",
+    )
+    (frontend / "package.json").write_text(
+        json.dumps({"scripts": {"build": "vite build"}}), encoding="utf-8",
+    )
+    (frontend / "package-lock.json").write_text('{}\n', encoding="utf-8")
+    (frontend / "vite.config.mts").write_text(
+        'export default { build: { outDir: "build" } }\n', encoding="utf-8",
+    )
+    (tmp_path / "Makefile").write_text(
+        "run_cli: install_frontend build_frontend\n", encoding="utf-8",
+    )
+    (tmp_path / "README.md").write_text(
+        "uv run langflow run\nRun from source with `make run_cli`.\n", encoding="utf-8",
+    )
+
+    registry = CommandDiscoveryService().discover(tmp_path, _files(tmp_path), "repo-source-ui")
+    commands = {tuple(item.argv) for item in registry.candidates}
+
+    assert (
+        ".venv/bin/langflow",
+        "run",
+        "--frontend-path",
+        "src/frontend/build",
+    ) in commands
+    assert ("npm", "--prefix", "src/frontend", "ci") in commands
+    assert ("npm", "--prefix", "src/frontend", "run", "build") in commands
+    source_build = next(
+        item for item in registry.candidates
+        if item.argv == ["npm", "--prefix", "src/frontend", "run", "build"]
+        and item.phase == "install"
+    )
+    decision = CommandAuthorizationEngine().authorize(
+        source_build, registry, repo_dir=tmp_path,
+    )
+    assert source_build.source_kind == "source_build"
+    assert decision.verdict == "auto_allowed"
+    assert decision.reason_code == "locked_source_build"
+
+
 def test_discovers_locked_node_managers(tmp_path):
     (tmp_path / "package.json").write_text(
         json.dumps({"scripts": {"serve": "node server.js"}}), encoding="utf-8",

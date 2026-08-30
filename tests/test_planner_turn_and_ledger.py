@@ -156,6 +156,15 @@ def test_layered_planner_turn_uses_json_action_provider():
     assert turn.kind == "final"
 
 
+def test_planner_uses_configured_output_budget():
+    class Config:
+        agent_context_reserved_output_tokens = 16384
+
+    planner = LLMDeploymentPlanner(MockLLMProvider(), config=Config())
+
+    assert planner.max_tokens == 16384
+
+
 def test_layered_planner_prompt_exposes_repository_tool_input_contracts():
     planner = LLMDeploymentPlanner(MockLLMProvider(), config={})
     tools = ToolRegistry().executable_for_stage("plan", agent_mode="planner")

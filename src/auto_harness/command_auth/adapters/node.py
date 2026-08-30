@@ -1,6 +1,7 @@
 """npm, pnpm and yarn script discovery with lockfile binding."""
 
 import json
+import re
 from pathlib import Path
 
 from auto_harness.command_auth.adapters.common import read_text
@@ -33,7 +34,14 @@ def discover_node(repo_dir, file_tree, readme, repository_fingerprint):
     package_files = [
         item for item in file_tree
         if Path(item).name == "package.json" and "node_modules" not in Path(item).parts
-    ][:50]
+    ]
+    package_files.sort(key=lambda item: (
+        0 if item in {"package.json", "src/frontend/package.json", "frontend/package.json"} else 1,
+        1 if "docs" in Path(item).parts else 0,
+        len(Path(item).parts),
+        item,
+    ))
+    package_files = package_files[:50]
     for package_path in package_files:
         try:
             package = json.loads(read_text(repo_dir, package_path))
@@ -80,6 +88,52 @@ def discover_node(repo_dir, file_tree, readme, repository_fingerprint):
                 score_reasons=["package manifest", "matching lockfile", "frozen dependency install"],
                 fallback_group="install",
             ))
+            makefile = read_text(repo_dir, "Makefile") if "Makefile" in file_set else ""
+            if (
+                manager == "npm"
+                and directory in {"src/frontend", "frontend"}
+                and "build" in scripts
+                and re.search(r"(?m)^run_cli:\s*[^\n]*build_frontend", makefile)
+            ):
+                build_declaration = build_evidence(
+                    repo_dir, "package_json_script", package_path,
+                    repository_fingerprint, declaration_key="scripts.build",
+                    declared_value=str(scripts["build"]),
+                )
+                make_reference = build_evidence(
+                    repo_dir, "make_reference", "Makefile",
+                    repository_fingerprint, declaration_key="run_cli",
+                    declared_value="build_frontend",
+                )
+                evidence.extend([build_declaration, make_reference])
+                candidates.append(CommandCandidate.build(
+                    phase="install",
+                    argv=["npm", "--prefix", directory, "run", "build"],
+                    cwd=directory,
+                    source_kind="source_build",
+                    evidence_ids=[
+                        build_declaration.evidence_id,
+                        lock.evidence_id,
+                        make_reference.evidence_id,
+                    ],
+                    declared_executable=manager,
+                    environment_binding={
+                        "kind": "package_manager",
+                        "manager": manager,
+                        "lockfile": lock_path,
+                    },
+                    required_backend="docker",
+                    network_profile="none",
+                    filesystem_profile="install_workspace",
+                    risk_level="medium",
+                    score=0.92,
+                    score_reasons=[
+                        "declared package build script",
+                        "matching lockfile",
+                        "source run target requires frontend build",
+                    ],
+                    fallback_group="install",
+                ))
         for documented in readme:
             manager, script = _documented_script(documented["argv"])
             if not manager or script not in scripts:

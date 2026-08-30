@@ -555,6 +555,36 @@ class ProjectSnapshotBuilder:
                     "reason": "build missing console/dist production artifact",
                 },
             ]
+
+        # Common Python monorepo layout: a Vite application under
+        # src/frontend is built before a Python CLI serves the resulting
+        # static assets. The public source-run target is the trust anchor;
+        # package.json alone is not enough to authorize a build.
+        has_frontend_source = "src/frontend/package.json" in file_set
+        has_frontend_lock = "src/frontend/package-lock.json" in file_set
+        frontend_build_missing = "src/frontend/build/index.html" not in file_set
+        source_target_builds_frontend = bool(re.search(
+            r"(?m)^run_cli:\s*[^\n]*(?:install_frontend|build_frontend)[^\n]*$",
+            makefile,
+        ))
+        if (
+            has_frontend_source
+            and has_frontend_lock
+            and frontend_build_missing
+            and source_target_builds_frontend
+        ):
+            return [
+                {
+                    "cmd": ["npm", "--prefix", "src/frontend", "ci"],
+                    "source": "Makefile",
+                    "reason": "lockfile-backed frontend dependencies required by source run target",
+                },
+                {
+                    "cmd": ["npm", "--prefix", "src/frontend", "run", "build"],
+                    "source": "Makefile",
+                    "reason": "build missing source-checkout frontend assets",
+                },
+            ]
         return []
 
     @staticmethod

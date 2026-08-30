@@ -234,6 +234,58 @@ class PlanPolicyGate:
                 safe_install_commands.append(cmd)
             else:
                 rejected_items.append(result["rejection"])
+        # Required source builds are deterministic repository evidence, not
+        # optional model suggestions. Append each lockfile-backed command and
+        # run it through the same registry/policy gate when the model omits it.
+        source_build_commands = (
+            snapshot.get("detected_signals", {}).get("source_build_commands", [])
+            or []
+        )
+        for item in source_build_commands:
+            if not isinstance(item, dict) or not item.get("cmd"):
+                continue
+            cmd = list(item["cmd"])
+            if cmd in safe_install_commands:
+                continue
+            registry_candidate = (
+                self._registry_candidate_for_command(registry, cmd)
+                if registry_present else None
+            )
+            if registry_candidate is not None:
+                cmd = list(registry_candidate.argv)
+                decision = CommandAuthorizationEngine().authorize(
+                    registry_candidate,
+                    registry,
+                    repo_dir=Path(snapshot["repo_dir"])
+                    if snapshot.get("repo_dir") else None,
+                    execution_backend=execution_backend,
+                    sandbox_policy_fingerprint=sandbox_policy_fingerprint,
+                    approval=approval,
+                )
+                command_decisions.append(decision)
+                if decision.verdict == "approval_required":
+                    required_approval_candidates.append(registry_candidate)
+                    continue
+                result = (
+                    {"allowed": True}
+                    if decision.verdict == "auto_allowed" else
+                    {"allowed": False, "rejection": {
+                        "section": "environment.source_build_commands",
+                        "item_index": len(safe_install_commands),
+                        "reason": decision.reason_code,
+                        "reason_code": decision.reason_code,
+                    }}
+                )
+            else:
+                result = self._validate_command(
+                    cmd,
+                    "environment.source_build_commands",
+                    len(safe_install_commands),
+                )
+            if result["allowed"]:
+                safe_install_commands.append(cmd)
+            else:
+                rejected_items.append(result["rejection"])
         safe_install_commands = self._prefer_existing_source_artifacts(
             safe_install_commands,
             snapshot,
@@ -615,7 +667,7 @@ class PlanPolicyGate:
             return item if isinstance(item, type(default)) else default
         return sandbox_policy_fingerprint(
             phase="runtime",
-            image=value("docker_image", "python:3.10-slim"),
+            image=value("docker_image", "python:3.13-slim"),
             network="none",
             gpus=value("docker_gpus", "none"),
             model_cache_dir=value("docker_model_cache_dir", ""),

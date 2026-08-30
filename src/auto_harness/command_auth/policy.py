@@ -129,6 +129,7 @@ class CommandAuthorizationEngine:
                 )
         reason_code = (
             "locked_package_script" if candidate.source_kind == "package_json_script"
+            else "locked_source_build" if candidate.source_kind == "source_build"
             else "locked_dependency_install" if candidate.source_kind == "node_install"
             else "declared_cli_bound_to_owned_env" if candidate.source_kind in {"pep621_script", "poetry_script"}
             else "approved_repository_command"
@@ -185,7 +186,7 @@ class CommandAuthorizationEngine:
 
     @staticmethod
     def _evidence_reason(candidate, evidence_types):
-        if candidate.source_kind not in {"node_install", "python_entrypoint"} and "readme_reference" not in evidence_types:
+        if candidate.source_kind not in {"node_install", "python_entrypoint", "source_build"} and "readme_reference" not in evidence_types:
             return "readme_reference_missing"
         if candidate.source_kind == "node_install" and not {"package_manifest", "lockfile"}.issubset(evidence_types):
             return "node_manifest_or_lockfile_missing"
@@ -195,6 +196,10 @@ class CommandAuthorizationEngine:
             return "project_cli_declaration_missing"
         if candidate.source_kind == "package_json_script" and not {"package_json_script", "lockfile"}.issubset(evidence_types):
             return "node_script_or_lockfile_missing"
+        if candidate.source_kind == "source_build" and not {
+            "package_json_script", "lockfile", "make_reference",
+        }.issubset(evidence_types):
+            return "source_build_evidence_missing"
         if candidate.source_kind == "make_target" and "make_target" not in evidence_types:
             return "make_target_missing"
         if candidate.source_kind == "repository_script" and "repository_script" not in evidence_types:

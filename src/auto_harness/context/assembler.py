@@ -97,8 +97,14 @@ def compact_project_snapshot(
     skill_budget_tokens: int = 2000,
     memory_budget_tokens: int = 2000,
 ) -> Dict[str, Any]:
+    text_limit = 400 if aggressive else 1000
+    item_limit = 6 if aggressive else 20
     result = {
-        key: compact_value(value, max_text_chars=1000, max_items=20)
+        key: compact_value(
+            value,
+            max_text_chars=text_limit,
+            max_items=item_limit,
+        )
         for key, value in snapshot.items()
         if key
         not in {
@@ -109,6 +115,45 @@ def compact_project_snapshot(
             "skill_context",
         }
     }
+    if aggressive and isinstance(snapshot.get("command_registry"), dict):
+        registry = snapshot["command_registry"]
+        registry_candidates = list(registry.get("candidates") or [])
+
+        def candidate_priority(item):
+            argv = list(item.get("argv") or []) if isinstance(item, dict) else []
+            if not isinstance(item, dict) or item.get("phase") != "run":
+                return (10,)
+            lowered = [str(token).lower() for token in argv]
+            cwd = str(item.get("cwd") or ".").lower()
+            if "--serve-only" in argv:
+                return (0,)
+            if "run_cli" in lowered or lowered[-2:] == ["langflow", "run"]:
+                return (1,)
+            if any(
+                token in {"serve", "server", "start", "run", "backend", "webui"}
+                or token.startswith(("serve_", "run_", "start_"))
+                for token in lowered[1:]
+            ) and cwd not in {"docs", "doc", "documentation"}:
+                return (2,)
+            if "--webui-only" in argv:
+                return (3,)
+            if "--webui" in argv:
+                return (4,)
+            if cwd in {"docs", "doc", "documentation"}:
+                return (9,)
+            return (5,)
+
+        registry_candidates.sort(key=candidate_priority)
+        result["command_registry"] = {
+            "schema_version": registry.get("schema_version", 1),
+            "repository_fingerprint": registry.get("repository_fingerprint", ""),
+            "candidates": [
+                compact_value(item, max_text_chars=240, max_items=8)
+                for item in registry_candidates[:8]
+            ],
+            "evidence_count": len(registry.get("evidence") or []),
+            "candidate_count": len(registry.get("candidates") or []),
+        }
     tree_limit = 80 if aggressive else 200
     file_tree = list(snapshot.get("file_tree") or [])
     result["file_tree"] = file_tree[:tree_limit]

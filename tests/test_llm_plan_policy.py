@@ -149,6 +149,23 @@ class TestPlanPolicyGate(unittest.TestCase):
             [[".venv/bin/python", "-m", "pip", "install", "."]],
         )
 
+    def test_required_source_build_is_appended_when_model_omits_it(self):
+        plan = json.loads(json.dumps(SAFE_PLAN))
+        snapshot = dict(SAFE_SNAPSHOT)
+        snapshot["detected_signals"] = {
+            "source_build_commands": [
+                {"cmd": ["npm", "--prefix", "src/frontend", "ci"]},
+                {"cmd": ["npm", "--prefix", "src/frontend", "run", "build"]},
+            ],
+        }
+
+        result = self.gate.validate(plan, snapshot, config=self.config)
+
+        self.assertTrue(result["allowed"])
+        commands = result["normalized_plan"]["environment"]["install_commands"]
+        self.assertIn(["npm", "--prefix", "src/frontend", "ci"], commands)
+        self.assertIn(["npm", "--prefix", "src/frontend", "run", "build"], commands)
+
     def test_bash_lc_rejected(self):
         """bash -lc should be rejected."""
         plan = json.loads(json.dumps(SAFE_PLAN))

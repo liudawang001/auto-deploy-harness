@@ -631,6 +631,91 @@ class ContextGovernanceTest(unittest.TestCase):
         self.assertEqual(snapshot["file_tree_summary"]["total_file_count"], 12)
         self.assertEqual(snapshot["file_tree_summary"]["omitted_file_count"], 7)
 
+    def test_aggressive_snapshot_compaction_bounds_command_registry(self):
+        from auto_harness.context.assembler import compact_project_snapshot
+
+        snapshot = {
+            "command_registry": {
+                "schema_version": 1,
+                "repository_fingerprint": "abc",
+                "evidence": [
+                    {"path": "README.md", "content": "x" * 2000}
+                    for _ in range(40)
+                ],
+                "candidates": [
+                    {"argv": ["python", "main.py"], "reason": "y" * 1000}
+                    for _ in range(20)
+                ],
+            },
+            "file_tree": ["main.py"],
+            "selected_files": {"main.py": {"content": "print('ok')"}},
+            "detected_signals": {"entrypoint_candidates": ["main.py"]},
+        }
+
+        compacted = compact_project_snapshot(snapshot, aggressive=True)
+
+        registry = compacted["command_registry"]
+        self.assertNotIn("evidence", registry)
+        self.assertEqual(registry["evidence_count"], 40)
+        self.assertEqual(len(registry["candidates"]), 8)
+        self.assertLess(len(json.dumps(compacted)), 12000)
+
+    def test_aggressive_snapshot_prioritizes_serve_only_command(self):
+        from auto_harness.context.assembler import compact_project_snapshot
+
+        snapshot = {
+            "command_registry": {
+                "candidates": [
+                    {"phase": "install", "argv": ["npm", "ci"]},
+                    {"phase": "run", "argv": ["python", "main.py"]},
+                    {
+                        "phase": "run",
+                        "candidate_id": "serve",
+                        "argv": ["python", "main.py", "--serve-only"],
+                    },
+                ]
+            },
+            "file_tree": ["main.py"],
+            "selected_files": {"main.py": {"content": "serve"}},
+        }
+
+        compacted = compact_project_snapshot(snapshot, aggressive=True)
+
+        first = compacted["command_registry"]["candidates"][0]
+        self.assertEqual(first["candidate_id"], "serve")
+
+    def test_aggressive_snapshot_prioritizes_application_run_target_over_docs(self):
+        from auto_harness.context.assembler import compact_project_snapshot
+
+        snapshot = {
+            "command_registry": {
+                "candidates": [
+                    {
+                        "phase": "run",
+                        "candidate_id": "docs",
+                        "argv": ["npm", "run", "serve"],
+                        "cwd": "docs",
+                    },
+                    {
+                        "phase": "run",
+                        "candidate_id": "app",
+                        "argv": ["make", "-f", "Makefile", "run_cli"],
+                        "cwd": ".",
+                    },
+                ]
+            },
+            "file_tree": ["README.md", "pyproject.toml"],
+            "selected_files": {
+                "README.md": {"content": "make run_cli"},
+                "pyproject.toml": {"content": "[project]"},
+            },
+        }
+
+        compacted = compact_project_snapshot(snapshot, aggressive=True)
+
+        assert compacted["command_registry"]["candidates"][0]["candidate_id"] == "app"
+        assert "README.md" in compacted["selected_files"]
+
 
 if __name__ == "__main__":
     unittest.main()

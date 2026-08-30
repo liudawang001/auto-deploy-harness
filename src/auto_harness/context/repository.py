@@ -42,6 +42,9 @@ class RepoEvidenceSelector:
             if Path(normalized).name in _DEPENDENCY_FILES:
                 score += 60
                 reason.append("dependency_file")
+            if Path(normalized).name.lower() in {"readme.md", "readme.rst", "readme.txt"}:
+                score += 50
+                reason.append("deployment_documentation")
             if Path(normalized).name in {"app.py", "main.py", "server.py", "demo.py"}:
                 score += 40
                 reason.append("entrypoint")
