@@ -80,6 +80,9 @@ class HarnessConfig:
     # Optional evidence retrieval. Lexical mode is fully offline; dense and
     # hybrid modes require an explicitly configured embedding provider.
     retrieval: Dict[str, Any] = None
+    # Optional performance & cost profile pricing. Token/latency aggregation
+    # works without this block; only the monetary cost section needs prices.
+    cost_profile: Dict[str, Any] = None
     provider_configs: Dict[str, Dict[str, Any]] = None
     agent_max_input_chars: int = 20000
     agent_max_file_chars: int = 6000
@@ -386,6 +389,37 @@ class HarnessConfig:
                 raise ValueError("external embedding api base must use https")
             if not self.retrieval.get("embedding_model") or not self.retrieval.get("embedding_api_key_env"):
                 raise ValueError("external embedding model and API key env name are required")
+        cost_profile_defaults = {
+            "currency": "USD",
+            "pricing_as_of": "",
+            # model name -> price per 1M tokens. Missing models are reported
+            # as unpriced tokens; costs are never invented for them.
+            "pricing": {},
+        }
+        if self.cost_profile is None:
+            self.cost_profile = cost_profile_defaults
+        elif not isinstance(self.cost_profile, dict):
+            raise ValueError("cost_profile must be an object")
+        else:
+            self.cost_profile = {**cost_profile_defaults, **self.cost_profile}
+        if not isinstance(self.cost_profile["currency"], str) or not self.cost_profile["currency"]:
+            raise ValueError("cost_profile.currency must be a non-empty string")
+        if not isinstance(self.cost_profile["pricing_as_of"], str):
+            raise ValueError("cost_profile.pricing_as_of must be a string")
+        pricing = self.cost_profile["pricing"]
+        if not isinstance(pricing, dict):
+            raise ValueError("cost_profile.pricing must be an object")
+        for model_name, entry in pricing.items():
+            if not isinstance(entry, dict):
+                raise ValueError("cost_profile.pricing.%s must be an object" % model_name)
+            for key in ("input_per_million", "output_per_million", "cache_hit_input_per_million"):
+                value = entry.get(key)
+                if value is None:
+                    continue
+                if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+                    raise ValueError(
+                        "cost_profile.pricing.%s.%s must be a non-negative number" % (model_name, key)
+                    )
         if self.provider_protocol not in {"json_action", "native_tools", "auto"}:
             raise ValueError(
                 "provider_protocol must be json_action, native_tools or auto"

@@ -4,6 +4,7 @@ from typing import Dict, List
 
 from auto_harness.models.base import read_json, write_json
 from auto_harness.models.result import StageResult
+from auto_harness.observability.cost_profile import CostProfileCollector
 
 
 class ReportGenerator:
@@ -199,6 +200,9 @@ class ReportGenerator:
                 "- Help type: %s" % (", ".join("`%s`" % item for item in metrics.get("help_type") or []) or "`none`"),
                 "",
             ])
+        cost_lines = self._cost_summary_lines(run_dir)
+        if cost_lines:
+            lines.extend(cost_lines)
         contribution = self._read_optional(run_dir / "reports" / "agent_contribution.json")
         if isinstance(contribution, dict) and contribution:
             lines.extend([
@@ -631,3 +635,73 @@ class ReportGenerator:
             return read_json(path)
         except (OSError, ValueError):
             return None
+
+    def _cost_summary_lines(self, run_dir: Path) -> List[str]:
+        """Render a Performance & Cost section from a fresh read-only profile.
+
+        Pricing comes from the ambient HarnessConfig when one is loadable from
+        the working directory; otherwise tokens and durations still render and
+        only the monetary line is skipped. Any failure here must never break
+        report generation, so every step is guarded.
+        """
+        try:
+            collector = self._cost_profile_collector()
+            profile = collector.collect(Path(run_dir))
+        except Exception:
+            return []
+        tokens = profile.get("tokens") or {}
+        coverage = tokens.get("coverage") or {}
+        reported = tokens.get("provider_reported") or {}
+        estimated = tokens.get("estimated") or {}
+        latency = profile.get("llm_latency") or {}
+        run_window = profile.get("run") or {}
+        stage_rows = [
+            stage for stage in profile.get("stages") or []
+            if isinstance(stage.get("duration_ms"), int)
+        ]
+        if not coverage.get("calls_total") and not stage_rows:
+            return []
+        duration_ms = run_window.get("duration_ms")
+        lines = [
+            "## Performance & Cost",
+            "",
+            "- LLM calls: `%s` (with usage telemetry: `%s`)"
+            % (coverage.get("calls_total", 0), coverage.get("calls_with_usage", 0)),
+            "- Provider reported tokens: input `%s`, output `%s`, total `%s` (cache hit `%s`)"
+            % (
+                reported.get("input_tokens", 0),
+                reported.get("output_tokens", 0),
+                reported.get("total_tokens", 0),
+                reported.get("cache_hit_tokens", 0),
+            ),
+            "- Estimated-only tokens (no provider telemetry): total `%s`"
+            % estimated.get("total_tokens", 0),
+            "- LLM wall time: total `%sms`, avg `%sms`, p95 `%sms`"
+            % (latency.get("total_ms", 0), latency.get("avg_ms", 0), latency.get("p95_ms", 0)),
+            "- End-to-end duration: %s"
+            % ("`%sms`" % duration_ms if isinstance(duration_ms, int) else "`n/a`"),
+        ]
+        if stage_rows:
+            lines.append(
+                "- Stage durations: %s"
+                % ", ".join("`%s=%sms`" % (stage["stage"], stage["duration_ms"]) for stage in stage_rows)
+            )
+        cost = profile.get("cost") or {}
+        if cost.get("status") == "priced":
+            lines.append(
+                "- Estimated cost: `%s %s` (pricing as of `%s`, config-provided, not a billing source)"
+                % (cost.get("currency"), cost.get("total_cost"), cost.get("pricing_as_of"))
+            )
+        else:
+            lines.append("- Cost: not computed (%s)" % (cost.get("reason") or "unpriced"))
+        lines.append("")
+        return lines
+
+    @staticmethod
+    def _cost_profile_collector() -> CostProfileCollector:
+        try:
+            from auto_harness.config import HarnessConfig
+
+            return CostProfileCollector(HarnessConfig.load().cost_profile)
+        except Exception:
+            return CostProfileCollector()

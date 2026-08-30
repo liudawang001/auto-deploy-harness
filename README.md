@@ -122,7 +122,7 @@ auto-deploy-harness deploy \
 
 当前仓库已经包含：
 
-- CLI：`init`、`deploy`、`resume`、`status`、`report`、`package`、`dashboard`、`queue`、`readiness`、`llm-test`、`benchmark`、`eval-compare`、`live-smoke-plan`、`agent-live-smoke`、`docker-smoke`、`repair-approve`、`memory-evolve`；`memory-promote` 仅保留为旧 proposal 只读兼容入口。
+- CLI：`init`、`deploy`、`resume`、`status`、`report`、`package`、`dashboard`、`queue`、`readiness`、`llm-test`、`benchmark`、`eval-compare`、`live-smoke-plan`、`agent-live-smoke`、`docker-smoke`、`repair-approve`、`memory-evolve`、`cost-profile`；`memory-promote` 仅保留为旧 proposal 只读兼容入口。
 - 任务状态存储：`task.json`、`state.json`、`events.jsonl`。
 - 确定性项目分析器。
 - 安全默认的 `env_solve`、`env_deploy`、`runner`、`verify`、report 模块。
@@ -963,6 +963,48 @@ PYTHONPATH=src python3 -m auto_harness.cli readiness --benchmark-report benchmar
 ```
 
 `readiness` 会检查关键代码文件、进度文档和 benchmark manifest，输出 `local_readiness_percent`、本地 gate 结果、外部真实 smoke gate 和 operator next steps。普通 Mac 开发机不默认下载真实模型、不启动 GPU/Docker/vLLM 大模型服务；这些会被标记为 `external_required`，用于后续在具备网络、token、磁盘和 GPU 的环境执行。
+
+## Performance & Cost Profile
+
+系统在每次 LLM 调用时已经持久化 token 用量（`context.usage`，含 DeepSeek cache hit/miss 拆分）和调用时延（`latency_ms`），`events.jsonl` 记录了每个 stage 的 running→终态时间戳。`cost-profile` 是纯读的聚合器，把这些产物汇总成单 run 画像和跨 run 组合画像：
+
+```bash
+PYTHONPATH=src python3 -m auto_harness.cli cost-profile
+# 输出 reports/cost_profile.json + reports/cost_profile.md
+
+PYTHONPATH=src python3 -m auto_harness.cli cost-profile --task-id <task-id>
+# 单 run 模式，把画像写进 runs/<task-id>/reports/cost_profile.json
+
+PYTHONPATH=src python3 -m auto_harness.cli cost-profile --runs-dir runs --output reports/cost_profile.json
+```
+
+画像内容：
+
+- Token 用量：按 `provider_reported` 与 `estimated` 严格分列，永不混算；含 cache hit/miss 拆分、按模型分列、调用数与遥测覆盖率。
+- LLM 时延：per-call `latency_ms` 的 avg / p50 / p95 / max。
+- 阶段耗时：每个 stage 的 wall-clock 时长（含重跑 stage 的最近一次尝试），以及端到端 run 时长分布。
+- 成功率：`final_status` 分布与两种口径（全部 run / 有终态记录的 run）。
+- 成本：仅当 `cost_profile.pricing` 配置了该模型价格时才计算；未配置价格的模型只报 token，进入 `unpriced_models`，不会编造成本数字。价格为配置提供（带 `pricing_as_of` 元数据），不是账单来源。
+
+配置示例（`configs/default.json`）：
+
+```json
+{
+  "cost_profile": {
+    "currency": "USD",
+    "pricing_as_of": "2026-08-30",
+    "pricing": {
+      "deepseek-v4-flash": {
+        "input_per_million": 0.28,
+        "output_per_million": 0.42,
+        "cache_hit_input_per_million": 0.028
+      }
+    }
+  }
+}
+```
+
+每次部署的 `report.md` 也会自动带一节 `## Performance & Cost`（由同一聚合器在 report 阶段现算，无遥测的老 run 自动跳过）。
 
 ## Benchmark
 

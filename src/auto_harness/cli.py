@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any, Dict
 
 from auto_harness.agent import AgentMetricsCollector
+from auto_harness.observability.cost_profile import CostProfileCollector
 from auto_harness.config import HarnessConfig
 from auto_harness.artifacts import DeploymentPackageExporter
 from auto_harness.benchmarks import BenchmarkRunner, LiveSmokePlanner
@@ -271,6 +272,11 @@ def build_parser() -> argparse.ArgumentParser:
     agent_metrics = sub.add_parser("agent-metrics", help="collect agent metrics from local runs")
     agent_metrics.add_argument("--runs-dir", default="")
     agent_metrics.add_argument("--output", default="")
+
+    cost_profile = sub.add_parser("cost-profile", help="aggregate token cost, latency, stage duration and success rate from local runs")
+    cost_profile.add_argument("--runs-dir", default="")
+    cost_profile.add_argument("--output", default="")
+    cost_profile.add_argument("--task-id", default="", help="profile a single run and write reports/cost_profile.json into it")
 
     eval_compare = sub.add_parser("eval-compare", help="generate baseline vs agent comparison report")
     eval_compare.add_argument("--manifest", default="eval_targets/manifest.json")
@@ -874,6 +880,23 @@ def main(argv=None) -> int:
         result = AgentMetricsCollector().collect_many(runs_dir, output_path=output)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
+
+    if args.command == "cost-profile":
+        collector = CostProfileCollector(config.cost_profile)
+        runs_dir = Path(args.runs_dir) if args.runs_dir else config.runs_path
+        if args.task_id:
+            run_dir = runs_dir / args.task_id
+            if not run_dir.exists():
+                print(json.dumps({"error": "run dir not found: %s" % run_dir}, ensure_ascii=False))
+                return 2
+            result = collector.collect(run_dir)
+            write_json(run_dir / "reports" / "cost_profile.json", result)
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return 0
+        output = Path(args.output) if args.output else Path("reports") / "cost_profile.json"
+        result = collector.collect_many(runs_dir, output_path=output)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0 if result.get("run_count") else 2
 
     if args.command == "eval-compare":
         reporter = AgentComparisonReporter()

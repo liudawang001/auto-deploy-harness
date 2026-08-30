@@ -74,6 +74,22 @@
     "share_unverified_memory": false,
     "tool_result_redaction": true
   },
+  "cost_profile": {
+    "currency": "USD",
+    "pricing_as_of": "2026-08-30",
+    "pricing": {
+      "deepseek-v4-flash": {
+        "input_per_million": 0.28,
+        "output_per_million": 0.42,
+        "cache_hit_input_per_million": 0.028
+      },
+      "deepseek-v4-pro": {
+        "input_per_million": 0.56,
+        "output_per_million": 1.68,
+        "cache_hit_input_per_million": 0.056
+      }
+    }
+  },
   "agent_plan_first_provider": "deepseek",
   "agent_repo_context_mode": "eager_compat",
   "agent_repo_inventory_budget_tokens": 4000,
