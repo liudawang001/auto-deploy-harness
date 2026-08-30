@@ -27,6 +27,11 @@ ENTRYPOINT_SOURCE_KINDS = frozenset({
     "pep621_script",
     "poetry_script",
     "node_run_script",
+    # Phase B3 native build outputs (run phase only; build candidates stay
+    # registry-scoped until an authorized build produced the artifact).
+    "jvm_artifact_run",
+    "go_binary_run",
+    "cargo_binary_run",
 })
 
 _SHELL_OPERATORS = (";", "&&", "||", "|", "&", "`", "$(", ">", "<", "\n", "\r")

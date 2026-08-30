@@ -386,6 +386,14 @@ class NodePackageAdapter(BuiltinAdapter):
             return []
 
 
+from auto_harness.deployment_adapters.native import (
+    CargoAdapter,
+    GoModuleAdapter,
+    GradleWrapperAdapter,
+    MavenWrapperAdapter,
+)
+
+
 def _generic_api_verify(adapter, detection, protocol):
     if not detection.matched:
         return []
@@ -462,4 +470,8 @@ BUILTIN_ADAPTERS = (
     VllmAdapter,
     OpenAICompatibleAdapter,
     NodePackageAdapter,
+    MavenWrapperAdapter,
+    GradleWrapperAdapter,
+    GoModuleAdapter,
+    CargoAdapter,
 )

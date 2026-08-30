@@ -46,6 +46,15 @@ class CommandDiscoveryService:
         candidates.extend(found_candidates)
         rejections.extend(entrypoint_rejections)
 
+        from auto_harness.command_auth.adapters.native_build import discover_native_builds
+
+        found_evidence, found_candidates, native_rejections = discover_native_builds(
+            repo_dir, file_tree, documented, repository_fingerprint
+        )
+        evidence.extend(found_evidence)
+        candidates.extend(found_candidates)
+        rejections.extend(native_rejections)
+
         unique_evidence = {item.evidence_id: item for item in evidence}
         unique_candidates = {item.candidate_id: item for item in candidates}
         return CommandRegistry(

@@ -8,6 +8,15 @@ from auto_harness.command_auth.schemas import CommandCandidate
 
 OWNED_SHELLS = {"bash", "sh", "zsh", "fish", "csh", "tcsh"}
 
+# Harness-owned artifact output paths (Phase B3).  A repository build may
+# only run from these controlled locations, and only when the hash-bound
+# artifact evidence still matches the file on disk.
+HARNESS_OWNED_ARTIFACT_PREFIXES = (
+    ".harness/bin/",
+    "target/release/",
+    "target/debug/",
+)
+
 
 class ExecutableResolver:
     def resolve(
@@ -45,6 +54,21 @@ class ExecutableResolver:
                 if marker.get("environment_path") != str((Path(repo_dir) / ".venv").resolve()):
                     return {"resolved": False, "reason_code": "owned_environment_marker_mismatch", "path": str(path)}
             return {"resolved": True, "reason_code": "declared_cli_bound_to_owned_env", "path": str(path)}
+        for prefix in HARNESS_OWNED_ARTIFACT_PREFIXES:
+            if raw.startswith("./" + prefix) or raw.startswith(prefix):
+                normalized = raw[2:] if raw.startswith("./") else raw
+                path = Path(repo_dir) / normalized
+                if require_exists and not path.is_file():
+                    return {
+                        "resolved": False,
+                        "reason_code": "build_artifact_missing",
+                        "path": str(path),
+                    }
+                return {
+                    "resolved": True,
+                    "reason_code": "harness_owned_build_artifact",
+                    "path": str(path),
+                }
         if "/" in raw and not raw.startswith("/bin/") and not raw.startswith("/usr/bin/"):
             return {"resolved": False, "reason_code": "unbound_executable_path", "path": raw}
         return {"resolved": True, "reason_code": "controlled_system_tool", "path": raw}

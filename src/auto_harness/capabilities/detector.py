@@ -43,6 +43,24 @@ class CapabilityDetector:
         if "package.json" in files:
             self._add(capabilities, repo_dir, "languages", "node", "manifest", "package.json", 0.95, "package.json detected")
 
+        # Phase B3: language ecosystems and build systems detected from build
+        # metadata.  Detection alone never grants execution; the native build
+        # adapters need wrapper/lockfile evidence on top.
+        for relative in files:
+            name = Path(relative).name
+            if name == "pom.xml":
+                self._add(capabilities, repo_dir, "languages", "java", "manifest", relative, 0.9, "pom.xml detected")
+                self._add(capabilities, repo_dir, "build_systems", "maven", "manifest", relative, 0.9, "pom.xml detected")
+            elif name in ("build.gradle", "build.gradle.kts"):
+                self._add(capabilities, repo_dir, "languages", "java", "manifest", relative, 0.9, "%s detected" % name)
+                self._add(capabilities, repo_dir, "build_systems", "gradle", "manifest", relative, 0.9, "%s detected" % name)
+            elif name == "go.mod":
+                self._add(capabilities, repo_dir, "languages", "go", "manifest", relative, 0.95, "go.mod detected")
+                self._add(capabilities, repo_dir, "build_systems", "go", "manifest", relative, 0.95, "go.mod detected")
+            elif name == "Cargo.toml":
+                self._add(capabilities, repo_dir, "languages", "rust", "manifest", relative, 0.95, "Cargo.toml detected")
+                self._add(capabilities, repo_dir, "build_systems", "cargo", "manifest", relative, 0.95, "Cargo.toml detected")
+
         for manifest in manifests:
             if manifest.status != "parsed":
                 continue

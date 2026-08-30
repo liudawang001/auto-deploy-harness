@@ -139,6 +139,12 @@ class CommandAuthorizationEngine:
             else "django_manage_entrypoint" if candidate.source_kind == "django_manage"
             else "declared_asgi_wsgi_entrypoint" if candidate.source_kind == "asgi_wsgi_entrypoint"
             else "declared_procfile_web" if candidate.source_kind == "procfile_web"
+            else "pinned_jvm_wrapper_build" if candidate.source_kind in {"jvm_maven_build", "jvm_gradle_build"}
+            else "hash_pinned_artifact_run" if candidate.source_kind == "jvm_artifact_run"
+            else "pinned_go_module_build" if candidate.source_kind == "go_build"
+            else "hash_pinned_go_binary_run" if candidate.source_kind == "go_binary_run"
+            else "pinned_cargo_locked_build" if candidate.source_kind == "cargo_build"
+            else "hash_pinned_cargo_binary_run" if candidate.source_kind == "cargo_binary_run"
             else "approved_repository_command"
         )
         return CommandDecision(
@@ -198,12 +204,28 @@ class CommandAuthorizationEngine:
             "pep621_script", "poetry_script", "package_json_script", "node_run_script",
             "django_manage", "asgi_wsgi_entrypoint", "procfile_web",
             "llm_candidate_request",
+            "jvm_maven_build", "jvm_gradle_build", "jvm_artifact_run",
+            "go_build", "go_binary_run", "cargo_build", "cargo_binary_run",
         } and "readme_reference" not in evidence_types:
             return "readme_reference_missing"
         if candidate.source_kind == "manifest_command" and "manifest_command" not in evidence_types:
             return "manifest_command_evidence_missing"
         if candidate.source_kind == "node_install" and not {"package_manifest", "lockfile"}.issubset(evidence_types):
             return "node_manifest_or_lockfile_missing"
+        if candidate.source_kind == "jvm_maven_build" and not {"jvm_maven_pom", "maven_wrapper"}.issubset(evidence_types):
+            return "maven_wrapper_or_pom_missing"
+        if candidate.source_kind == "jvm_gradle_build" and not {"jvm_gradle_build", "gradle_wrapper"}.issubset(evidence_types):
+            return "gradle_wrapper_or_build_missing"
+        if candidate.source_kind == "jvm_artifact_run" and "jvm_build_artifact" not in evidence_types:
+            return "jvm_artifact_evidence_missing"
+        if candidate.source_kind == "go_build" and not {"go_module", "go_lockfile"}.issubset(evidence_types):
+            return "go_module_or_lockfile_missing"
+        if candidate.source_kind == "go_binary_run" and "go_build_artifact" not in evidence_types:
+            return "go_build_artifact_missing"
+        if candidate.source_kind == "cargo_build" and not {"cargo_manifest", "cargo_lockfile"}.issubset(evidence_types):
+            return "cargo_manifest_or_lockfile_missing"
+        if candidate.source_kind == "cargo_binary_run" and "cargo_build_artifact" not in evidence_types:
+            return "cargo_build_artifact_missing"
         if candidate.source_kind == "pep621_script" and "pep621_script" not in evidence_types:
             return "project_cli_declaration_missing"
         if candidate.source_kind == "poetry_script" and "poetry_script" not in evidence_types:
