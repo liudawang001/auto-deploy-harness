@@ -69,11 +69,13 @@ class ModelRuntimeReadiness:
         urlopen: Optional[Callable] = None,
         clock: Optional[Callable] = None,
         sleeper: Optional[Callable] = None,
+        local_liveness: Optional[Callable] = None,
     ) -> None:
         self.command_runner = command_runner or self._subprocess_runner()
         self.urlopen = urlopen or urllib.request.urlopen
         self._clock = clock or time.monotonic
         self._sleeper = sleeper or time.sleep
+        self._local_liveness = local_liveness
 
     def wait(
         self,
@@ -88,6 +90,7 @@ class ModelRuntimeReadiness:
         poll_interval: float = 1.0,
         progress_callback: Optional[Callable] = None,
         max_rounds: Optional[int] = None,
+        local_log_path: str = "",
     ) -> ModelRuntimeStartupEvidence:
         labels = dict(labels or {})
         start_mono = self._clock()
@@ -116,8 +119,10 @@ class ModelRuntimeReadiness:
                     log_tail=last_log_tail,
                 )
 
-            # 1. Container must still be running.
-            running, inspect_data, inspect_error = self._container_inspect(container_id)
+            # 1. Container/process must still be running.
+            running, inspect_data, inspect_error = self._container_inspect(
+                container_id, runtime_plan=runtime_plan,
+            )
             if inspect_error:
                 return self._evidence(
                     status="failed",
@@ -150,8 +155,9 @@ class ModelRuntimeReadiness:
                     log_tail=last_log_tail,
                 )
 
-            # 2. Labels + plan hash still match.
-            if not self._labels_match(inspect_data, labels):
+            # 2. Labels + plan hash still match (container mode only; local
+            #    plans carry no inspect data).
+            if inspect_data is not None and not self._labels_match(inspect_data, labels):
                 return self._evidence(
                     status="failed",
                     runtime_plan=runtime_plan,
@@ -187,7 +193,9 @@ class ModelRuntimeReadiness:
                 )
 
             # 4. Classify the refreshed log tail for a deterministic failure.
-            last_log_tail = self._log_tail(container_id)
+            last_log_tail = self._log_tail(
+                container_id, runtime_plan=runtime_plan, local_log_path=local_log_path,
+            )
             category = classify_model_startup_failure(last_log_tail)
             if category:
                 return self._evidence(
@@ -245,7 +253,10 @@ class ModelRuntimeReadiness:
 
         return _run
 
-    def _container_inspect(self, container_id):
+    def _container_inspect(self, container_id, runtime_plan=None):
+        if getattr(runtime_plan, "deployment_mode", "") == "local_vllm":
+            alive = self._local_process_alive(container_id)
+            return alive, None, ""
         result = self.command_runner(["docker", "inspect", container_id])
         if result.get("exit_code") != 0:
             return False, None, result.get("stderr", "")
@@ -255,11 +266,30 @@ class ModelRuntimeReadiness:
             return False, None, "invalid docker inspect json"
         return bool(data.get("State", {}).get("Running")), data, ""
 
-    def _log_tail(self, container_id, lines: int = 50) -> str:
+    def _log_tail(self, container_id, lines: int = 50, runtime_plan=None, local_log_path: str = "") -> str:
+        if getattr(runtime_plan, "deployment_mode", "") == "local_vllm":
+            if not local_log_path:
+                return ""
+            try:
+                with open(local_log_path, "r", encoding="utf-8", errors="replace") as handle:
+                    return "".join(handle.readlines()[-lines:])[-8000:]
+            except OSError:
+                return ""
         result = self.command_runner(["docker", "logs", "--tail", str(lines), container_id])
         if result.get("exit_code") != 0:
             return ""
         return (result.get("stdout", "") + result.get("stderr", ""))[-8000:]
+
+    def _local_process_alive(self, pid) -> bool:
+        if self._local_liveness is not None:
+            return bool(self._local_liveness(pid))
+        try:
+            import os
+
+            os.kill(int(str(pid)), 0)
+            return True
+        except (ValueError, OSError):
+            return False
 
     def _probe_models(self, runtime_plan):
         url = "http://%s:%s%s" % (

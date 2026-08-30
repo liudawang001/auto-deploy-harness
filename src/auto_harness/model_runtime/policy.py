@@ -10,6 +10,10 @@ valid command is the one the adapter re-derives from the validated bundle.
 import json
 from typing import List, Optional
 
+from auto_harness.model_runtime.local_adapter import (
+    LOCAL_SECURITY_PROFILE,
+    LocalVllmRuntimeAdapter,
+)
 from auto_harness.model_runtime.preparation_gate import PreparationBundle
 from auto_harness.model_runtime.schemas import InferenceRuntimePlan
 from auto_harness.model_runtime.vllm_adapter import (
@@ -42,8 +46,10 @@ class ModelRuntimePolicy:
         adapter: Optional[VllmRuntimeAdapter] = None,
         image_allowlist=DEFAULT_IMAGE_ALLOWLIST,
         security_profile: str = SECURITY_PROFILE,
+        local_adapter: Optional[LocalVllmRuntimeAdapter] = None,
     ) -> None:
         self.adapter = adapter or VllmRuntimeAdapter()
+        self.local_adapter = local_adapter or LocalVllmRuntimeAdapter()
         self.image_allowlist = tuple(image_allowlist or ())
         self.security_profile = security_profile
 
@@ -87,6 +93,14 @@ class ModelRuntimePolicy:
         # 3. runtime == vllm
         if plan.runtime != "vllm":
             return self._deny("unsupported_runtime", "runtime must be vllm")
+
+        if plan.deployment_mode == "local_vllm":
+            return self._authorize_local(
+                plan, bundle, config,
+                execute=execute, allow_start=allow_start,
+                execution_backend=execution_backend,
+                require_start_auth=require_start_auth,
+            )
 
         # 4. Image registry/repository in allowlist and digest fixed
         image_name = plan.image.split("@", 1)[0]
@@ -140,6 +154,65 @@ class ModelRuntimePolicy:
             "verdict": "auto_allowed",
             "reason_code": "managed_inference_runtime",
             "reasons": ["managed inference runtime plan authorized"],
+            "plan_hash": plan.plan_hash,
+        }
+
+    def _authorize_local(
+        self,
+        plan: InferenceRuntimePlan,
+        bundle: PreparationBundle,
+        config,
+        *,
+        execute: bool,
+        allow_start: bool,
+        execution_backend: str,
+        require_start_auth: bool,
+    ) -> dict:
+        """Hard gate for docker-less host-process vLLM plans.
+
+        Same fail-closed conditions as the managed mode, minus the container
+        checks, plus an explicit operator opt-in: without
+        ``model_runtime_mode=local_vllm`` the plan is denied even when every
+        other condition holds.
+        """
+        if str(getattr(config, "model_runtime_mode", "managed_vllm")) != "local_vllm":
+            return self._deny("local_mode_not_selected", "local_vllm plans require model_runtime_mode=local_vllm")
+        if execution_backend != "local":
+            return self._deny("backend_mode_mismatch", "local_vllm plans require the local execution backend")
+        if plan.security_profile != LOCAL_SECURITY_PROFILE:
+            return self._deny("unsupported_security_profile", "security profile %r not supported" % plan.security_profile)
+        if plan.image or plan.image_digest or plan.model_container_path or plan.container_name:
+            return self._deny("local_plan_polluted", "local plans must not carry container fields")
+        if not self._path_in_cache(plan.model_host_path, bundle.cache_root):
+            return self._deny("model_path_outside_cache", "model host path escapes the cache root")
+        if plan.expected_host not in ("127.0.0.1", "localhost"):
+            return self._deny("local_bind_denied", "local runtime must bind loopback")
+
+        try:
+            expected_command = self.local_adapter.command_for(bundle, config, host_port=plan.expected_port)
+        except ValueError as exc:
+            return self._deny("command_recompute_failed", str(exc))
+        if plan.command != expected_command:
+            return self._deny("command_mismatch", "runtime command does not match the adapter")
+
+        if require_start_auth and not (execute and allow_start):
+            return self._deny("start_not_authorized", "execute and allow-start must both be authorized")
+        if not bundle.decision or bundle.decision.status != "allowed":
+            return self._deny("resource_not_allowed", "resource decision is not allowed")
+
+        joined = " ".join(plan.command).lower()
+        for marker in _FORBIDDEN_MARKERS:
+            if marker.lower() in joined:
+                return self._deny("host_escape_rejected", "forbidden marker in command: %s" % marker)
+        text = json.dumps(plan.to_dict(), ensure_ascii=False)
+        if check_redaction(text):
+            return self._deny("secret_in_plan", "runtime plan contains unredacted sensitive content")
+
+        return {
+            "allowed": True,
+            "verdict": "auto_allowed",
+            "reason_code": "local_inference_runtime",
+            "reasons": ["local inference runtime plan authorized (no container isolation)"],
             "plan_hash": plan.plan_hash,
         }
 

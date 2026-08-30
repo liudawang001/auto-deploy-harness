@@ -155,6 +155,7 @@ class HarnessConfig:
     model_runtime: str = "vllm"
     model_runtime_mode: str = "managed_vllm"
     model_runtime_image: str = ""
+    model_runtime_local_python: str = ""
     model_runtime_require_image_digest: bool = True
     model_runtime_port: int = 8000
     model_runtime_dtype: str = "auto"
@@ -629,10 +630,14 @@ class HarnessConfig:
         # Model inference configuration validation (guarded feature).
         if self.model_runtime not in ("vllm",):
             raise ValueError("model_runtime must be 'vllm', got: %s" % self.model_runtime)
-        if self.model_runtime_mode not in ("managed_vllm",):
+        if self.model_runtime_mode not in ("managed_vllm", "local_vllm"):
             raise ValueError(
-                "model_runtime_mode must be 'managed_vllm', got: %s" % self.model_runtime_mode
+                "model_runtime_mode must be 'managed_vllm' or 'local_vllm', got: %s" % self.model_runtime_mode
             )
+        if self.model_runtime_mode == "local_vllm" and not self.model_runtime_local_python:
+            # Keep the plan deterministic: an empty value would bind the
+            # command to whatever interpreter the stage happens to use.
+            raise ValueError("model_runtime_mode=local_vllm requires model_runtime_local_python")
         if self.model_runtime_tensor_parallel_size != 1:
             raise ValueError("model_runtime_tensor_parallel_size must be 1")
         if isinstance(self.model_runtime_gpu_memory_utilization, bool) or not (

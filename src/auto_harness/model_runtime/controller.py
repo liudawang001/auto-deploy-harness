@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from auto_harness.model_runtime.evidence import ModelRuntimeEvidenceWriter
+from auto_harness.model_runtime.local_adapter import LocalVllmRuntimeAdapter
 from auto_harness.model_runtime.preparation_gate import (
     PreparationArtifactGate,
     PreparationBundle,
@@ -95,8 +96,10 @@ class ModelRuntimeController:
         runner=None,
         readiness=None,
         verifier=None,
+        local_adapter=None,
     ) -> None:
         self.adapter = adapter or VllmRuntimeAdapter()
+        self.local_adapter = local_adapter or LocalVllmRuntimeAdapter()
         self.policy = policy or ModelRuntimePolicy()
         self.runner = runner
         self.readiness = readiness
@@ -117,6 +120,7 @@ class ModelRuntimeController:
         gpu_indexes=None,
         operation_id: str = "",
         reconciler=None,
+        process_launcher=None,
     ) -> RuntimePhaseResult:
         gate = PreparationArtifactGate(
             run_dir, cache_root=cache_root, host_facts_provider=host_facts_provider,
@@ -125,14 +129,17 @@ class ModelRuntimeController:
         if not bundle.ok:
             return RuntimePhaseResult(status="blocked", bundle=bundle, errors=bundle.errors)
 
+        mode = str(getattr(config, "model_runtime_mode", "managed_vllm") or "managed_vllm")
+        adapter = self.local_adapter if mode == "local_vllm" else self.adapter
+        execution_backend = "local" if mode == "local_vllm" else "docker"
         try:
-            plan = self.adapter.build(bundle, config, task_id=task_id, gpu_indexes=gpu_indexes)
+            plan = adapter.build(bundle, config, task_id=task_id, gpu_indexes=gpu_indexes)
         except ValueError as exc:
             return RuntimePhaseResult(status="blocked", bundle=bundle, errors=[str(exc)])
 
         decision = self.policy.authorize(
             plan, bundle, config,
-            execute=execute, allow_start=allow_start, execution_backend="docker",
+            execute=execute, allow_start=allow_start, execution_backend=execution_backend,
             require_start_auth=bool(execute and allow_start),
         )
         if not decision["allowed"]:
@@ -150,9 +157,11 @@ class ModelRuntimeController:
         operation_id = operation_id or stable_operation_id(task_id, plan.plan_hash)
         runner = self.runner or RunnerModule()
 
+        local_mode = mode == "local_vllm"
+
         # Reconcile any pre-existing managed container before starting a new one.
         container_id = ""
-        if reconciler is not None:
+        if reconciler is not None and not local_mode:
             op = {
                 "operation_id": operation_id,
                 "task_id": task_id,
@@ -186,13 +195,14 @@ class ModelRuntimeController:
                 execute=True,
                 command_runner=command_runner,
                 operation_id=operation_id,
+                process_launcher=process_launcher,
             )
             if result.status != "passed":
                 return RuntimePhaseResult(
                     status="failed", plan=plan, bundle=bundle, policy=decision,
                     errors=[result.error or "container_start_failed"],
                 )
-            container_id = result.data.get("container_id", "")
+            container_id = str(result.data.get("container_id", "") or result.data.get("pid", ""))
 
         readiness = self.readiness or ModelRuntimeReadiness(
             command_runner=command_runner, urlopen=urlopen,
@@ -203,6 +213,7 @@ class ModelRuntimeController:
             operation_id=operation_id,
             container_id=container_id,
             labels=runtime_labels(task_id, operation_id, plan),
+            local_log_path=str(result.data.get("log_path", "")) if local_mode else "",
         )
         writer.write_startup_evidence(startup)
         if startup.status != "ready":

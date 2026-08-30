@@ -269,6 +269,7 @@ class RunnerModule:
         docker_network="bridge",
         docker_security_options=None,
         operation_id="",
+        process_launcher=None,
     ) -> StageResult:
         """Start or plan the managed vLLM inference container (Document B).
 
@@ -278,6 +279,17 @@ class RunnerModule:
         that is the Startup Readiness Gate (Document B Phase B5).
         """
         from auto_harness.runtime import DockerSandboxBackend
+
+        if getattr(runtime_plan, "deployment_mode", "") == "local_vllm":
+            return self._run_local_model_runtime(
+                run_dir=run_dir,
+                task_id=task_id,
+                runtime_plan=runtime_plan,
+                bundle=bundle,
+                execute=execute,
+                process_launcher=process_launcher,
+                operation_id=operation_id,
+            )
 
         security = dict(docker_security_options or {})
         labels = {
@@ -372,6 +384,69 @@ class RunnerModule:
                 "stderr": proc.stderr or "",
             }
         return _run
+
+    def _run_local_model_runtime(
+        self,
+        *,
+        run_dir,
+        task_id,
+        runtime_plan,
+        bundle,
+        execute=False,
+        process_launcher=None,
+        operation_id="",
+    ) -> StageResult:
+        """Start or plan the docker-less host-process vLLM runtime (local_vllm).
+
+        The process is launched detached with its output appended to a run
+        log; liveness, readiness and inference verification are handled by
+        the downstream gates. No container fields are produced.
+        """
+        log_path = Path(run_dir) / "logs" / "model_runtime_local.log"
+        data = {
+            "deployment_mode": "local_vllm",
+            "runtime_plan_hash": runtime_plan.plan_hash,
+            "model_identity": runtime_plan.model_identity,
+            "model_host_path": runtime_plan.model_host_path,
+            "gpu_indexes": list(runtime_plan.gpu_indexes),
+            "expected_port": runtime_plan.expected_port,
+            "command": list(runtime_plan.command),
+            "log_path": str(log_path),
+            "security_profile": runtime_plan.security_profile,
+            "operation_id": operation_id,
+            "executed": False,
+            "pid": "",
+            "ready": False,  # readiness is decided by the Startup Readiness Gate
+        }
+        if not execute:
+            return StageResult(
+                "runner", "passed", "dry-run local model runtime plan", data,
+            )
+        launcher = process_launcher or self._default_process_launcher()
+        pid = launcher(runtime_plan.command, log_path)
+        if not pid:
+            return StageResult(
+                "runner", "failed", "local model runtime did not start", data,
+                error="process_start_failed",
+            )
+        data["pid"] = str(int(pid))
+        data["executed"] = True
+        return StageResult(
+            "runner", "passed", "local model runtime process started", data,
+        )
+
+    @staticmethod
+    def _default_process_launcher():
+        def _launch(cmd, log_path):
+            log = Path(log_path)
+            log.parent.mkdir(parents=True, exist_ok=True)
+            with log.open("ab") as handle:
+                proc = subprocess.Popen(
+                    cmd, stdout=handle, stderr=subprocess.STDOUT,
+                    start_new_session=True,
+                )
+            return proc.pid
+        return _launch
 
     @staticmethod
     def _verify_model_runtime_container(runner, container_id, labels, runtime_plan) -> bool:

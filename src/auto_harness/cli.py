@@ -71,7 +71,13 @@ def _add_model_inference_arguments(parser) -> None:
         help="enable the model preparation and inference deployment chain",
     )
     parser.add_argument("--model-runtime", choices=["vllm"], default=None)
+    parser.add_argument("--model-runtime-mode", choices=["managed_vllm", "local_vllm"], default=None)
     parser.add_argument("--model-runtime-image", default=None)
+    parser.add_argument(
+        "--model-runtime-local-python",
+        default=None,
+        help="python executable for model_runtime_mode=local_vllm (venv interpreter with vLLM installed)",
+    )
     parser.add_argument("--model-max-model-len", type=_positive_int_arg, default=None)
     parser.add_argument(
         "--model-gpu-memory-utilization",
@@ -384,8 +390,12 @@ def _apply_cli_overrides(config: HarnessConfig, args) -> None:
         config.model_inference_enabled = True
     if getattr(args, "model_runtime", None):
         config.model_runtime = args.model_runtime
+    if getattr(args, "model_runtime_mode", None):
+        config.model_runtime_mode = args.model_runtime_mode
     if getattr(args, "model_runtime_image", None):
         config.model_runtime_image = args.model_runtime_image
+    if getattr(args, "model_runtime_local_python", None):
+        config.model_runtime_local_python = args.model_runtime_local_python
     if getattr(args, "model_max_model_len", None) is not None:
         config.model_runtime_max_model_len = args.model_max_model_len
     if getattr(args, "model_gpu_memory_utilization", None) is not None:
