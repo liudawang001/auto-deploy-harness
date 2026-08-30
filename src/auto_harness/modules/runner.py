@@ -17,7 +17,7 @@ from auto_harness.utils.commands import is_allowed_command
 from auto_harness.utils.ports import is_port_open
 from auto_harness.utils.files import short_hash
 from auto_harness.command_auth import CommandAuthorizationEngine, CommandRegistry
-from auto_harness.command_auth.schemas import sandbox_policy_fingerprint
+from auto_harness.command_auth.schemas import canonical_hash, sandbox_policy_fingerprint
 
 
 class RunnerModule:
@@ -392,14 +392,38 @@ class RunnerModule:
         allow_approval_preview=False,
     ):
         registry_data = analysis.get("command_registry")
+        scope = str(analysis.get("command_registry_scope") or "")
         if not isinstance(registry_data, dict) or not registry_data:
-            return dict(candidates[0]), []
+            fallback = self._first_unattempted_candidate(
+                candidates, analysis, execution_backend, sandbox_fingerprint,
+            )
+            return (dict(fallback), []) if fallback is not None else (None, [])
         registry = CommandRegistry.from_dict(registry_data)
+        # A registry compiled from an explicit deployment contract is
+        # authoritative: undeclared commands are rejected.  A discovery-mode
+        # registry is additive evidence; undeclared candidates keep the
+        # pre-existing deterministic path instead of being rejected.
+        discovery_mode = scope == "discovery"
         by_id = {item.candidate_id: item for item in registry.candidates}
         engine = CommandAuthorizationEngine()
         attempts = []
+        attempted_keys = {
+            str(item) for item in (analysis.get("_attempted_command_keys") or [])
+        }
+        undeclared_fallback = None
+        pending_approval = False
         for raw in candidates[:max(1, int(max_candidate_attempts))]:
             candidate = dict(raw)
+            key = self._attempt_key(
+                analysis, candidate, execution_backend, sandbox_fingerprint,
+            )
+            if key in attempted_keys:
+                attempts.append({
+                    "candidate_id": candidate.get("command_candidate_id", ""),
+                    "verdict": "candidate_rejected",
+                    "reason_code": "duplicate_attempt_key_skipped",
+                })
+                continue
             declared = by_id.get(candidate.get("command_candidate_id", ""))
             if declared is None:
                 declared = registry.candidate_for_argv(candidate.get("cmd", []))
@@ -409,6 +433,8 @@ class RunnerModule:
                     "verdict": "candidate_rejected",
                     "reason_code": "repository_command_not_declared",
                 })
+                if discovery_mode and undeclared_fallback is None:
+                    undeclared_fallback = candidate
                 continue
             approval = analysis.get("command_approval") or None
             if (
@@ -446,7 +472,36 @@ class RunnerModule:
                 candidate["_requires_command_approval"] = decision.required_approval
                 candidate["_authorization_operation_id"] = decision.operation_id
                 return candidate, attempts
+            if decision.verdict == "approval_required":
+                pending_approval = True
+        if discovery_mode and undeclared_fallback is not None and not pending_approval:
+            return undeclared_fallback, attempts
         return None, attempts
+
+    @staticmethod
+    def _attempt_key(analysis, candidate, execution_backend, sandbox_fingerprint):
+        return canonical_hash({
+            "repository_fingerprint": str(analysis.get("repository_fingerprint") or ""),
+            "argv": list(candidate.get("cmd") or []),
+            "backend": str(candidate.get("required_backend") or execution_backend),
+            "sandbox": str(sandbox_fingerprint),
+        })
+
+    @staticmethod
+    def _first_unattempted_candidate(candidates, analysis, execution_backend, sandbox_fingerprint):
+        attempted_keys = {
+            str(item) for item in (analysis.get("_attempted_command_keys") or [])
+        }
+        for raw in candidates:
+            key = canonical_hash({
+                "repository_fingerprint": str(analysis.get("repository_fingerprint") or ""),
+                "argv": list(raw.get("cmd") or []),
+                "backend": str(raw.get("required_backend") or execution_backend),
+                "sandbox": str(sandbox_fingerprint),
+            })
+            if key not in attempted_keys:
+                return raw
+        return None
 
     @staticmethod
     def _approval_consumption_path(run_dir, operation_id):
@@ -490,14 +545,36 @@ class RunnerModule:
         ), len(candidates) - 1)
         remaining = candidates[selected_index + 1:]
         remaining_budget = max(0, int(max_candidate_attempts) - len(attempts))
+        diagnosis = (terminal_data or {}).get("diagnosis") or {}
+        failure_signature = "%s:%s" % (
+            reason,
+            str(diagnosis.get("category") or diagnosis.get("error_class") or ""),
+        )
+        registry_scoped = bool(
+            isinstance(analysis.get("command_registry"), dict)
+            and analysis.get("command_registry")
+        )
+        authorization_network = "none" if registry_scoped else docker_network
+        attempt_key = self._attempt_key(
+            analysis, candidate, execution_backend, sandbox_policy_fingerprint(
+                phase="runtime", image=docker_image, network=authorization_network,
+                gpus=docker_gpus, model_cache_dir=docker_model_cache_dir,
+                security_options=docker_security_options,
+            ),
+        )
         fallback_record = {
             "candidate_id": candidate.get("command_candidate_id") or candidate.get("id", ""),
             "reason": reason,
+            "failure_signature": failure_signature,
+            "attempt_key": attempt_key,
         }
         self._write_fallback(run_dir, fallback_record)
         if remaining and remaining_budget:
             next_analysis = dict(analysis)
             next_analysis["run_candidates"] = remaining
+            next_analysis["_attempted_command_keys"] = list(
+                analysis.get("_attempted_command_keys") or []
+            ) + [attempt_key]
             result = self.run(
                 repo_dir, next_analysis, execute=execute,
                 wait_seconds=wait_seconds, allowed_commands=allowed_commands,

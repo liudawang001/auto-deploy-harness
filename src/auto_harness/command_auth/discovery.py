@@ -1,7 +1,7 @@
 """Build deterministic command registry from repository evidence."""
 
 from pathlib import Path
-from typing import List
+from typing import Dict, List
 
 from auto_harness.command_auth.adapters import (
     discover_make,
@@ -24,6 +24,7 @@ class CommandDiscoveryService:
         documented = readme_commands(repo_dir, file_tree)
         evidence = []
         candidates = []
+        rejections: List[Dict] = []
         for adapter in (
             discover_python_cli,
             discover_node,
@@ -36,6 +37,15 @@ class CommandDiscoveryService:
             evidence.extend(found_evidence)
             candidates.extend(found_candidates)
 
+        from auto_harness.command_auth.adapters.entrypoint import discover_python_services
+
+        found_evidence, found_candidates, entrypoint_rejections = discover_python_services(
+            repo_dir, file_tree, documented, repository_fingerprint
+        )
+        evidence.extend(found_evidence)
+        candidates.extend(found_candidates)
+        rejections.extend(entrypoint_rejections)
+
         unique_evidence = {item.evidence_id: item for item in evidence}
         unique_candidates = {item.candidate_id: item for item in candidates}
         return CommandRegistry(
@@ -45,4 +55,7 @@ class CommandDiscoveryService:
                 unique_candidates.values(),
                 key=lambda item: (-item.score, item.candidate_id),
             ),
+            # Rejections are auditable discovery facts, not executable
+            # evidence; they ride on the registry without enabling anything.
+            discovery_rejections=rejections,
         )

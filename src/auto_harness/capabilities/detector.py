@@ -14,6 +14,7 @@ PACKAGE_CAPABILITIES: Dict[str, Tuple[str, str]] = {
     "streamlit": ("ui_frameworks", "streamlit"),
     "fastapi": ("service_frameworks", "fastapi"),
     "flask": ("service_frameworks", "flask"),
+    "django": ("service_frameworks", "django"),
     "torch": ("ml_libraries", "torch"),
     "pytorch": ("ml_libraries", "torch"),
     "transformers": ("ml_libraries", "transformers"),

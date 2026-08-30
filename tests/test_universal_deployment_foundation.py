@@ -459,6 +459,7 @@ def test_builtin_adapter_registry_has_stable_priority_order():
         "builtin.streamlit",
         "builtin.fastapi",
         "builtin.flask",
+        "builtin.django",
         "builtin.stdlib_http",
         "builtin.vllm",
         "builtin.openai_compatible",

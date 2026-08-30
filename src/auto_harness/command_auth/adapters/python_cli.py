@@ -144,6 +144,7 @@ def discover_python_cli(
                 declared_value=target,
             )
             evidence.append(declaration)
+            emitted = False
             for documented in readme:
                 argv = documented["argv"]
                 if argv and argv[0] == name:
@@ -180,6 +181,7 @@ def discover_python_cli(
                     score_reasons=["project metadata declaration", "README command reference"],
                     fallback_group=phase,
                 ))
+                emitted = True
                 if phase == "run":
                     variant = _source_frontend_variant(
                         repo_dir,
@@ -218,4 +220,42 @@ def discover_python_cli(
                             ],
                             fallback_group=phase,
                         ))
+            if emitted:
+                continue
+            # Phase B1: a declared console script whose target module exists
+            # in the repository is a machine-readable entry declaration even
+            # without a README reference.  The executable still has to be
+            # produced by the authorized install plan inside the owned env.
+            module = target.split(":", 1)[0]
+            module_suffix = module.replace(".", "/") + ".py"
+            target_path = next(
+                (path for path in file_tree if path.endswith(module_suffix)),
+                "",
+            )
+            if not target_path:
+                continue
+            target_evidence = build_evidence(
+                repo_dir,
+                "repository_file",
+                target_path,
+                repository_fingerprint,
+                declaration_key=name,
+                declared_value=target,
+            )
+            evidence.append(target_evidence)
+            candidates.append(CommandCandidate.build(
+                phase="run",
+                argv=[".venv/bin/%s" % name],
+                source_kind=source_type,
+                evidence_ids=[declaration.evidence_id, target_evidence.evidence_id],
+                declared_executable=name,
+                environment_binding={"kind": "owned_python_env", "relative_prefix": ".venv"},
+                required_backend="docker",
+                network_profile="none",
+                filesystem_profile="runtime_read_only",
+                risk_level="medium",
+                score=0.82,
+                score_reasons=["project metadata declaration", "target module present in repository"],
+                fallback_group="run",
+            ))
     return evidence, candidates

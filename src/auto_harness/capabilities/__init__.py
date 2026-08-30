@@ -4,6 +4,7 @@ from auto_harness.capabilities.assessor import DeployabilityAssessor
 from auto_harness.capabilities.dependency_parser import DependencyManifestParser
 from auto_harness.capabilities.detector import CapabilityDetector
 from auto_harness.capabilities.legacy_compiler import LegacyAnalysisCompiler
+from auto_harness.capabilities.scoring import order_run_candidates, score_run_candidates
 from auto_harness.capabilities.schemas import (
     CapabilityEvidence,
     DependencyManifest,
@@ -21,5 +22,7 @@ __all__ = [
     "DeployabilityAssessor",
     "DeploymentCandidate",
     "LegacyAnalysisCompiler",
+    "order_run_candidates",
+    "score_run_candidates",
     "ProjectCapabilities",
 ]

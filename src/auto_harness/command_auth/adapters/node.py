@@ -5,6 +5,7 @@ import re
 from pathlib import Path
 
 from auto_harness.command_auth.adapters.common import read_text
+from auto_harness.command_auth.adapters.entrypoint import source_listen_port
 from auto_harness.command_auth.evidence import build_evidence
 from auto_harness.command_auth.schemas import CommandCandidate
 
@@ -175,4 +176,50 @@ def discover_node(repo_dir, file_tree, readme, repository_fingerprint):
                 score_reasons=["declared package script", "matching lockfile", "README command reference"],
                 fallback_group="run",
             ))
+
+        # Phase B1: scripts declared in package.json bind to a lockfile even
+        # without a README reference.  Only start/serve qualify; `dev` is not
+        # a production first choice.  The script body stays untrusted
+        # repository code and still runs under the Docker backend.
+        from auto_harness.command_auth.adapters.entrypoint import lockfile_path_for
+
+        for script in ("start", "serve"):
+            if script not in scripts or not str(scripts[script]).strip():
+                continue
+            for manager in ("npm", "pnpm", "yarn"):
+                lock_path = lockfile_path_for(manager, directory, file_set)
+                if not lock_path:
+                    continue
+                if manager == "yarn":
+                    argv = ["yarn", "--cwd", directory, "run", script]
+                else:
+                    argv = [manager, "--dir" if manager == "pnpm" else "--prefix", directory, "run", script]
+                if any(item.argv == argv for item in candidates):
+                    continue
+                port = source_listen_port(repo_dir, file_tree, str(scripts[script]))
+                declaration = build_evidence(
+                    repo_dir, "package_json_script", package_path,
+                    repository_fingerprint, declaration_key="scripts.%s" % script,
+                    declared_value=str(scripts[script]),
+                )
+                lock = build_evidence(
+                    repo_dir, "lockfile", lock_path, repository_fingerprint,
+                    declaration_key=manager,
+                )
+                evidence.extend([declaration, lock])
+                reasons = ["declared package script", "matching lockfile"]
+                candidates.append(CommandCandidate.build(
+                    phase="run", argv=argv, cwd=directory,
+                    source_kind="node_run_script",
+                    expected_port=port,
+                    evidence_ids=[declaration.evidence_id, lock.evidence_id],
+                    declared_executable=manager,
+                    environment_binding={"kind": "package_manager", "manager": manager, "lockfile": lock_path},
+                    required_backend="docker", network_profile="none",
+                    filesystem_profile="runtime_read_only", risk_level="medium",
+                    score=0.87,
+                    score_reasons=reasons,
+                    fallback_group="run",
+                ))
+                break
     return evidence, candidates

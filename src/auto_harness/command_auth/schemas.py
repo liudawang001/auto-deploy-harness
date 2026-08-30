@@ -78,6 +78,7 @@ class CommandCandidate:
     score: float = 0.0
     score_reasons: List[str] = field(default_factory=list)
     fallback_group: str = "run"
+    expected_port: int = 0
 
     @classmethod
     def build(cls, *, phase: str, argv: List[str], source_kind: str, **values):
@@ -133,14 +134,18 @@ class CommandRegistry:
     evidence: List[CommandEvidence] = field(default_factory=list)
     candidates: List[CommandCandidate] = field(default_factory=list)
     schema_version: int = 1
+    discovery_rejections: List[Dict] = field(default_factory=list)
 
     def to_dict(self) -> Dict:
-        return {
+        payload = {
             "schema_version": self.schema_version,
             "repository_fingerprint": self.repository_fingerprint,
             "evidence": [item.to_dict() for item in self.evidence],
             "candidates": [item.to_dict() for item in self.candidates],
         }
+        if self.discovery_rejections:
+            payload["discovery_rejections"] = list(self.discovery_rejections)
+        return payload
 
     @classmethod
     def from_dict(cls, value: Dict):
@@ -156,6 +161,10 @@ class CommandRegistry:
             candidates=[
                 CommandCandidate.from_dict(item)
                 for item in value.get("candidates", [])
+                if isinstance(item, dict)
+            ],
+            discovery_rejections=[
+                dict(item) for item in value.get("discovery_rejections", [])
                 if isinstance(item, dict)
             ],
         )

@@ -277,6 +277,58 @@ class OpenAICompatibleAdapter(BuiltinAdapter):
         return _openai_verify(self, detection)
 
 
+class DjangoAdapter(BuiltinAdapter):
+    adapter_id = "builtin.django"
+    priority = 82
+    capability_category = "service_frameworks"
+    capability_value = "django"
+    legacy_label = "django"
+
+    def propose_run_candidates(self, context, detection):
+        if not detection.matched:
+            return []
+        from auto_harness.command_auth.adapters.common import readme_commands
+        from auto_harness.command_auth.adapters.entrypoint import discover_python_services
+
+        found_evidence, found_candidates, _ = discover_python_services(
+            Path(context.repo_dir),
+            list(context.files),
+            readme_commands(Path(context.repo_dir), list(context.files)),
+            "",
+        )
+        return [
+            RunProposal(
+                adapter_id=self.adapter_id,
+                argv=list(item.argv),
+                expected_port=int(getattr(item, "expected_port", 0) or 0),
+                confidence=0.85,
+                evidence_ids=list(detection.evidence_ids),
+                reasons=["Django service entrypoint %s" % (item.argv[-1] if item.argv else item.source_kind)],
+            )
+            for item in found_candidates
+            if item.source_kind in {"django_manage", "asgi_wsgi_entrypoint", "procfile_web"}
+        ]
+
+    def propose_verify_candidates(self, context, detection):
+        if not detection.matched:
+            return []
+        return [VerifyProposal(
+            adapter_id=self.adapter_id,
+            protocol="http",
+            confidence=detection.confidence,
+            evidence_ids=list(detection.evidence_ids),
+            reasons=["Django HTTP service"],
+            verify_hint={
+                "service_type": "http",
+                "expected_output": "trace_echo",
+                "request": {
+                    "method": "GET",
+                    "path": "/?_auto_harness_trace={{trace_id}}",
+                },
+            },
+        )]
+
+
 class NodePackageAdapter(BuiltinAdapter):
     adapter_id = "builtin.node_package"
     priority = 70
@@ -294,6 +346,44 @@ class NodePackageAdapter(BuiltinAdapter):
             evidence_ids=list(detection.evidence_ids),
             reasons=["package.json Node environment"],
         )]
+
+    def propose_run_candidates(self, context, detection):
+        if not detection.matched:
+            return []
+        from auto_harness.command_auth.adapters.entrypoint import (
+            declared_node_run_scripts,
+            source_listen_port,
+        )
+
+        try:
+            import json
+
+            scripts = {}
+            for item in declared_node_run_scripts(Path(context.repo_dir), list(context.files)):
+                try:
+                    package = json.loads(
+                        (Path(context.repo_dir) / item["package_path"]).read_text(
+                            encoding="utf-8", errors="ignore",
+                        )
+                    )
+                except (OSError, TypeError, ValueError):
+                    package = {}
+                raw_script = ((package.get("scripts") or {}).get(item["script"]) or "")
+                port = source_listen_port(Path(context.repo_dir), list(context.files), raw_script)
+                scripts.setdefault(
+                    tuple(item["argv"]),
+                    RunProposal(
+                        adapter_id=self.adapter_id,
+                        argv=list(item["argv"]),
+                        expected_port=port,
+                        confidence=0.7,
+                        evidence_ids=list(detection.evidence_ids),
+                        reasons=["declared package script %s with matching lockfile" % item["script"]],
+                    ),
+                )
+            return list(scripts.values())
+        except OSError:
+            return []
 
 
 def _generic_api_verify(adapter, detection, protocol):
@@ -367,6 +457,7 @@ BUILTIN_ADAPTERS = (
     StreamlitAdapter,
     FastAPIAdapter,
     FlaskAdapter,
+    DjangoAdapter,
     StdlibHttpAdapter,
     VllmAdapter,
     OpenAICompatibleAdapter,

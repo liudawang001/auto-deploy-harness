@@ -9,8 +9,11 @@ from auto_harness.capabilities import (
     CapabilityDetector,
     DeployabilityAssessor,
     LegacyAnalysisCompiler,
+    order_run_candidates,
+    score_run_candidates,
 )
 from auto_harness.agent_runtime.repository_inventory import RepositoryInventoryBuilder
+from auto_harness.command_auth.adapters.entrypoint import ENTRYPOINT_SOURCE_KINDS
 from auto_harness.command_auth.discovery import CommandDiscoveryService
 from auto_harness.deployment_contract import (
     DeploymentContractCompiler,
@@ -97,6 +100,28 @@ class ProjectAnalyzer:
             adapter_proposals["environment"],
             adapter_proposals["verify"],
         )
+        # Phase B1: deterministic repository evidence discovery.  Candidate
+        # merge is additive; every command still goes through the unified
+        # authorization engine before it can execute.  The discovery registry
+        # is only attached when it contributes a new entrypoint candidate so
+        # legacy-only projects keep their existing deterministic path.
+        discovery_registry = CommandDiscoveryService().discover(
+            repo_dir,
+            files,
+            repository_inventory["repository_fingerprint"],
+        )
+        run_candidates, entrypoint_registry_attached = self._merge_entrypoint_candidates(
+            run_candidates, discovery_registry,
+        )
+        score_run_candidates(
+            run_candidates,
+            detections=adapter_detections,
+            registry=discovery_registry,
+        )
+        run_candidates = order_run_candidates(run_candidates)
+        entrypoint_discovery = self._entrypoint_discovery_summary(
+            run_candidates, discovery_registry,
+        )
         data: Dict = {
             "files": files[:200],
             "frameworks": frameworks,
@@ -120,6 +145,7 @@ class ProjectAnalyzer:
             "repository_fingerprint": repository_inventory[
                 "repository_fingerprint"
             ],
+            "entrypoint_discovery": entrypoint_discovery,
             "adapter_detections": [
                 item.to_dict() for item in adapter_detections if item.matched
             ],
@@ -162,16 +188,11 @@ class ProjectAnalyzer:
         )
         data["deployment_contract"] = self._contract_snapshot(contract_result)
         if contract_result.get("valid"):
-            registry = CommandDiscoveryService().discover(
-                repo_dir,
-                files,
-                repository_inventory["repository_fingerprint"],
-            )
             registry, deployment_candidate = (
                 DeploymentContractCompiler().compile_registry(
                     repo_dir,
                     contract_result["contract"],
-                    registry,
+                    discovery_registry,
                 )
             )
             data = DeploymentContractCompiler().compile_analysis(
@@ -180,6 +201,7 @@ class ProjectAnalyzer:
                 registry,
                 deployment_candidate,
             )
+            data["command_registry_scope"] = "contract"
             data["deployability"] = DeployabilityAssessor().assess(
                 run_candidates=data["run_candidates"],
                 verify_hint=data["verify_hint"],
@@ -195,6 +217,9 @@ class ProjectAnalyzer:
             }
         if self.stage_context:
             data["control_context"] = self.stage_context
+        if entrypoint_registry_attached:
+            data["command_registry"] = discovery_registry.to_dict()
+            data["command_registry_scope"] = "discovery"
         agent_advice = self._agent_advice(repo_dir, data)
         if agent_advice:
             data["agent_advice"] = agent_advice
@@ -225,6 +250,69 @@ class ProjectAnalyzer:
         if result.get("valid") and contract is not None:
             snapshot.update(contract.to_dict())
         return snapshot
+
+    @staticmethod
+    def _entrypoint_discovery_summary(run_candidates: List[Dict], registry) -> Dict:
+        source_kinds = sorted({
+            str(item.get("source_kind"))
+            for item in run_candidates
+            if item.get("source_kind")
+        })
+        return {
+            "deterministic_candidates": len(run_candidates),
+            "discovery_source_kinds": source_kinds,
+            "registry_candidates": len(registry.candidates),
+            "rejections": list(registry.discovery_rejections or []),
+            "dockerfile_evidence": [
+                item.to_dict() for item in registry.evidence
+                if item.source_type in {"dockerfile_entrypoint", "dockerfile_expose"}
+            ],
+        }
+
+    @staticmethod
+    def _merge_entrypoint_candidates(run_candidates: List[Dict], registry):
+        """Merge Phase B1 discovery candidates into the deterministic list.
+
+        Only evidence-bound entrypoint source kinds join the deterministic
+        pipeline; authorization still decides what may execute.  A colliding
+        legacy candidate is enriched with the registry binding so it is
+        authorized through the same evidence-bound path.  Returns the merged
+        list plus whether the discovery registry must be attached: enriching
+        a candidate with ``command_candidate_id`` without the registry would
+        bypass authorization, so the two always go together.
+        """
+        merged = list(run_candidates)
+        by_argv = {tuple(item.get("cmd") or []): item for item in merged}
+        added = 0
+        enriched = 0
+        for item in registry.candidates:
+            if item.phase != "run" or item.source_kind not in ENTRYPOINT_SOURCE_KINDS:
+                continue
+            binding = {
+                "source_kind": item.source_kind,
+                "command_candidate_id": item.candidate_id,
+                "selected_by": "repository_evidence",
+                "cwd": item.cwd,
+            }
+            existing = by_argv.get(tuple(item.argv))
+            if existing is not None:
+                if existing.get("command_candidate_id"):
+                    continue
+                existing.update(binding)
+                enriched += 1
+                continue
+            by_argv[tuple(item.argv)] = {
+                "cmd": list(item.argv),
+                "expected_port": int(getattr(item, "expected_port", 0) or 0),
+                "confidence": float(item.score or 0),
+                "score": float(item.score or 0),
+                "source": "repository_evidence",
+                "score_reasons": list(item.score_reasons or []),
+                **binding,
+            }
+            merged.append(by_argv[tuple(item.argv)])
+            added += 1
+        return merged, bool(added or enriched)
 
     def _collect_files(self, repo_dir: Path) -> List[str]:
         result: List[str] = []

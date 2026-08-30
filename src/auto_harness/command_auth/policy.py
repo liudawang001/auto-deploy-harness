@@ -112,6 +112,7 @@ class CommandAuthorizationEngine:
 
         needs_approval = candidate.source_kind in {
             "make_target", "repository_script", "python_entrypoint", "manifest_command",
+            "llm_candidate_request",
         }
         if needs_approval:
             approval_reason = approval_valid(
@@ -124,6 +125,7 @@ class CommandAuthorizationEngine:
                         "make_target_requires_approval" if candidate.source_kind == "make_target"
                         else "python_entrypoint_requires_approval" if candidate.source_kind == "python_entrypoint"
                         else "manifest_command_requires_approval" if candidate.source_kind == "manifest_command"
+                        else "llm_candidate_request_requires_approval" if candidate.source_kind == "llm_candidate_request"
                         else "repository_script_requires_approval"
                     ),
                     reasons=[approval_reason], required_approval=True, **base,
@@ -133,6 +135,10 @@ class CommandAuthorizationEngine:
             else "locked_source_build" if candidate.source_kind == "source_build"
             else "locked_dependency_install" if candidate.source_kind == "node_install"
             else "declared_cli_bound_to_owned_env" if candidate.source_kind in {"pep621_script", "poetry_script"}
+            else "declared_node_run_script" if candidate.source_kind == "node_run_script"
+            else "django_manage_entrypoint" if candidate.source_kind == "django_manage"
+            else "declared_asgi_wsgi_entrypoint" if candidate.source_kind == "asgi_wsgi_entrypoint"
+            else "declared_procfile_web" if candidate.source_kind == "procfile_web"
             else "approved_repository_command"
         )
         return CommandDecision(
@@ -189,6 +195,9 @@ class CommandAuthorizationEngine:
     def _evidence_reason(candidate, evidence_types):
         if candidate.source_kind not in {
             "manifest_command", "node_install", "python_entrypoint", "source_build",
+            "pep621_script", "poetry_script", "package_json_script", "node_run_script",
+            "django_manage", "asgi_wsgi_entrypoint", "procfile_web",
+            "llm_candidate_request",
         } and "readme_reference" not in evidence_types:
             return "readme_reference_missing"
         if candidate.source_kind == "manifest_command" and "manifest_command" not in evidence_types:
@@ -201,6 +210,14 @@ class CommandAuthorizationEngine:
             return "project_cli_declaration_missing"
         if candidate.source_kind == "package_json_script" and not {"package_json_script", "lockfile"}.issubset(evidence_types):
             return "node_script_or_lockfile_missing"
+        if candidate.source_kind == "node_run_script" and not {"package_json_script", "lockfile"}.issubset(evidence_types):
+            return "node_script_or_lockfile_missing"
+        if candidate.source_kind == "django_manage" and not {"django_manage", "python_dependency"}.issubset(evidence_types):
+            return "django_entrypoint_evidence_missing"
+        if candidate.source_kind == "asgi_wsgi_entrypoint" and not {"asgi_wsgi_module", "python_dependency"}.issubset(evidence_types):
+            return "asgi_wsgi_evidence_missing"
+        if candidate.source_kind == "procfile_web" and not {"procfile_web", "repository_file"}.issubset(evidence_types):
+            return "procfile_corroboration_missing"
         if candidate.source_kind == "source_build" and not {
             "package_json_script", "lockfile", "make_reference",
         }.issubset(evidence_types):
@@ -211,4 +228,10 @@ class CommandAuthorizationEngine:
             return "repository_script_missing"
         if candidate.source_kind == "python_entrypoint" and "repository_script" not in evidence_types:
             return "repository_script_missing"
+        if candidate.source_kind == "llm_candidate_request" and not (
+            evidence_types & {"readme_reference", "python_dependency", "package_json_script",
+                              "pep621_script", "poetry_script", "repository_file", "django_manage",
+                              "asgi_wsgi_module", "procfile_web"}
+        ):
+            return "llm_candidate_grounded_evidence_missing"
         return ""
