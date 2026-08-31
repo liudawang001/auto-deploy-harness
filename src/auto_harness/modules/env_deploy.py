@@ -62,6 +62,7 @@ class EnvDeployModule:
         task_id: str = "",
         operation_id: str = "",
         operation_prepared: bool = False,
+        runner_uses_docker: bool = True,
     ) -> StageResult:
         plan: List[List[str]] = analysis.get("install_plan", [])
         env_solution = analysis.get("env_solution") if isinstance(analysis.get("env_solution"), dict) else {}
@@ -83,14 +84,20 @@ class EnvDeployModule:
             for candidate in (command_registry.candidates if command_registry else [])
         }
         effective_backend = execution_backend
-        if any(
-            repository_commands.get(tuple(command), None)
-            and repository_commands[tuple(command)].required_backend == "docker"
-            for command in plan
-        ) or any(
-            isinstance(candidate, dict)
-            and candidate.get("required_backend") == "docker"
-            for candidate in analysis.get("run_candidates", [])
+        # When the model runtime owns the runner stage the repository app is
+        # never executed, so a docker-requiring run candidate no longer
+        # forces the install environment into a docker sandbox.
+        if runner_uses_docker and (
+            any(
+                repository_commands.get(tuple(command), None)
+                and repository_commands[tuple(command)].required_backend == "docker"
+                for command in plan
+            )
+            or any(
+                isinstance(candidate, dict)
+                and candidate.get("required_backend") == "docker"
+                for candidate in analysis.get("run_candidates", [])
+            )
         ):
             effective_backend = "docker"
         effective_plan, sandbox = self._effective_plan(

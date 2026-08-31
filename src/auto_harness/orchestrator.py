@@ -722,6 +722,7 @@ class TaskRunner:
                 docker_gpus=self.config.docker_gpus,
                 docker_model_cache_dir=self._docker_model_cache_dir(),
                 docker_security_options=self._docker_security_options(),
+                runner_uses_docker=not bool(self._model_runtime_controller()),
                 config=self.config,
                 run_dir=run_dir,
                 task_id=task_id,

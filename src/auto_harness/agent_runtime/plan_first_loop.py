@@ -164,6 +164,7 @@ Important:
 - install_commands are untrusted proposals.
 - run.candidates are untrusted proposals.
 - verify.request must include {{trace_id}}.
+- Every grounding entry MUST include all three required fields: file, claim, reason. A grounding entry missing any of them invalidates the entire plan.
 - Explain grounding using file paths from selected_files.
 - If skill_context is provided, use selected_skills as advisory guidance for plan generation."""
 
@@ -338,7 +339,7 @@ class LLMDeploymentPlanner:
         )
         self.call_executor = call_executor or LLMCallExecutor(config=config)
 
-    def plan(self, snapshot: Dict, mode: str = "planner", skill_context: Optional[Dict] = None) -> Any:
+    def plan(self, snapshot: Dict, mode: str = "planner", skill_context: Optional[Dict] = None, parse_repair_error: str = "") -> Any:
         """Ask LLM to generate a deployment plan from project snapshot."""
         skill_budget = self._context_budget("agent_context_skill_budget_tokens", 2000)
         memory_budget = self._context_budget("agent_context_memory_budget_tokens", 2000)
@@ -353,6 +354,7 @@ class LLMDeploymentPlanner:
         original = self._plan_messages(
             prompt_snapshot,
             bounded_skill_context,
+            parse_repair_error=parse_repair_error,
         )
         candidate_snapshot = compact_project_snapshot(
             snapshot,
@@ -366,6 +368,7 @@ class LLMDeploymentPlanner:
         candidate = self._plan_messages(
             candidate_snapshot,
             candidate_skill_context,
+            parse_repair_error=parse_repair_error,
         )
         retry_snapshot = compact_project_snapshot(
             snapshot,
@@ -380,6 +383,7 @@ class LLMDeploymentPlanner:
         retry = self._plan_messages(
             retry_snapshot,
             retry_skill_context,
+            parse_repair_error=parse_repair_error,
         )
         call = self.call_executor.execute(
             call_site="plan_first.plan",
@@ -617,11 +621,21 @@ class LLMDeploymentPlanner:
         )
         return call.provider_result
 
-    def _plan_messages(self, snapshot, skill_context):
+    def _plan_messages(self, snapshot, skill_context, parse_repair_error: str = ""):
         skill_context_section = ""
         if skill_context and skill_context.get("selected_skills"):
             skill_context_section = "Skill context:\n%s" % json.dumps(
                 skill_context, ensure_ascii=False, indent=2
+            )
+        repair_section = ""
+        if parse_repair_error:
+            repair_section = (
+                "\n\n## Schema validation failure in your previous plan\n"
+                "The validator rejected your previous plan with this error:\n%s\n"
+                "Return the corrected FULL JSON plan. Every grounding entry must "
+                "include file, claim AND reason; if you select an environment "
+                "candidate you must also provide install_commands or keep the "
+                "selection consistent with the registry." % parse_repair_error
             )
         return [
             Message(role="system", content=PLANNER_SYSTEM_PROMPT),
@@ -635,7 +649,7 @@ class LLMDeploymentPlanner:
                         DEPLOYMENT_PLAN_SCHEMA, ensure_ascii=False, indent=2
                     ),
                     skill_context_section=skill_context_section,
-                ),
+                ) + repair_section,
             ),
         ]
 
@@ -911,11 +925,30 @@ class PlanFirstDeploymentLoop:
             "context": safe_context_telemetry(getattr(raw_result, "context", {})),
         })
 
-        # 3. Parse the plan
+        # 3. Parse the plan; one bounded schema-repair round feeds the
+        #    validator error back to the LLM before failing closed.
+        parse_error = ""
         try:
             parsed_plan = self.parser.parse(raw_result.text)
-        except ValueError as exc:
-            parsed_plan = DeploymentPlan(status="invalid", summary=str(exc))
+        except ValueError as parse_exc:
+            parse_error = str(parse_exc)
+            try:
+                repair_result = self.planner.plan(
+                    snapshot,
+                    skill_context=skill_context,
+                    parse_repair_error=parse_error,
+                )
+                parsed_plan = self.parser.parse(repair_result.text)
+                artifacts.reports_dir.joinpath("llm_plan_parse_repair.json").write_text(
+                    json.dumps({
+                        "error": parse_error,
+                        "raw_repair_head": (repair_result.text or "")[:4000],
+                        "repaired": parsed_plan.status == "ok",
+                    }, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+            except Exception:
+                parsed_plan = DeploymentPlan(status="invalid", summary=parse_error)
         artifacts.write_parsed_plan(parsed_plan.to_dict())
 
         # If plan is not ok, we're done

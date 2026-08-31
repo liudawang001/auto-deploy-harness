@@ -328,6 +328,10 @@ class AgentStageExecutor:
                 and state.get("recovery_decision") in {"execute", "continue", "retry"}
                 and state.get("pending_operation_id")
             ),
+            runner_uses_docker=not (
+                getattr(self.config, "model_inference_enabled", False)
+                and self.model_runtime_controller is not None
+            ),
         )
         return StageExecutionResult(
             stage="env_deploy",
