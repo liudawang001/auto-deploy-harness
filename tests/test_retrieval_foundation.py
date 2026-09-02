@@ -47,11 +47,11 @@ def test_python_chunker_uses_symbols_and_falls_back_on_syntax_error():
 
 
 def test_repository_ingestion_redacts_secrets_and_skips_denied_files(tmp_path):
-    (tmp_path / "app.py").write_text("API_KEY=sk-abcdefghijklmnopqrstuvwxyz\ndef serve(): pass\n", encoding="utf-8")
+    (tmp_path / "app.py").write_text("API_KEY=test-placeholder-value\ndef serve(): pass\n", encoding="utf-8")
     (tmp_path / ".env").write_text("PASSWORD=super-secret", encoding="utf-8")
     documents, chunks = RetrievalIngestor().ingest_repository(tmp_path, "fp")
     assert [item.path for item in documents] == ["app.py"]
-    assert "sk-abcdefghijklmnopqrstuvwxyz" not in "".join(item.text for item in chunks)
+    assert "test-placeholder-value" not in "".join(item.text for item in chunks)
     assert "[REDACTED_SECRET]" in "".join(item.text for item in chunks)
 
 
